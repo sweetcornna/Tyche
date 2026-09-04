@@ -7,12 +7,12 @@ Tyche is a clean-room, public-ready financial-agent foundation for BTC and ETH. 
 - **Gate Spot is dry-run only.** Tyche can read public Spot data and can optionally read a production Spot account for dry-run sizing. No Spot order-mutation operation exists in this repository.
 - **Gate and Binance USDT-M testnet execution is available.** The venue-explicit module can plan and submit automatically only when an ignored local configuration selects `automatic_testnet`; Gate's original manual TTY path remains available.
 - **Production execution is unsupported.** There is no production USDT-M mutation host, credential set, or command path.
-- **Execution is one-shot.** No scheduler is included; paper and testnet cycles are initiated explicitly.
+- **Execution is fail-closed.** The local Pi cluster defaults to shadow mode and never starts a testnet executor; any testnet venue must be selected explicitly and run in its own process.
 - **Derivatives are high risk.** Testnet behavior does not establish production safety, profitability, liquidity, or protection against liquidation.
 
 ## Requirements
 
-- Node.js 20.19 or newer
+- Node.js 22.19 or newer
 - Claude Code for the included agents, skills, and workflows
 - Exact pinned CCXT dependency for credential-free multi-exchange public data
 
@@ -26,6 +26,56 @@ npm test
 npm run test:e2e
 npm run selftest
 ```
+
+## Local Pi cluster and analysis cockpit
+
+The optional safe UI lives in `apps/web` and is served by the loopback-only
+control plane after the production bundle is built:
+
+```sh
+npm run web:build
+npm run control:check
+npm run control:test
+npm start --workspace @tyche/control-plane -- --port 8788 \
+  --gate-socket /absolute/path/gate.sock \
+  --binance-socket /absolute/path/binance.sock
+```
+
+The service binds only to `127.0.0.1`, prints one one-time bootstrap token, and
+serves the built `apps/web/dist` from the same origin. The cockpit receives
+sanitized status, cycle, DAG, paper, venue, plan-summary, and bounded event
+projections. It never stores provider or exchange keys and never receives raw
+account data, private history, plans, ledgers, or fills. Testnet actions remain
+behind the fixed executor sockets, exact arm phrases, and exact plan-hash
+confirmation. See [apps/web/UPSTREAM.md](apps/web/UPSTREAM.md) for the fixed
+`xing-shuyin/pi-web-ui` reference commit and the intentionally deleted surface
+area.
+
+The runnable local cluster keeps the scheduler/control plane and the optional
+testnet executor in separate processes. The cluster service owns no exchange
+credentials, binds only to `127.0.0.1`, and uses fixed state/socket locations
+under `data/runtime/`. Start the processes in this order when deliberately
+using one testnet venue (choose Gate or Binance, never both):
+
+```sh
+# 1. Build the optional cockpit once.
+npm run web:build
+
+# 2. Optional: start exactly one independently configured executor.
+npm run executor -- start --venue gate --socket data/runtime/gate.sock --config config/tyche.local.json
+
+# 3. Start the scheduler/Pi service; shadow is the default and never executes.
+npm run cluster -- start --provider fixture --model fixture --mode shadow --config config/tyche.local.json
+```
+
+For a primary testnet run, use `--mode primary --testnet-venue gate` (or
+`binance`) only after the selected executor is independently armed. The cluster
+does one fixed-venue `plan`, then `status`, and sends a scheduled execute only
+when the executor reports armed. Shadow, unarmed, RED, ambiguous, and weekly
+dependency failures stop before execution; there is no retry or venue failover.
+The control plane's manual cycle endpoint runs one Pi/paper cycle only and can
+never trigger scheduled execution. `npm run cluster -- status` shows the
+sanitized runtime summary.
 
 The committed configuration is locked and has no invented capital limits. Edit only the ignored local configuration. Gate's existing reviewed path uses `gate.submission_mode=manual_testnet`; the automatic module requires `automatic_testnet` in the selected `gate` or `binance` block, `usdm.environment=testnet`, and positive user-supplied limits plus leverage from 1 through 3. Keep the committed file locked.
 

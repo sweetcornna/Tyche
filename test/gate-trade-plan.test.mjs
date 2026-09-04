@@ -10,6 +10,7 @@ import {
   createPlan,
   sealPlan,
   sha256Hex,
+  selectUsdmCandidates,
   staticExecutionGate,
   validateCandidate,
   validateExecutionSource,
@@ -159,6 +160,60 @@ test('multiple reductions cannot each consume the full managed quantity', () => 
   assert.equal(plan.intents.length, 1)
   assert.equal(plan.intents[0].quantity, '10')
   assert.ok(plan.skipped.some((row) => row.code === 'REDUCTION_SUPERSEDED'))
+})
+
+test('USDT-M reduction selection reports unavailable zero quantity without throwing', () => {
+  const candidate = dailySource({ candidate: {
+    position_intent: 'REDUCE_LONG',
+    stop_price: null,
+    take_profit_price: null,
+    reduce_fraction_bps: 5000
+  } }).execution_candidates[0]
+  const result = selectUsdmCandidates([candidate], {
+    product: 'usdm',
+    date: DATE,
+    isoWeek: WEEK,
+    now: NOW,
+    maxAgeSeconds: 900,
+    minimumRR: 1.5,
+    marketSnapshot: marketSnapshot(),
+    weeklyAnchor: weeklyAnchor(),
+    managedQuantities: { BTC_USDT: '0', ETH_USDT: '0' }
+  })
+  assert.deepEqual(result.selected, [])
+  assert.equal(result.rejected[0].code, 'MANAGED_QUANTITY_UNAVAILABLE')
+})
+
+test('USDT-M reduction selection distinguishes direction mismatch and matching EXIT/REDUCE paths', () => {
+  const makeCandidate = (positionIntent, signalId) => dailySource({ candidate: {
+    position_intent: positionIntent,
+    stop_price: null,
+    take_profit_price: null,
+    reduce_fraction_bps: 5000,
+    signal_id: signalId
+  } }).execution_candidates[0]
+  const options = {
+    product: 'usdm',
+    date: DATE,
+    isoWeek: WEEK,
+    now: NOW,
+    maxAgeSeconds: 900,
+    minimumRR: 1.5,
+    marketSnapshot: marketSnapshot(),
+    weeklyAnchor: weeklyAnchor(),
+    managedQuantities: { BTC_USDT: '10', ETH_USDT: '0' }
+  }
+  const mismatch = selectUsdmCandidates([makeCandidate('REDUCE_SHORT', 'fixture:btc:reduce-short')], options)
+  assert.deepEqual(mismatch.selected, [])
+  assert.equal(mismatch.rejected[0].code, 'MANAGED_DIRECTION_MISMATCH')
+
+  const matchingReduce = selectUsdmCandidates([makeCandidate('REDUCE_LONG', 'fixture:btc:reduce-long')], options)
+  assert.equal(matchingReduce.selected.length, 1)
+  assert.equal(matchingReduce.selected[0].valid.action, 'REDUCE_LONG')
+
+  const matchingExit = selectUsdmCandidates([makeCandidate('EXIT_LONG', 'fixture:btc:exit-long')], options)
+  assert.equal(matchingExit.selected.length, 1)
+  assert.equal(matchingExit.selected[0].valid.action, 'EXIT_LONG')
 })
 
 test('sealed plan hash detects every post-seal change', () => {

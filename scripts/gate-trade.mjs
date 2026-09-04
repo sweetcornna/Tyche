@@ -517,7 +517,7 @@ export function selectUsdmCandidates(candidates = [], options = {}) {
       const expectsLong = ['REDUCE_LONG', 'EXIT_LONG'].includes(row.valid.action)
       if ((quantitySign > 0 && !expectsLong) || (quantitySign < 0 && expectsLong) || quantitySign === 0) {
         reducing.splice(reducing.indexOf(row), 1)
-        rejected.push({ index: row.index, symbol: pair, signal_id: row.signal, code: quantity === 0 ? 'MANAGED_QUANTITY_UNAVAILABLE' : 'MANAGED_DIRECTION_MISMATCH' })
+        rejected.push({ index: row.index, symbol: pair, signal_id: row.signal, code: quantitySign === 0 ? 'MANAGED_QUANTITY_UNAVAILABLE' : 'MANAGED_DIRECTION_MISMATCH' })
       }
     }
     if (reducing.length) {

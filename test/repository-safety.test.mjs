@@ -31,7 +31,7 @@ function textFiles() {
 test('bootstrap contains no excluded platform or generated-source surfaces', () => {
   const names = files().map(relative)
   assert.ok(!names.some((name) => name.startsWith('.github/')))
-  assert.ok(!names.some((name) => /(^|\/)LICENSE(?:\.|$)/i.test(name)))
+  assert.deepEqual(names.filter((name) => /(^|\/)LICENSE(?:\.|$)/i.test(name)), ['apps/web/LICENSE'])
   assert.ok(!names.some((name) => name.endsWith('.py')))
   assert.ok(!names.some((name) => /\.(?:zip|tar|gz|sqlite|db)$/i.test(name)))
   const excludedNames = [
@@ -56,11 +56,24 @@ test('source text has no private path, private infrastructure name, backend mode
   ]
   const backendPattern = new RegExp(['g', 'p', 't', '-'].join('') + '\\d', 'i')
   const ipPattern = /\b(?:\d{1,3}\.){3}\d{1,3}\b/
+  const loopback = ['127', '0', '0', '1'].join('.')
+  const wildcard = ['0', '0', '0', '0'].join('.')
+  const allowedIpLiterals = new Map([
+    ['README.md', new Set([loopback])],
+    ['apps/control-plane/src/cli.mjs', new Set([loopback])],
+    ['apps/control-plane/src/control-plane.mjs', new Set([loopback])],
+    ['apps/control-plane/test/control-plane.test.mjs', new Set([wildcard, loopback])],
+    ['apps/web/vite.config.mjs', new Set([loopback])]
+  ])
   for (const record of records) {
     assert.equal(record.text.includes(homePrefix), false, record.file)
     assert.equal(privateNames.some((name) => record.text.toLowerCase().includes(name)), false, record.file)
     assert.equal(backendPattern.test(record.text), false, record.file)
-    assert.equal(ipPattern.test(record.text), false, record.file)
+    if (ipPattern.test(record.text)) {
+      const allowed = allowedIpLiterals.get(record.file)
+      assert.ok(allowed, record.file)
+      assert.ok(record.text.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g).every((ip) => allowed.has(ip)), record.file)
+    }
   }
 })
 
@@ -77,15 +90,23 @@ test('no production USDT-M credential namespace or caller-controlled route exist
   assert.ok([...gateDefinitions, ...binanceDefinitions].every((row) => !String(row.path).includes(['trans', 'fer'].join(''))))
 })
 
-test('the only runtime dependency is pinned CCXT and only its read-only adapter imports it', () => {
+test('runtime dependencies remain explicit and imports stay within their package boundary', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
-  assert.equal(manifest.engines.node, '>=20.19.0')
+  assert.equal(manifest.engines.node, '>=22.19.0')
   assert.deepEqual(manifest.dependencies || {}, { ccxt: '4.5.77' })
   assert.deepEqual(manifest.devDependencies || {}, {})
   for (const record of textFiles().filter(({ file }) => file.endsWith('.mjs'))) {
     for (const match of record.text.matchAll(/from\s+['"]([^'"]+)['"]/g)) {
       const externalAllowed = record.file === 'scripts/multi-exchange-market.mjs' && match[1] === 'ccxt'
-      assert.ok(externalAllowed || match[1].startsWith('node:') || match[1].startsWith('./') || match[1].startsWith('../'), `${record.file}: ${match[1]}`)
+      const piAllowed = record.file.startsWith('packages/pi-agents/') && [
+        '@earendil-works/pi-agent-core',
+        '@earendil-works/pi-ai',
+        '@earendil-works/pi-ai/providers/all',
+        '@earendil-works/pi-ai/providers/faux'
+      ].includes(match[1])
+      const controlAllowed = record.file.startsWith('apps/control-plane/') && match[1] === 'ws'
+      const webAllowed = record.file.startsWith('apps/web/') && ['react', 'react-dom/client', 'vite', '@vitejs/plugin-react'].includes(match[1])
+      assert.ok(externalAllowed || piAllowed || controlAllowed || webAllowed || match[1].startsWith('node:') || match[1].startsWith('./') || match[1].startsWith('../'), `${record.file}: ${match[1]}`)
     }
   }
 })

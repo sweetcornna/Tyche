@@ -233,10 +233,10 @@ test('automation doctor reports exact setup blockers without network activity', 
   const value = config()
   const account = paperLedger(value)
   const catalog = { exchange_count: 104, dependency_pin: '4.5.77' }
-  const ready = automationDoctor({ config: value, paperLedger: account, catalog, nodeVersion: '20.19.0', env: {} })
+  const ready = automationDoctor({ config: value, paperLedger: account, catalog, nodeVersion: '22.19.0', env: {} })
   assert.equal(ready.outcome, 'READY')
   assert.ok(ready.checks.every((check) => check.ok))
-  const missing = automationDoctor({ config: loadConfig(), paperLedger: null, catalog, nodeVersion: '20.18.0', env: {} })
+  const missing = automationDoctor({ config: loadConfig(), paperLedger: null, catalog, nodeVersion: '22.18.0', env: {} })
   assert.equal(missing.outcome, 'SETUP_REQUIRED')
   assert.deepEqual(missing.checks.filter((check) => !check.ok).map((check) => check.name), ['node_runtime', 'paper_configuration', 'paper_ledger'])
 })

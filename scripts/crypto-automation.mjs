@@ -107,7 +107,7 @@ export function automationDoctor(options = {}) {
   const caps = ['configured_leverage', 'risk_per_trade_bps', 'max_order_notional_usdt', 'daily_new_notional_cap_usdt', 'max_managed_notional_usdt']
   const paperConfigReady = config.gate.submission_mode === 'locked' && usdm.enabled === true && usdm.environment === 'dry-run' && caps.every((key) => Number(usdm[key]) > 0)
   const nodeParts = String(options.nodeVersion || process.versions.node).split('.').map(Number)
-  const nodeReady = nodeParts[0] > 20 || (nodeParts[0] === 20 && nodeParts[1] >= 19)
+  const nodeReady = nodeParts[0] > 22 || (nodeParts[0] === 22 && nodeParts[1] >= 19)
   const catalog = options.catalog || exchangeCatalog()
   let paperReady = false
   let paperCode = options.paperReadCode || null
@@ -121,7 +121,7 @@ export function automationDoctor(options = {}) {
     }
   } else if (!paperCode) paperCode = 'PAPER_NOT_INITIALIZED'
   const checks = [
-    { name: 'node_runtime', ok: nodeReady, detail: nodeReady ? `Node ${options.nodeVersion || process.versions.node}` : 'Node 20.19 or newer is required' },
+    { name: 'node_runtime', ok: nodeReady, detail: nodeReady ? `Node ${options.nodeVersion || process.versions.node}` : 'Node 22.19 or newer is required' },
     { name: 'ccxt_registry', ok: Number(catalog.exchange_count) > 0, detail: `${catalog.exchange_count || 0} registered exchanges; dependency ${catalog.dependency_pin || 'unknown'}` },
     { name: 'paper_configuration', ok: paperConfigReady, detail: paperConfigReady ? 'locked dry-run limits are explicit' : 'set positive leverage and all USDT-M risk/notional limits in a local locked dry-run config' },
     { name: 'paper_ledger', ok: paperReady, detail: paperReady ? 'active ledger matches configuration' : paperCode }
@@ -134,7 +134,7 @@ export function automationDoctor(options = {}) {
     next_steps: ready ? ['Run automation prepare for the required date and ISO week.'] : [
       ...(!paperConfigReady ? ['Create config/tyche.local.json with explicit positive USDT-M paper limits.'] : []),
       ...(!paperReady ? ['Initialize data/paper/active.json with npm run paper -- init and explicit user values.'] : []),
-      ...(!nodeReady ? ['Upgrade Node.js to 20.19 or newer.'] : [])
+      ...(!nodeReady ? ['Upgrade Node.js to 22.19 or newer.'] : [])
     ],
     submitted: 0,
     filled: 0
@@ -459,6 +459,17 @@ function applicator(configPath) {
   }
 }
 
+// Small injection seam for other controllers.  The deterministic paper
+// planner and applier remain the existing CLI implementations; callers do
+// not need to duplicate sizing, risk, ledger, or apply logic.
+export function createAutomationPlanner(configPath) {
+  return planner(configPath)
+}
+
+export function createAutomationApplicator(configPath) {
+  return applicator(configPath)
+}
+
 function reportForCycle(cycle) {
   const canonicalMarket = readJsonStrict(MARKET_PATH)
   const plannedOrders = cycle.products.flatMap((result) => {
@@ -559,8 +570,8 @@ async function cli(argv) {
       paperLedger: readJsonStrict(PAPER_PATH),
       env: process.env,
       previous,
-      planProduct: planner(args.configPath),
-      applyPlan: applicator(args.configPath)
+      planProduct: createAutomationPlanner(args.configPath),
+      applyPlan: createAutomationApplicator(args.configPath)
     })
     const report = reportForCycle(planned)
     if (!planned.reused) writeJsonAtomic(resultPath, planned)
