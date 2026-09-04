@@ -5,7 +5,7 @@
   "description": "Safe Tyche analysis cockpit",
   "type": "module",
   "scripts": {
-    "check": "node --check vite.config.mjs && node --check src/api.js",
+    "check": "node --check vite.config.mjs && node --check src/api.js && node --check src/workflow.js",
     "build": "vite build",
     "test": "node --test test/*.test.mjs"
   },

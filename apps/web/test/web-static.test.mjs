@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { WORKFLOW_NODES, deriveWorkflowState, normalizeWorkflowStatus } from '../src/workflow.js'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SOURCE = path.join(ROOT, 'src')
@@ -49,4 +50,128 @@ test('VenueCard renders the settled safe plan-summary DTO', () => {
   assert.match(source, /setArmConfirmations/)
   assert.doesNotMatch(source, /onAction\('arm', venue, ARM_PHRASES\[venue\]\)/)
   assert.doesNotMatch(source, /summary\.(?:symbol|side|size|notional|risk|protection)\b/)
+})
+
+test('workflow topology is fixed, ordered, and localized', () => {
+  assert.deepEqual(WORKFLOW_NODES.map(({ role }) => role), [
+    'orchestrator', 'preflight', 'btc-analyst', 'eth-analyst', 'synthesizer', 'reviewer'
+  ])
+  assert.deepEqual(WORKFLOW_NODES.map(({ name }) => name), [
+    '流程编排', '前置检查', 'BTC 分析', 'ETH 分析', '汇总研判', '最终复核'
+  ])
+})
+
+test('workflow statuses normalize every supported backend lifecycle value', () => {
+  const expected = {
+    unknown: 'waiting', waiting: 'waiting', pending: 'pending', queued: 'pending',
+    started: 'running', running: 'running', ok: 'complete', completed: 'complete',
+    complete: 'complete', reused: 'complete', blocked: 'blocked', failed: 'failed',
+    error: 'failed', timeout: 'timeout'
+  }
+  for (const [input, output] of Object.entries(expected)) assert.equal(normalizeWorkflowStatus(input), output, input)
+})
+
+test('workflow derives honest progress and parallel current agents', () => {
+  const unknown = deriveWorkflowState({ dag: { daily: Object.fromEntries(WORKFLOW_NODES.map(({ role }) => [role, 'unknown'])) } })
+  assert.ok(unknown.nodes.every(({ status }) => status === 'waiting'))
+  assert.deepEqual(unknown.currentAgents, [])
+  assert.equal(unknown.currentStage, '等待开始')
+
+  const twoOfSix = deriveWorkflowState({ dag: { daily: {
+    orchestrator: 'ok', preflight: 'completed', 'btc-analyst': 'unknown', 'eth-analyst': 'waiting', synthesizer: 'queued', reviewer: 'pending'
+  } } })
+  assert.equal(twoOfSix.completedCount, 2)
+  assert.equal(twoOfSix.totalCount, 6)
+  assert.equal(twoOfSix.percent, 33)
+
+  const parallel = deriveWorkflowState({
+    dag: { daily: { orchestrator: 'ok', preflight: 'ok' } },
+    status: { roles: { orchestrator: 'complete', preflight: 'reused' } },
+    events: [{ role: 'btc-analyst', status: 'started' }, { role: 'eth-analyst', status: 'running' }]
+  })
+  assert.equal(parallel.currentStage, '并行分析')
+  assert.deepEqual(parallel.currentAgents, ['btc-analyst', 'eth-analyst'])
+})
+
+test('polled terminal states override stale WebSocket progress', () => {
+  const completeDag = { daily: Object.fromEntries(WORKFLOW_NODES.map(({ role }) => [role, 'complete'])) }
+  const completed = deriveWorkflowState({ dag: completeDag, events: { 'btc-analyst': 'running' } })
+  assert.equal(completed.byRole['btc-analyst'].status, 'complete')
+  assert.equal(completed.completedCount, 6)
+  assert.equal(completed.percent, 100)
+  assert.deepEqual(completed.currentAgents, [])
+
+  const running = deriveWorkflowState({
+    dag: { daily: { orchestrator: 'complete', preflight: 'complete', 'btc-analyst': 'waiting' } },
+    events: { 'btc-analyst': 'running' }
+  })
+  assert.equal(running.byRole['btc-analyst'].status, 'running')
+  assert.deepEqual(running.currentAgents, ['btc-analyst'])
+
+  for (const terminal of ['failed', 'blocked', 'timeout']) {
+    const state = deriveWorkflowState({
+      dag: { daily: { orchestrator: 'complete', preflight: 'complete', 'btc-analyst': terminal } },
+      events: { 'btc-analyst': 'running' }
+    })
+    assert.equal(state.byRole['btc-analyst'].status, terminal)
+    assert.doesNotMatch(state.currentAgents.join(','), /btc-analyst/)
+  }
+})
+
+test('workflow counts completed and reused roles but preserves failure and timeout', () => {
+  const completed = deriveWorkflowState({ dag: { daily: {
+    orchestrator: 'reused', preflight: 'complete', 'btc-analyst': 'ok', 'eth-analyst': 'completed', synthesizer: 'reused', reviewer: 'complete'
+  } } })
+  assert.equal(completed.completedCount, 6)
+  assert.equal(completed.percent, 100)
+  assert.equal(completed.currentStage, '流程完成')
+
+  const failed = deriveWorkflowState({ dag: { daily: { orchestrator: 'error' } } })
+  assert.equal(failed.byRole.orchestrator.status, 'failed')
+  assert.equal(failed.currentStage, '执行失败')
+  const timedOut = deriveWorkflowState({ dag: { daily: { orchestrator: 'timeout' } } })
+  assert.equal(timedOut.byRole.orchestrator.status, 'timeout')
+  assert.equal(timedOut.currentStage, '执行超时')
+})
+
+test('workflow never advances the merge before both analyst dependencies complete', () => {
+  const state = deriveWorkflowState({ dag: { daily: {
+    orchestrator: 'ok', preflight: 'ok', 'btc-analyst': 'ok', 'eth-analyst': 'running', synthesizer: 'started'
+  } } })
+  assert.equal(state.byRole.synthesizer.status, 'blocked')
+  assert.equal(state.byRole.synthesizer.statusLabel, '状态冲突')
+  assert.equal(state.byRole.synthesizer.conflict, true)
+  assert.deepEqual(state.byRole.synthesizer.missingDependencies, ['eth-analyst'])
+  assert.equal(state.currentStage, '状态冲突')
+})
+
+test('localized shell exposes workflow structure without changing safety controls', () => {
+  const app = fs.readFileSync(path.join(SOURCE, 'App.jsx'), 'utf8')
+  const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8')
+  for (const text of ['事件流', '当前周期', '模拟摘要', '场所控制', '固定工作流', '授权 24 小时', '解除授权', '按计划哈希执行']) assert.match(app, new RegExp(text))
+  for (const className of ['workflow-dag', 'sequential-stage', 'parallel-branch', 'merge-stage']) assert.match(app, new RegExp(className))
+  assert.match(html, /<html lang="zh-CN">/)
+  assert.match(html, /<title>Tyche \/ 分析工作台<\/title>/)
+})
+
+test('paper theme and connected workflow visualization stay accessible and responsive', () => {
+  const app = fs.readFileSync(path.join(SOURCE, 'App.jsx'), 'utf8')
+  const css = fs.readFileSync(path.join(SOURCE, 'styles.css'), 'utf8')
+  for (const color of ['#f7f3ea', '#1f1e1a', '#6f6a60', '#d8d0c2', '#c96442', '#62725e']) assert.match(css, new RegExp(color, 'i'))
+  assert.match(css, /\.app-shell\s*\{[^}]*color:\s*var\(--text\)/s)
+  assert.match(app, /useState\('paper'\)/)
+  assert.match(app, /<progress[^>]+aria-label="工作流完成进度"[^>]+max=\{workflow\.totalCount\}[^>]+value=\{workflow\.completedCount\}/)
+  assert.match(app, /data-status=\{node\.status\}/)
+  assert.match(app, /测试网交易所/)
+  assert.match(app, /当前 Agent/)
+  assert.match(css, /\.parallel-branch\s*\{[^}]*grid-template-columns:\s*repeat\(2,/s)
+  assert.match(css, /\.parallel-branch::before/)
+  assert.match(css, /\.merge-stage::before/)
+  for (const state of ['running', 'complete', 'failed', 'blocked', 'timeout']) assert.match(css, new RegExp(`data-status="${state}"`))
+  assert.match(css, /@keyframes workflow-breathe/)
+  assert.match(css, /@media \(max-width: 900px\)/)
+  assert.match(css, /@media \(max-width: 680px\)/)
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)/)
+  assert.doesNotMatch(css, /gradient|box-shadow/i)
+  assert.doesNotMatch(css, /workflow-dag[^{}]*\{[^}]*display:\s*none/s)
 })

@@ -7,7 +7,7 @@ async function request(path, options = {}) {
     headers: { ...(options.body ? JSON_HEADERS : {}), ...(options.headers || {}) }
   })
   const body = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(body.message || `Control plane returned ${response.status}`)
+  if (!response.ok) throw new Error(body.message || `控制平面返回状态 ${response.status}`)
   return body
 }
 
