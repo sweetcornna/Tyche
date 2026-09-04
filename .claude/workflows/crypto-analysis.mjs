@@ -9,7 +9,7 @@ export const meta = {
   ]
 }
 
-const MUTATION_CREDENTIALS = ['GATE_USDM_TESTNET_API_KEY', 'GATE_USDM_TESTNET_SECRET_KEY']
+const MUTATION_CREDENTIALS = ['GATE_USDM_TESTNET_API_KEY', 'GATE_USDM_TESTNET_SECRET_KEY', 'BINANCE_USDM_TESTNET_API_KEY', 'BINANCE_USDM_TESTNET_SECRET_KEY']
 if (typeof process !== 'object' || !process?.env) throw new Error('WORKFLOW_ENV_UNAVAILABLE')
 const inheritedMutationCredentials = MUTATION_CREDENTIALS.filter((name) => String(process.env[name] || '').trim())
 if (inheritedMutationCredentials.length) throw new Error(`WORKFLOW_MUTATION_CREDENTIAL_PRESENT:${inheritedMutationCredentials.join(',')}`)
@@ -94,7 +94,7 @@ const ASSET_RESULT = {
 }
 
 const assetResults = await Promise.all(['BTC', 'ETH'].map((asset) => agent(
-  `Analyze ${asset} for the ${tier} tier dated ${date}, ISO week ${isoWeek}. Read only data/crypto_market.json and, when tier=daily, data/crypto_strategy.json if present.\n\nNo-hallucination veto: every numeric claim and every candidate price must be copied from the current snapshot and cite its exact JSON path. A candidate may copy one complete level_sets triple; do not calculate new prices. If a complete supported triple is unavailable or inconsistent, return no candidate. Never emit quantity, notional, contracts, leverage, client IDs, reduce_only, methods, paths, hosts, signatures, account values, or execution status.\n\nWeekly must return execution_candidates=[]. Daily entries require an active strategy whose iso_week equals ${isoWeek}. A stale or missing anchor permits only a semantic managed REDUCE/EXIT or NO_TRADE. Spot never permits short entry. Use data/crypto_market.json.generated_at for candidate data_as_of. Return the required structured asset result only; do not write files or call exchange operations.`,
+  `Analyze ${asset} for the ${tier} tier dated ${date}, ISO week ${isoWeek}. Read only data/crypto_market.json and, when tier=daily, data/crypto_strategy.json if present.\n\nNo-hallucination veto: every numeric claim and every candidate price must be copied from the current snapshot and cite its exact JSON path. When multi_exchange is present, use its sealed aggregates for cross-venue confirmation, dispersion, best bid/ask context, and median funding context, and state when coverage is partial. Never use a multi-exchange consensus value as an executable price. A candidate may copy one complete Gate level_sets triple under assets; do not calculate new prices. If a complete supported triple is unavailable or inconsistent, return no candidate. Never emit quantity, notional, contracts, leverage, client IDs, reduce_only, methods, paths, hosts, signatures, account values, or execution status.\n\nWeekly must return execution_candidates=[]. Daily entries require an active strategy whose iso_week equals ${isoWeek}. A stale or missing anchor permits only a semantic managed REDUCE/EXIT or NO_TRADE. Spot never permits short entry. Use data/crypto_market.json.generated_at for candidate data_as_of. Return the required structured asset result only; do not write files or call exchange operations.`,
   {
     label: `${tier}:${asset}`,
     phase: 'Analysis',

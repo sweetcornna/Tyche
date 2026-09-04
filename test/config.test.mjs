@@ -56,6 +56,28 @@ test('manual testnet requires positive user-supplied limits and leverage', () =>
   assert.equal(validateConfig(config).ok, true)
 })
 
+test('Binance automatic testnet is independently locked and requires explicit positive limits', () => {
+  assert.equal(codeOf((config) => {
+    config.binance.enabled = true
+    config.binance.usdm.enabled = true
+    config.binance.submission_mode = 'automatic_testnet'
+    config.binance.usdm.environment = 'testnet'
+  }), 'CONFIG_AUTOMATIC_TESTNET_LIMITS')
+
+  const config = copy()
+  config.binance.enabled = true
+  config.binance.submission_mode = 'automatic_testnet'
+  config.binance.usdm.enabled = true
+  config.binance.usdm.environment = 'testnet'
+  config.binance.usdm.configured_leverage = 2
+  config.binance.usdm.risk_per_trade_bps = 20
+  config.binance.usdm.max_order_notional_usdt = 50
+  config.binance.usdm.daily_new_notional_cap_usdt = 100
+  config.binance.usdm.max_managed_notional_usdt = 150
+  assert.equal(validateConfig(config).ok, true)
+  assert.equal(config.gate.submission_mode, 'locked')
+})
+
 test('configuration recursively rejects secrets, network overrides, static account values, and transfers', () => {
   assert.equal(codeOf((config) => { config.gate.usdm.nested = { [['api', 'key'].join('_')]: ['not', 'a', 'credential'].join('-') } }), 'CONFIG_SECRET_KEY_FORBIDDEN')
   assert.equal(codeOf((config) => { config.gate.usdm.nested = { endpoint: '/unsafe' } }), 'CONFIG_NETWORK_LOCATION_FORBIDDEN')

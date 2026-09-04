@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { operationDefinitions } from '../scripts/gate-rest.mjs'
+import { binanceOperationDefinitions } from '../scripts/binance-rest.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SKIP = new Set(['.git', 'node_modules', 'data', 'outputs', 'logs', 'plans', '.cache', 'coverage'])
@@ -64,24 +65,37 @@ test('source text has no private path, private infrastructure name, backend mode
 })
 
 test('no production USDT-M credential namespace or caller-controlled route exists', () => {
-  const forbiddenCredential = ['GATE', 'USDM', 'LIVE'].join('_')
-  for (const record of textFiles()) assert.equal(record.text.includes(forbiddenCredential), false, record.file)
-  const definitions = Object.values(operationDefinitions)
-  assert.ok(definitions.filter((row) => row.product === 'spot').every((row) => row.method === 'GET' && row.mutation !== true))
-  assert.ok(definitions.filter((row) => row.mutation).every((row) => row.product === 'usdm' && row.environments.join(',') === 'testnet'))
-  assert.ok(definitions.every((row) => !String(row.path).includes(['trans', 'fer'].join(''))))
+  const forbiddenCredentials = [
+    ...['GATE', 'BINANCE'].flatMap((venue) => ['LIVE', 'PROD', 'PRODUCTION'].map((environment) => `${venue}_USDM_${environment}`))
+  ]
+  for (const record of textFiles()) for (const forbidden of forbiddenCredentials) assert.equal(record.text.includes(forbidden), false, record.file)
+  const gateDefinitions = Object.values(operationDefinitions)
+  const binanceDefinitions = Object.values(binanceOperationDefinitions)
+  assert.ok(gateDefinitions.filter((row) => row.product === 'spot').every((row) => row.method === 'GET' && row.mutation !== true))
+  assert.ok(gateDefinitions.filter((row) => row.mutation).every((row) => row.product === 'usdm' && row.environments.join(',') === 'testnet'))
+  assert.ok(binanceDefinitions.filter((row) => row.mutation).every((row) => row.environments.join(',') === 'testnet'))
+  assert.ok([...gateDefinitions, ...binanceDefinitions].every((row) => !String(row.path).includes(['trans', 'fer'].join(''))))
 })
 
-test('package has no runtime dependency and imports only built-ins or local files', () => {
+test('the only runtime dependency is pinned CCXT and only its read-only adapter imports it', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
-  assert.equal(manifest.engines.node, '>=20')
-  assert.deepEqual(manifest.dependencies || {}, {})
+  assert.equal(manifest.engines.node, '>=20.19.0')
+  assert.deepEqual(manifest.dependencies || {}, { ccxt: '4.5.77' })
   assert.deepEqual(manifest.devDependencies || {}, {})
   for (const record of textFiles().filter(({ file }) => file.endsWith('.mjs'))) {
     for (const match of record.text.matchAll(/from\s+['"]([^'"]+)['"]/g)) {
-      assert.ok(match[1].startsWith('node:') || match[1].startsWith('./') || match[1].startsWith('../'), `${record.file}: ${match[1]}`)
+      const externalAllowed = record.file === 'scripts/multi-exchange-market.mjs' && match[1] === 'ccxt'
+      assert.ok(externalAllowed || match[1].startsWith('node:') || match[1].startsWith('./') || match[1].startsWith('../'), `${record.file}: ${match[1]}`)
     }
   }
+})
+
+test('multi-exchange adapter exposes public reads without credentials or mutation methods', () => {
+  const source = fs.readFileSync(path.join(ROOT, 'scripts', 'multi-exchange-market.mjs'), 'utf8')
+  assert.match(source, /loadMarkets/)
+  for (const method of ['fetchTicker', 'fetchOrderBook', 'fetchOHLCV', 'fetchTrades', 'fetchFundingRate', 'fetchFundingRateHistory', 'fetchOpenInterest', 'fetchLiquidations']) assert.match(source, new RegExp(method))
+  assert.doesNotMatch(source, /createOrder|editOrder|cancelOrder|fetchBalance|fetchPositions|withdraw|deposit|transfer|apiKey|secret|password|privateKey/)
+  assert.doesNotMatch(source, /baseURL|hostname|endpoint|headers\s*:/)
 })
 
 test('workflows guard credentials before agents, pin models, and expose no mutation surface', () => {
@@ -139,4 +153,24 @@ test('source has no finance execution variable or runtime scheduler-marker coupl
     assert.equal(record.text.includes(financePrefix), false, record.file)
     assert.equal(record.text.includes(schedulerMarker), false, record.file)
   }
+})
+
+test('one-shot automation exposes planning but no order-submission route', () => {
+  const source = fs.readFileSync(path.join(ROOT, 'scripts', 'crypto-automation.mjs'), 'utf8')
+  const paper = fs.readFileSync(path.join(ROOT, 'scripts', 'paper-trade.mjs'), 'utf8')
+  assert.match(source, /'plan'/)
+  assert.doesNotMatch(source, /['"]execute['"]|--commit|EXECUTE GATE|usdmPlaceOrder|usdmPlacePriceOrder/)
+  assert.doesNotMatch(paper, /['"]testnet['"]|api-testnet|--commit|EXECUTE GATE|usdmPlaceOrder|usdmPlacePriceOrder|usdmCancelOrder|usdmCancelPriceOrder/)
+  assert.doesNotMatch(paper, /GATE_USDM_TESTNET_(?:API|SECRET)_KEY/)
+  assert.match(paper, /environment: 'public'/)
+  assert.match(paper, /submitted: 0, filled: 0/)
+})
+
+test('automatic order module is isolated, venue-explicit, and contains no production mutation mode', () => {
+  const source = fs.readFileSync(path.join(ROOT, 'scripts', 'testnet-trade.mjs'), 'utf8')
+  assert.match(source, /automatic_testnet/)
+  assert.match(source, /venueName/)
+  assert.match(source, /PRODUCTION_EXECUTION_UNSUPPORTED/)
+  assert.doesNotMatch(source, /environment:\s*['"](?:live|prod|production)['"]/i)
+  assert.doesNotMatch(source, /withdraw|deposit|transfer|cancelAll/i)
 })

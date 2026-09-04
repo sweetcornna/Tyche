@@ -2,14 +2,22 @@
   "name": "tyche-crypto-agent",
   "version": "0.1.0",
   "private": true,
-  "description": "Fail-closed BTC and ETH analysis with deterministic Gate dry-run and testnet controls",
+  "description": "Fail-closed BTC and ETH analysis with public multi-exchange data and deterministic Gate/Binance testnet controls",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=20.19.0"
   },
   "scripts": {
-    "check": "node scripts/config.mjs check && node --check scripts/lib-iolock.mjs && node --check scripts/agent-write.mjs && node --check scripts/concise-report.mjs && node --check scripts/crypto-market.mjs && node --check scripts/gate-rest.mjs && node --check scripts/gate-account-context.mjs && node --check scripts/gate-funding.mjs && node --check scripts/gate-trade.mjs",
+    "check": "node scripts/config.mjs check && node --check scripts/lib-iolock.mjs && node --check scripts/agent-write.mjs && node --check scripts/concise-report.mjs && node --check scripts/multi-exchange-market.mjs && node --check scripts/crypto-market.mjs && node --check scripts/crypto-automation.mjs && node --check scripts/paper-trade.mjs && node --check scripts/gate-rest.mjs && node --check scripts/binance-rest.mjs && node --check scripts/gate-account-context.mjs && node --check scripts/gate-funding.mjs && node --check scripts/gate-trade.mjs && node --check scripts/testnet-trade.mjs",
+    "market:all": "node scripts/multi-exchange-market.mjs",
+    "automation": "node scripts/crypto-automation.mjs",
+    "paper": "node scripts/paper-trade.mjs",
+    "trade:testnet": "node scripts/testnet-trade.mjs",
     "test": "node --test",
+    "test:e2e": "node --test test/automation-e2e.test.mjs",
     "selftest": "node scripts/gate-trade.mjs selftest"
+  },
+  "dependencies": {
+    "ccxt": "4.5.77"
   }
 }

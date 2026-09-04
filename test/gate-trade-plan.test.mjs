@@ -90,9 +90,22 @@ test('planner owns sizing, contract count, leverage use, identities, and reduce-
   assert.equal(intent.reduce_only, false)
   assert.match(intent.intent_id, /^t-TYE[0-9a-f]{22}$/)
   assert.equal(intent.protection.quantity_source, 'IDENTIFIABLE_EXCHANGE_FILLS')
+  assert.equal(intent.margin_debit, '12.525')
+  assert.equal(intent.estimated_open_fee, '0.0125')
+  assert.equal(intent.estimated_close_fee, '0.0125')
 })
 
-test('multiple candidates consume projected plan capacity cumulatively', () => {
+test('USDT-M sizing enforces a venue minimum notional when the adapter supplies one', () => {
+  const config = manualConfig()
+  const context = planContext()
+  context.rules.BTC_USDT.min_notional = '30'
+  const plan = createPlan(dailySource(), { product: 'usdm', environment: 'testnet', config, context, ledger: { schema: 'tyche_gate_ledger/v1', plans: [], events: [], fills: [], reconciliations: [] }, date: DATE, isoWeek: WEEK, weeklyAnchor: weeklyAnchor(), marketSnapshot: marketSnapshot(), now: NOW })
+  assert.equal(plan.status, 'BLOCKED')
+  assert.equal(plan.intents.length, 0)
+  assert.ok(plan.skipped.some((row) => row.code === 'MINIMUM_NOTIONAL'))
+})
+
+test('multiple same-symbol entries are deterministically reduced to one', () => {
   const config = manualConfig()
   config.gate.usdm.max_order_notional_usdt = 20
   config.gate.usdm.daily_new_notional_cap_usdt = 30
@@ -100,8 +113,38 @@ test('multiple candidates consume projected plan capacity cumulatively', () => {
   source.execution_candidates.push({ ...source.execution_candidates[0], signal_id: 'fixture:btc:second' })
   const plan = createPlan(source, { product: 'usdm', environment: 'testnet', config, context: planContext(), ledger: { schema: 'tyche_gate_ledger/v1', plans: [], events: [], fills: [], reconciliations: [] }, date: DATE, isoWeek: WEEK, weeklyAnchor: weeklyAnchor(), marketSnapshot: marketSnapshot(), now: NOW })
   assert.equal(plan.status, 'READY')
-  assert.equal(plan.intents.length, 2)
-  assert.deepEqual(plan.intents.map((intent) => intent.estimated_notional), ['20', '10'])
+  assert.equal(plan.intents.length, 1)
+  assert.deepEqual(plan.intents.map((intent) => intent.estimated_notional), ['20'])
+  assert.ok(plan.skipped.some((row) => row.code === 'ENTRY_SUPERSEDED'))
+})
+
+test('opposite same-symbol entries and duplicate signals reject every conflicting candidate', () => {
+  const config = manualConfig()
+  const conflict = dailySource()
+  conflict.execution_candidates.push({ ...conflict.execution_candidates[0], position_intent: 'ENTER_SHORT', stop_price: 110, take_profit_price: 80, signal_id: 'fixture:btc:short' })
+  const conflictPlan = createPlan(conflict, { product: 'usdm', environment: 'testnet', config, context: planContext(), ledger: { schema: 'tyche_gate_ledger/v1', plans: [], events: [], fills: [], reconciliations: [] }, date: DATE, isoWeek: WEEK, weeklyAnchor: weeklyAnchor(), marketSnapshot: marketSnapshot(), now: NOW })
+  assert.equal(conflictPlan.intents.length, 0)
+  assert.equal(conflictPlan.skipped.filter((row) => row.code === 'SIGNAL_DIRECTION_CONFLICT').length, 2)
+
+  const duplicate = dailySource()
+  duplicate.execution_candidates.push({ ...duplicate.execution_candidates[0] })
+  const duplicatePlan = createPlan(duplicate, { product: 'usdm', environment: 'testnet', config, context: planContext(), ledger: { schema: 'tyche_gate_ledger/v1', plans: [], events: [], fills: [], reconciliations: [] }, date: DATE, isoWeek: WEEK, weeklyAnchor: weeklyAnchor(), marketSnapshot: marketSnapshot(), now: NOW })
+  assert.equal(duplicatePlan.intents.length, 0)
+  assert.equal(duplicatePlan.skipped.filter((row) => row.code === 'DUPLICATE_SIGNAL_ID').length, 2)
+})
+
+test('managed exit wins and blocks a same-cycle re-entry', () => {
+  const config = manualConfig()
+  const entry = dailySource().execution_candidates[0]
+  const source = dailySource({ candidate: { position_intent: 'EXIT_LONG', stop_price: null, take_profit_price: null, reduce_fraction_bps: 10000, signal_id: 'fixture:btc:exit' } })
+  source.execution_candidates.push({ ...entry, signal_id: 'fixture:btc:reenter' })
+  const context = planContext()
+  context.accounts['usdm:BTC_USDT'].managed_quantity = '10'
+  context.accounts['usdm:BTC_USDT'].managed_notional = '1'
+  const plan = createPlan(source, { product: 'usdm', environment: 'testnet', config, context, ledger: { schema: 'tyche_gate_ledger/v1', plans: [], events: [], fills: [], reconciliations: [] }, date: DATE, isoWeek: WEEK, weeklyAnchor: weeklyAnchor(), marketSnapshot: marketSnapshot(), now: NOW })
+  assert.equal(plan.intents.length, 1)
+  assert.equal(plan.intents[0].action, 'EXIT_LONG')
+  assert.ok(plan.skipped.some((row) => row.code === 'SAME_CYCLE_REVERSAL_FORBIDDEN'))
 })
 
 test('multiple reductions cannot each consume the full managed quantity', () => {
@@ -115,7 +158,7 @@ test('multiple reductions cannot each consume the full managed quantity', () => 
   assert.equal(plan.status, 'READY')
   assert.equal(plan.intents.length, 1)
   assert.equal(plan.intents[0].quantity, '10')
-  assert.ok(plan.skipped.some((row) => row.code === 'MANAGED_QUANTITY_UNAVAILABLE'))
+  assert.ok(plan.skipped.some((row) => row.code === 'REDUCTION_SUPERSEDED'))
 })
 
 test('sealed plan hash detects every post-seal change', () => {

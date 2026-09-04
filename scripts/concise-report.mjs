@@ -135,7 +135,7 @@ export function reportFromExecution(result) {
     scope: { product: result.product || 'usdm', environment: result.environment || 'testnet' },
     conclusions: [result.outcome || 'UNKNOWN', result.message || result.code || 'See lifecycle details'],
     execution: {
-      mode: result.environment === 'testnet' ? 'manual_testnet' : 'not_executed',
+      mode: result.environment === 'testnet' ? (result.execution_mode || 'manual_testnet') : 'not_executed',
       planned_orders: result.planned_orders || [],
       events,
       submitted: Number(result.counts?.submitted || 0),

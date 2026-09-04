@@ -26,7 +26,8 @@ const OPERATIONS = Object.freeze({
   usdmTickers: { product: 'usdm', environments: ['public', 'dry-run', 'testnet'], hostByEnvironment: { public: 'usdm_public', 'dry-run': 'usdm_public', testnet: 'usdm_testnet' }, method: 'GET', path: '/futures/usdt/tickers', auth: false, params: ['contract'] },
   usdmOrderBook: { product: 'usdm', environments: ['public', 'dry-run', 'testnet'], hostByEnvironment: { public: 'usdm_public', 'dry-run': 'usdm_public', testnet: 'usdm_testnet' }, method: 'GET', path: '/futures/usdt/order_book', auth: false, required: ['contract'], params: ['contract', 'interval', 'limit', 'with_id'] },
   usdmFundingRate: { product: 'usdm', environments: ['public', 'dry-run', 'testnet'], hostByEnvironment: { public: 'usdm_public', 'dry-run': 'usdm_public', testnet: 'usdm_testnet' }, method: 'GET', path: '/futures/usdt/funding_rate', auth: false, required: ['contract'], params: ['contract', 'limit'] },
-  usdmCandlesticks: { product: 'usdm', environments: ['public', 'dry-run', 'testnet'], hostByEnvironment: { public: 'usdm_public', 'dry-run': 'usdm_public', testnet: 'usdm_testnet' }, method: 'GET', path: '/futures/usdt/candlesticks', auth: false, required: ['contract', 'interval'], params: ['contract', 'interval', 'limit', 'from', 'to'] },
+  usdmCandlesticks: { product: 'usdm', environments: ['public', 'dry-run', 'testnet'], hostByEnvironment: { public: 'usdm_public', 'dry-run': 'usdm_public', testnet: 'usdm_testnet' }, method: 'GET', path: '/futures/usdt/candlesticks', auth: false, required: ['contract', 'interval'], params: ['contract', 'interval', 'limit', 'from', 'to'], marketSeriesContract: true },
+  usdmRiskLimitTiers: { product: 'usdm', environments: ['public', 'dry-run', 'testnet'], hostByEnvironment: { public: 'usdm_public', 'dry-run': 'usdm_public', testnet: 'usdm_testnet' }, method: 'GET', path: '/futures/usdt/risk_limit_tiers', auth: false, params: ['contract', 'limit', 'offset'] },
   usdmAccount: { product: 'usdm', environments: ['testnet'], host: 'usdm_testnet', method: 'GET', path: '/futures/usdt/accounts', auth: true, params: [] },
   usdmPositions: { product: 'usdm', environments: ['testnet'], host: 'usdm_testnet', method: 'GET', path: '/futures/usdt/positions', auth: true, params: [] },
   usdmPosition: { product: 'usdm', environments: ['testnet'], host: 'usdm_testnet', method: 'GET', path: '/futures/usdt/positions/{contract}', auth: true, pathParams: ['contract'], params: [] },
@@ -140,6 +141,13 @@ function pair(value, label) {
   return normalized
 }
 
+function marketSeriesContract(value) {
+  const normalized = String(value || '').trim().toUpperCase()
+  const match = normalized.match(/^(?:(MARK|INDEX)_)?(BTC_USDT|ETH_USDT)$/)
+  if (!match) reject('GATE_SYMBOL_UNSUPPORTED', 'Market-series contract must identify BTC_USDT or ETH_USDT')
+  return `${match[1] ? `${match[1].toLowerCase()}_` : ''}${match[2]}`
+}
+
 function orderId(value) {
   const normalized = String(value || '').trim()
   if (!ORDER_ID.test(normalized)) reject('GATE_ORDER_ID_INVALID', 'Order identity must be a numeric Gate ID or Tyche order text')
@@ -206,7 +214,8 @@ function normalizeInput(name, definition, input) {
     if (value[required] === undefined || value[required] === null || value[required] === '') reject('GATE_PARAMETER_REQUIRED', `${name} requires ${required}`)
   }
   const output = { ...value }
-  for (const key of ['currency_pair', 'contract']) if (output[key] !== undefined) output[key] = pair(output[key], key)
+  if (output.currency_pair !== undefined) output.currency_pair = pair(output.currency_pair, 'currency_pair')
+  if (output.contract !== undefined) output.contract = definition.marketSeriesContract ? marketSeriesContract(output.contract) : pair(output.contract, 'contract')
   if (output.currency !== undefined && String(output.currency).toUpperCase() !== 'USDT') reject('GATE_ASSET_UNSUPPORTED', 'Signed Spot account read is limited to USDT')
   if (output.currency !== undefined) output.currency = 'USDT'
   if (output.order_id !== undefined) output.order_id = orderId(output.order_id)
@@ -215,7 +224,7 @@ function normalizeInput(name, definition, input) {
   for (const key of ['limit', 'offset', 'from', 'to']) {
     if (output[key] !== undefined && (!Number.isSafeInteger(Number(output[key])) || Number(output[key]) < 0)) reject('GATE_PARAMETER_INVALID', `${key} must be a non-negative integer`)
   }
-  if (output.interval !== undefined && !new Set(['4h', '1d', '7d']).has(String(output.interval))) reject('GATE_INTERVAL_INVALID', 'Candlestick interval must be 4h, 1d, or 7d')
+  if (output.interval !== undefined && !new Set(['1m', '4h', '1d', '7d']).has(String(output.interval))) reject('GATE_INTERVAL_INVALID', 'Candlestick interval must be 1m, 4h, 1d, or 7d')
   return output
 }
 
@@ -290,10 +299,11 @@ export function createGateClient(options = {}) {
   const environment = normalizeEnvironment(options.environment, product)
   const fetchImpl = options.fetchImpl ?? globalThis.fetch
   const now = options.now ?? Date.now
+  const sleepImpl = options.sleepImpl ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)))
   const timeoutMs = Number(options.timeoutMs ?? 10000)
   const readOnly = options.readOnly === true
   const env = process.env
-  if (typeof fetchImpl !== 'function' || typeof now !== 'function') reject('GATE_CLIENT_DEPENDENCY_INVALID', 'fetch and now functions are required')
+  if (typeof fetchImpl !== 'function' || typeof now !== 'function' || typeof sleepImpl !== 'function') reject('GATE_CLIENT_DEPENDENCY_INVALID', 'fetch, now, and sleep functions are required')
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 30000) reject('GATE_TIMEOUT_INVALID', 'timeoutMs must be in (0, 30000]')
   let clockOffsetMs = 0
 
@@ -307,7 +317,13 @@ export function createGateClient(options = {}) {
     return { apiKey, secretKey }
   }
 
-  async function invoke(name, rawInput = {}, attempt = 0) {
+  function retryDelay(headers, retryNumber) {
+    const retryAfter = Number(headers?.['retry-after'])
+    if (Number.isFinite(retryAfter) && retryAfter >= 0) return Math.min(5000, Math.ceil(retryAfter * 1000))
+    return Math.min(1000, 250 * retryNumber)
+  }
+
+  async function invoke(name, rawInput = {}, attempts = { timestamp: 0, transient: 0 }) {
     const definition = OPERATIONS[name]
     if (!definition) reject('GATE_OPERATION_UNSUPPORTED', `Unsupported Gate operation: ${name}`)
     if (definition.product !== product) reject('GATE_OPERATION_PRODUCT_MISMATCH', `${name} is not a ${product} operation`)
@@ -347,6 +363,10 @@ export function createGateClient(options = {}) {
       data = await responseBody(response)
     } catch (cause) {
       const code = NETWORK_CODE.test(String(cause?.code || '')) ? cause.code : cause?.name === 'AbortError' ? 'ETIMEDOUT' : 'GATE_NETWORK_ERROR'
+      if (definition.method === 'GET' && attempts.transient < 2) {
+        await sleepImpl(retryDelay({}, attempts.transient + 1))
+        return invoke(name, rawInput, { ...attempts, transient: attempts.transient + 1 })
+      }
       throw new GateRestError(code, `Gate ${name} request failed`, { ambiguous: definition.mutation === true, cause: undefined })
     } finally {
       clearTimeout(timer)
@@ -365,9 +385,13 @@ export function createGateClient(options = {}) {
         lookupIdentity,
         definitiveNotFound: name === 'usdmOrder' && outcome.status === 404
       })
-      if (definition.auth && definition.method === 'GET' && outcome.timestamp && attempt === 0) {
+      if (definition.auth && definition.method === 'GET' && outcome.timestamp && attempts.timestamp === 0) {
         await synchronizeTime()
-        return invoke(name, rawInput, 1)
+        return invoke(name, rawInput, { ...attempts, timestamp: 1 })
+      }
+      if (definition.method === 'GET' && (outcome.rateLimited || outcome.ambiguous) && attempts.transient < 2) {
+        await sleepImpl(retryDelay(safeHeaders, attempts.transient + 1))
+        return invoke(name, rawInput, { ...attempts, transient: attempts.transient + 1 })
       }
       throw error
     }

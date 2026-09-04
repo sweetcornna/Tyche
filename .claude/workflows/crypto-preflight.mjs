@@ -4,7 +4,7 @@ export const meta = {
   phases: [{ title: 'Configuration', detail: 'Read-only validation review' }, { title: 'Public market snapshot', detail: 'Read-only BTC/ETH evidence check' }]
 }
 
-const MUTATION_CREDENTIALS = ['GATE_USDM_TESTNET_API_KEY', 'GATE_USDM_TESTNET_SECRET_KEY']
+const MUTATION_CREDENTIALS = ['GATE_USDM_TESTNET_API_KEY', 'GATE_USDM_TESTNET_SECRET_KEY', 'BINANCE_USDM_TESTNET_API_KEY', 'BINANCE_USDM_TESTNET_SECRET_KEY']
 if (typeof process !== 'object' || !process?.env) throw new Error('WORKFLOW_ENV_UNAVAILABLE')
 const inheritedMutationCredentials = MUTATION_CREDENTIALS.filter((name) => String(process.env[name] || '').trim())
 if (inheritedMutationCredentials.length) throw new Error(`WORKFLOW_MUTATION_CREDENTIAL_PRESENT:${inheritedMutationCredentials.join(',')}`)

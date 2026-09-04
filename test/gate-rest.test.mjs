@@ -124,6 +124,68 @@ test('mutating server failure is ambiguous and never retried', async () => {
   })
 })
 
+test('fixed public market operations accept mark candles and risk tiers only for allowed contracts', async () => {
+  const calls = []
+  const client = createGateClient({
+    product: 'usdm',
+    environment: 'public',
+    fetchImpl: async (url) => {
+      calls.push(url)
+      return jsonResponse([])
+    }
+  })
+  await client.usdmCandlesticks({ contract: 'mark_BTC_USDT', interval: '1m', from: 1, to: 2, limit: 2000 })
+  await client.usdmRiskLimitTiers({ contract: 'ETH_USDT', limit: 100, offset: 0 })
+  assert.match(calls[0], /contract=mark_BTC_USDT/)
+  assert.match(calls[0], /interval=1m/)
+  assert.match(calls[1], /\/futures\/usdt\/risk_limit_tiers\?/)
+  assert.match(calls[1], /contract=ETH_USDT/)
+  await assert.rejects(client.usdmCandlesticks({ contract: 'settle_BTC_USDT', interval: '1m' }), { code: 'GATE_SYMBOL_UNSUPPORTED' })
+})
+
+test('GET transient retries are bounded and return the final read error', async () => {
+  const responses = [
+    Object.assign(new Error('fixture timeout'), { name: 'AbortError' }),
+    jsonResponse({ label: 'TOO_MANY_REQUESTS', message: 'fixture' }, 429, { 'retry-after': '0.01' }),
+    jsonResponse({ label: 'SERVER_ERROR', message: 'fixture' }, 503)
+  ]
+  const waits = []
+  let calls = 0
+  const client = createGateClient({
+    product: 'usdm',
+    environment: 'public',
+    sleepImpl: async (milliseconds) => { waits.push(milliseconds) },
+    fetchImpl: async () => {
+      const result = responses[calls]
+      calls += 1
+      if (result instanceof Error) throw result
+      return result
+    }
+  })
+  await assert.rejects(client.usdmTickers({ contract: 'BTC_USDT' }), { status: 503 })
+  assert.equal(calls, 3)
+  assert.deepEqual(waits, [250, 10])
+})
+
+test('GET succeeds after 429 and 5xx while preserving rate-limit headers', async () => {
+  const responses = [
+    jsonResponse({ label: 'TOO_MANY_REQUESTS', message: 'fixture' }, 429, { 'retry-after': '0' }),
+    jsonResponse({ label: 'SERVER_ERROR', message: 'fixture' }, 503),
+    jsonResponse([{ contract: 'BTC_USDT' }], 200, { 'x-gate-ratelimit-remaining': '9' })
+  ]
+  const waits = []
+  const client = createGateClient({
+    product: 'usdm',
+    environment: 'public',
+    sleepImpl: async (milliseconds) => { waits.push(milliseconds) },
+    fetchImpl: async () => responses.shift()
+  })
+  const result = await client.usdmTickers({ contract: 'BTC_USDT' })
+  assert.equal(result.data[0].contract, 'BTC_USDT')
+  assert.equal(result.headers['x-gate-ratelimit-remaining'], '9')
+  assert.deepEqual(waits, [0, 500])
+})
+
 test('protection body requires reduce-only exact-size semantics before fetch', async () => {
   const names = credentialNames('usdm', 'testnet')
   await withProcessEnv({ [names.apiKey]: fake('key'), [names.secretKey]: fake('secret') }, async () => {

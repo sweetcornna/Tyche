@@ -104,6 +104,10 @@ export function planContext() {
         order_size_min: '1',
         order_size_max: '100000',
         leverage_max: '3',
+        maintenance_rate: '0.005',
+        maker_fee_rate: '-0.0001',
+        taker_fee_rate: '0.0005',
+        status: 'trading',
         in_delisting: false,
         _fetched_at: at
       }

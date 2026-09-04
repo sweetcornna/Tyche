@@ -115,10 +115,47 @@ function validateProductCommon(product, label, options = {}) {
   return populated === caps.length
 }
 
+function validateBinance(config) {
+  exactKeys(config.binance, [
+    'enabled', 'submission_mode', 'plan_ttl_seconds', 'quote_max_age_seconds', 'account_max_age_seconds',
+    'rules_max_age_seconds', 'reconciliation_max_age_seconds', 'entry_watch_seconds', 'poll_interval_ms',
+    'kill_switch_path', 'usdm'
+  ], 'binance')
+  if (config.binance.enabled !== true && config.binance.enabled !== false) fail('CONFIG_BOOLEAN_REQUIRED', 'binance.enabled must be boolean')
+  if (!['locked', 'automatic_testnet'].includes(config.binance.submission_mode)) fail('CONFIG_SUBMISSION_MODE_INVALID', 'binance.submission_mode must be locked or automatic_testnet')
+  positiveNumber(config.binance.plan_ttl_seconds, 'binance.plan_ttl_seconds', { integer: true, min: 60, max: 86400 })
+  positiveNumber(config.binance.quote_max_age_seconds, 'binance.quote_max_age_seconds', { max: 300 })
+  positiveNumber(config.binance.account_max_age_seconds, 'binance.account_max_age_seconds', { max: 300 })
+  positiveNumber(config.binance.rules_max_age_seconds, 'binance.rules_max_age_seconds', { max: 86400 })
+  positiveNumber(config.binance.reconciliation_max_age_seconds, 'binance.reconciliation_max_age_seconds', { max: 3600 })
+  positiveNumber(config.binance.entry_watch_seconds, 'binance.entry_watch_seconds', { max: 600 })
+  positiveNumber(config.binance.poll_interval_ms, 'binance.poll_interval_ms', { min: 100, max: 30000 })
+  if (config.binance.kill_switch_path !== 'data/binance_KILL') fail('CONFIG_KILL_PATH_INVALID', 'binance.kill_switch_path is fixed to data/binance_KILL')
+
+  exactKeys(config.binance.usdm, [
+    'enabled', 'environment', 'wallet', 'asset', 'position_mode', 'margin_type', 'configured_leverage',
+    'max_leverage', 'risk_capital_fraction_bps', 'balance_buffer_bps', 'risk_per_trade_bps',
+    'max_order_notional_usdt', 'daily_new_notional_cap_usdt', 'max_managed_notional_usdt'
+  ], 'binance.usdm')
+  if (!['dry-run', 'testnet'].includes(config.binance.usdm.environment)) fail('CONFIG_USDM_ENVIRONMENT_INVALID', 'binance.usdm.environment must be dry-run or testnet')
+  if (config.binance.usdm.wallet !== 'BINANCE_USDT_FUTURES_TESTNET') fail('CONFIG_ACCOUNT_SCOPE_INVALID', 'binance.usdm.wallet must be BINANCE_USDT_FUTURES_TESTNET')
+  if (config.binance.usdm.position_mode !== 'ONE_WAY') fail('CONFIG_POSITION_MODE_INVALID', 'binance.usdm.position_mode must be ONE_WAY')
+  if (config.binance.usdm.margin_type !== 'ISOLATED') fail('CONFIG_MARGIN_MODE_INVALID', 'binance.usdm.margin_type must be ISOLATED')
+  positiveNumber(config.binance.usdm.max_leverage, 'binance.usdm.max_leverage', { integer: true, min: 1, max: 3 })
+  const configuredLeverage = optionalPositive(config.binance.usdm.configured_leverage, 'binance.usdm.configured_leverage', { integer: true, min: 1, max: 3, allowZero: config.binance.submission_mode === 'locked' })
+  if (configuredLeverage !== null && configuredLeverage > 0 && configuredLeverage > Number(config.binance.usdm.max_leverage)) fail('CONFIG_LEVERAGE_INVALID', 'binance configured leverage exceeds max leverage')
+  const capsReady = validateProductCommon(config.binance.usdm, 'binance.usdm', { locked: config.binance.submission_mode === 'locked' })
+  if (config.binance.submission_mode === 'automatic_testnet') {
+    if (config.binance.enabled !== true || config.binance.usdm.enabled !== true) fail('CONFIG_AUTOMATIC_TESTNET_DISABLED', 'automatic_testnet requires Binance and USDT-M enabled')
+    if (config.binance.usdm.environment !== 'testnet') fail('CONFIG_AUTOMATIC_TESTNET_ENVIRONMENT', 'automatic_testnet requires binance.usdm.environment=testnet')
+    if (!capsReady || configuredLeverage === null) fail('CONFIG_AUTOMATIC_TESTNET_LIMITS', 'automatic_testnet requires positive user-supplied Binance USDT-M limits and leverage')
+  }
+}
+
 export function validateConfig(input) {
   const config = object(input, '$')
   scanUnsafe(config)
-  exactKeys(config, ['schema', 'assets', 'symbols', 'analysis', 'gate'], '$')
+  exactKeys(config, ['schema', 'assets', 'symbols', 'analysis', 'gate', 'binance'], '$')
   if (config.schema !== 'tyche_config/v1') fail('CONFIG_SCHEMA_INVALID', 'schema must be tyche_config/v1')
   assertExactList(config.assets, ASSETS, 'assets')
 
@@ -137,7 +174,7 @@ export function validateConfig(input) {
     'kill_switch_path', 'spot', 'usdm'
   ], 'gate')
   if (config.gate.enabled !== true && config.gate.enabled !== false) fail('CONFIG_BOOLEAN_REQUIRED', 'gate.enabled must be boolean')
-  if (!['locked', 'manual_testnet'].includes(config.gate.submission_mode)) fail('CONFIG_SUBMISSION_MODE_INVALID', 'gate.submission_mode must be locked or manual_testnet')
+  if (!['locked', 'manual_testnet', 'automatic_testnet'].includes(config.gate.submission_mode)) fail('CONFIG_SUBMISSION_MODE_INVALID', 'gate.submission_mode must be locked, manual_testnet, or automatic_testnet')
   positiveNumber(config.gate.plan_ttl_seconds, 'gate.plan_ttl_seconds', { integer: true, min: 60, max: 86400 })
   positiveNumber(config.gate.quote_max_age_seconds, 'gate.quote_max_age_seconds', { max: 300 })
   positiveNumber(config.gate.account_max_age_seconds, 'gate.account_max_age_seconds', { max: 300 })
@@ -171,11 +208,14 @@ export function validateConfig(input) {
   if (configuredLeverage !== null && configuredLeverage > 0 && configuredLeverage > Number(config.gate.usdm.max_leverage)) fail('CONFIG_LEVERAGE_INVALID', 'configured leverage exceeds max leverage')
   const usdmCapsReady = validateProductCommon(config.gate.usdm, 'gate.usdm', { locked: config.gate.submission_mode === 'locked' })
 
-  if (config.gate.submission_mode === 'manual_testnet') {
-    if (config.gate.enabled !== true || config.gate.usdm.enabled !== true) fail('CONFIG_MANUAL_TESTNET_DISABLED', 'manual_testnet requires Gate and USDT-M enabled')
-    if (config.gate.usdm.environment !== 'testnet') fail('CONFIG_MANUAL_TESTNET_ENVIRONMENT', 'manual_testnet requires gate.usdm.environment=testnet')
-    if (!usdmCapsReady || configuredLeverage === null) fail('CONFIG_MANUAL_TESTNET_LIMITS', 'manual_testnet requires positive user-supplied USDT-M limits and leverage')
+  if (['manual_testnet', 'automatic_testnet'].includes(config.gate.submission_mode)) {
+    const prefix = config.gate.submission_mode === 'manual_testnet' ? 'MANUAL' : 'AUTOMATIC'
+    if (config.gate.enabled !== true || config.gate.usdm.enabled !== true) fail(`CONFIG_${prefix}_TESTNET_DISABLED`, `${config.gate.submission_mode} requires Gate and USDT-M enabled`)
+    if (config.gate.usdm.environment !== 'testnet') fail(`CONFIG_${prefix}_TESTNET_ENVIRONMENT`, `${config.gate.submission_mode} requires gate.usdm.environment=testnet`)
+    if (!usdmCapsReady || configuredLeverage === null) fail(`CONFIG_${prefix}_TESTNET_LIMITS`, `${config.gate.submission_mode} requires positive user-supplied USDT-M limits and leverage`)
   }
+
+  validateBinance(config)
 
   return Object.freeze({ ok: true, config })
 }
@@ -212,6 +252,22 @@ export function productConfig(config, product) {
   return config.gate[normalized]
 }
 
+export function executionConfigForVenue(input, venue) {
+  validateConfig(input)
+  const normalized = String(venue || '').trim().toLowerCase()
+  if (normalized === 'gate') return input
+  if (normalized !== 'binance') fail('CONFIG_VENUE_UNSUPPORTED', 'Venue must be gate or binance')
+  const copy = structuredClone(input)
+  copy.gate = {
+    ...copy.binance,
+    kill_switch_path: 'data/gate_KILL',
+    spot: copy.gate.spot,
+    usdm: { ...copy.binance.usdm, wallet: 'USDT_FUTURES_TESTNET' }
+  }
+  validateConfig(copy)
+  return copy
+}
+
 function parseCli(argv) {
   const values = argv.slice(2)
   const command = values[0] || 'check'
@@ -225,7 +281,7 @@ function cli(argv) {
   const { command, configPath } = parseCli(argv)
   if (command !== 'check') fail('CONFIG_COMMAND_UNSUPPORTED', 'Supported command: check')
   const config = loadConfig({ filePath: configPath })
-  process.stdout.write(JSON.stringify({ ok: true, schema: config.schema, assets: config.assets, submission_mode: config.gate.submission_mode }, null, 2) + '\n')
+  process.stdout.write(JSON.stringify({ ok: true, schema: config.schema, assets: config.assets, submission_modes: { gate: config.gate.submission_mode, binance: config.binance.submission_mode } }, null, 2) + '\n')
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {

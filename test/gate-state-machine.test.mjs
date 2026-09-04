@@ -125,7 +125,7 @@ function makeClient(plan, options = {}) {
   })
 
   const client = {
-    usdmContract: async ({ contract }) => ({ data: { name: contract, order_price_round: '0.1', quanto_multiplier: '0.001', order_size_min: '1', order_size_max: '100000', leverage_max: '3', in_delisting: false } }),
+    usdmContract: async ({ contract }) => ({ data: { name: contract, order_price_round: '0.1', quanto_multiplier: '0.001', order_size_min: '1', order_size_max: '100000', leverage_max: '3', maintenance_rate: '0.005', maker_fee_rate: '-0.0001', taker_fee_rate: '0.0005', status: 'trading', in_delisting: false } }),
     usdmTickers: async ({ contract }) => ({ data: [{ contract, last: '100', mark_price: '100', index_price: '100' }] }),
     usdmPosition: async ({ contract }) => ({
       data: {
@@ -295,7 +295,7 @@ test('terminal rejection and zero-fill cancellation release reserved daily capac
   }
 })
 
-test('filled managed exposure replaces its reservation instead of being double counted', async () => {
+test('later entry is blocked while the same symbol already has managed exposure', async () => {
   const config = manualConfig()
   config.gate.usdm.max_order_notional_usdt = 25
   config.gate.usdm.daily_new_notional_cap_usdt = 50
@@ -313,9 +313,10 @@ test('filled managed exposure replaces its reservation instead of being double c
   const secondResult = await executePlan(secondPlan, executeOptions(secondPlan, config, directory, second.client))
   const managed = managedQuantities(readLedger(path.join(directory, 'ledger.json')), 'usdm')
 
-  assert.equal(secondResult.outcome, 'COMPLETE')
-  assert.equal(second.getMainPlaceCalls(), 1)
-  assert.equal(managed.BTC_USDT, String(firstPlan.intents[0].size + secondPlan.intents[0].size))
+  assert.equal(secondResult.outcome, 'BLOCKED')
+  assert.equal(secondResult.code, 'POSITION_ALREADY_MANAGED')
+  assert.equal(second.getMainPlaceCalls(), 0)
+  assert.equal(managed.BTC_USDT, String(firstPlan.intents[0].size))
 })
 
 test('stranded reservation recovers an exact terminal order without reposting', async () => {
