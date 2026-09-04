@@ -1,0 +1,23 @@
+{
+  "schema": "tyche_crypto_daily/v1",
+  "date": "2000-01-03",
+  "iso_week": "2000-W01",
+  "generated_at": "2000-01-03T00:00:00.000Z",
+  "anchored_week": null,
+  "anchor_fresh": false,
+  "regime": {
+    "label": "not_populated",
+    "evidence_refs": []
+  },
+  "assets": {
+    "BTC": {
+      "analysis_status": "not_populated",
+      "evidence_refs": []
+    },
+    "ETH": {
+      "analysis_status": "not_populated",
+      "evidence_refs": []
+    }
+  },
+  "execution_candidates": []
+}

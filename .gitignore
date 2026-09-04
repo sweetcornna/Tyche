@@ -1,0 +1,36 @@
+node_modules/
+
+# Secrets and machine-local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.jks
+
+# Local configuration and Claude state
+config/*.local.json
+.claude/settings.json
+.claude/settings.local.json
+.claude/worktrees/
+
+# Runtime-only state and generated artifacts
+data/
+outputs/
+plans/
+logs/
+*.log
+*.lock
+*.tmp
+*.tmp.*
+
+# Tool caches and editor files
+.cache/
+coverage/
+.DS_Store
+.idea/
+.vscode/
