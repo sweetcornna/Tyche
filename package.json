@@ -1,0 +1,15 @@
+{
+  "name": "tyche-crypto-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Fail-closed BTC and ETH analysis with deterministic Gate dry-run and testnet controls",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "check": "node scripts/config.mjs check && node --check scripts/lib-iolock.mjs && node --check scripts/agent-write.mjs && node --check scripts/concise-report.mjs && node --check scripts/crypto-market.mjs && node --check scripts/gate-rest.mjs && node --check scripts/gate-account-context.mjs && node --check scripts/gate-funding.mjs && node --check scripts/gate-trade.mjs",
+    "test": "node --test",
+    "selftest": "node scripts/gate-trade.mjs selftest"
+  }
+}
