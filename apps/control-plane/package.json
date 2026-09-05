@@ -16,7 +16,7 @@
     "start": "node src/cli.mjs"
   },
   "dependencies": {
-    "ws": "8.18.0"
+    "ws": "8.21.3"
   },
   "engines": {
     "node": ">=22.19.0"
