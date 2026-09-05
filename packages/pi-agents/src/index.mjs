@@ -31,6 +31,8 @@ export {
   SESSION_API_KEY_ENV,
   SESSION_ENDPOINT_ENV,
   SESSION_MODEL_IDS,
+  validateSessionRoleModels,
+  effectiveSessionRoleModels,
   MAX_SESSION_ENDPOINT_BYTES,
   isPublicSessionAddress,
   validateSessionEndpoint,

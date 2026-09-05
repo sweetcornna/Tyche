@@ -299,6 +299,7 @@ async function runTierCluster(options, tier, evidence) {
     model: options.model,
     timeoutMs: options.timeoutMs,
     strategyPrompt: options.strategyPrompt || '',
+    roleModels: options.roleModels,
     evidence
   }
   for (const key of ['providerEnv', 'workerEnv', 'baseEnv', 'workerPath', 'execPath', 'cwd']) {

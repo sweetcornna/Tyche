@@ -908,3 +908,105 @@ test('active escaped credentials are rejected from applied text, discussion, and
     } finally { await service.stop() }
   }
 })
+
+test('model configuration is exact, session-local, and rejects invalid mappings atomically', async () => {
+  const { service, info } = await startService()
+  const other = await startService()
+  try {
+    assert.equal((await httpRequest(info, '/api/models')).status, 401)
+    const session = await openSession(info)
+    const post = (body, extras = {}) => httpRequest(info, '/api/models', { method: 'POST', body, ...session, ...extras })
+    const initial = (await httpRequest(info, '/api/models', session)).json
+    assert.equal(initial.allowed_models.length, 5)
+    assert.equal(Object.keys(initial.effective_models).length, 6)
+    assert.ok(Object.values(initial.effective_models).every((model) => model === PROVIDER_MODELS[0]))
+    assert.equal((await post({ role_models: {} }, { csrf: '' })).status, 403)
+    assert.equal((await post({ role_models: {} }, { origin: 'https://evil.invalid' })).status, 403)
+    assert.equal((await post({ role_models: {} }, { headers: { Host: 'localhost' } })).status, 403)
+    assert.equal((await httpRequest(info, '/api/models?role=admin', session)).status, 400)
+    for (const body of [{ role_models: { reviewer: PROVIDER_MODELS[2], admin: PROVIDER_MODELS[0] } }, { role_models: { reviewer: 'unsupported-model' } }, { role_models: { reviewer: PROVIDER_KEY } }, { role_models: { [PROVIDER_KEY]: PROVIDER_MODELS[0] } }, { role_models: [], endpoint: PROVIDER_ENDPOINT }, { role_models: { reviewer: { model: PROVIDER_MODELS[0] } } }]) {
+      const result = await post(body)
+      assert.equal(result.status, 400)
+      assert.equal(result.text.includes(PROVIDER_KEY), false)
+      assert.deepEqual((await httpRequest(info, '/api/models', session)).json, initial)
+    }
+    const changed = await post({ role_models: { reviewer: PROVIDER_MODELS[4] } })
+    assert.equal(changed.json.effective_models.reviewer, PROVIDER_MODELS[4])
+    assert.equal(changed.json.effective_models.orchestrator, PROVIDER_MODELS[0])
+    const otherSession = await openSession(other.info)
+    assert.equal((await httpRequest(other.info, '/api/models', session)).status, 401)
+    assert.deepEqual((await httpRequest(other.info, '/api/models', otherSession)).json.role_models, {})
+    await httpRequest(info, '/api/logout', { method: 'POST', body: {}, ...session })
+    assert.equal((await httpRequest(info, '/api/models', session)).status, 401)
+  } finally { await service.stop(); await other.service.stop() }
+})
+
+test('model suggestions remain unapplied until confirmed, then select the main Agent and freeze every cycle role', async () => {
+  const snapshots = []
+  const discussions = []
+  const suggested = { orchestrator: PROVIDER_MODELS[1], 'btc-analyst': PROVIDER_MODELS[2], reviewer: PROVIDER_MODELS[4] }
+  let release
+  let entered
+  const started = new Promise((resolve) => { entered = resolve })
+  const { service, info } = await startService({ adapters: { validateProviderConfig: async () => ({ ok: true }), discussStrategy: async (input, runtime) => { discussions.push({ input, model: runtime.model }); return { reply: '可分别调整这些模型；尚未应用。', suggested_role_models: suggested } }, runCycle: async (_, runtime) => { snapshots.push(runtime); if (snapshots.length === 2) { entered(); await new Promise((resolve) => { release = resolve }) } return { outcome: 'NO_ACTION', reused: snapshots.length > 1 } } } })
+  try {
+    const session = await openSession(info); await configureProvider(info, session)
+    const post = (route, body) => httpRequest(info, route, { method: 'POST', body, ...session })
+    const firstDiscussion = await post('/api/strategy/discuss', { message: '调整主 Agent、BTC 分析和复核模型。' })
+    assert.deepEqual(firstDiscussion.json.suggested_role_models, suggested)
+    assert.equal(discussions[0].model, PROVIDER_MODELS[0])
+    assert.equal(Object.keys(discussions[0].input.roleModels).length, 6)
+    await post('/api/cycle', { date: DATE, iso_week: WEEK })
+    assert.ok(Object.values(snapshots[0].roleModels).every((model) => model === PROVIDER_MODELS[0]))
+    assert.deepEqual((await httpRequest(info, '/api/models', session)).json.role_models, {})
+    assert.equal((await post('/api/models', { role_models: suggested })).status, 200)
+    await post('/api/strategy/discuss', { message: '核查当前模型。' })
+    assert.equal(discussions[1].model, PROVIDER_MODELS[1])
+    assert.equal(discussions[1].input.roleModels['btc-analyst'], PROVIDER_MODELS[2])
+    assert.equal(discussions[1].input.roleModels.preflight, PROVIDER_MODELS[0])
+    const pending = post('/api/cycle', { date: DATE, iso_week: WEEK }); await started
+    assert.equal(Object.isFrozen(snapshots[1].roleModels), true)
+    for (const [role, model] of Object.entries(suggested)) assert.equal(snapshots[1].roleModels[role], model)
+    assert.equal((await post('/api/models', { role_models: { reviewer: PROVIDER_MODELS[0] } })).status, 409)
+    assert.equal((await configureProvider(info, session)).status, 409)
+    assert.equal((await post('/api/strategy/discuss', { message: 'switch now' })).status, 409)
+    release(); assert.equal((await pending).json.reused, true)
+  } finally { await service.stop() }
+})
+
+test('invalid model suggestions and expired discussions do not mutate model settings', async () => {
+  let clock = Date.now()
+  let output = { reply: 'safe', suggested_role_models: { admin: PROVIDER_MODELS[0] } }
+  let expire = false
+  const { service, info } = await startService({ now: () => clock, adapters: { validateProviderConfig: async () => ({ ok: true }), discussStrategy: async () => { if (expire) clock += SESSION_TTL_MS; return output } } })
+  try {
+    const session = await openSession(info); await configureProvider(info, session)
+    const post = (body) => httpRequest(info, '/api/strategy/discuss', { method: 'POST', body, ...session })
+    for (const suggestion of [{ admin: PROVIDER_MODELS[0] }, { reviewer: 'unknown-model' }, { reviewer: PROVIDER_KEY }]) {
+      output = { reply: 'safe', suggested_role_models: suggestion }
+      const result = await post({ message: 'review models' })
+      assert.equal(result.status, 502)
+      assert.equal(result.text.includes(PROVIDER_KEY), false)
+      assert.deepEqual((await httpRequest(info, '/api/models', session)).json.role_models, {})
+      assert.deepEqual((await httpRequest(info, '/api/strategy', session)).json.discussion, [])
+    }
+    expire = true; output = { reply: 'safe', suggested_role_models: { reviewer: PROVIDER_MODELS[1] } }
+    assert.equal((await post({ message: 'review models' })).status, 401)
+    assert.equal((await httpRequest(info, '/api/models', session)).status, 401)
+  } finally { await service.stop() }
+})
+
+test('clearing a connection restores the default model while preserving applied role overrides', async () => {
+  const { service, info } = await startService()
+  try {
+    const session = await openSession(info)
+    await configureProvider(info, session, { ...PROVIDER_BODY, model: PROVIDER_MODELS[1] })
+    await httpRequest(info, '/api/models', { method: 'POST', body: { role_models: { reviewer: PROVIDER_MODELS[3] } }, ...session })
+    assert.equal((await httpRequest(info, '/api/models', session)).json.effective_models.orchestrator, PROVIDER_MODELS[1])
+    await httpRequest(info, '/api/provider/clear', { method: 'POST', body: {}, ...session })
+    const models = (await httpRequest(info, '/api/models', session)).json
+    assert.equal(models.default_model, PROVIDER_MODELS[0])
+    assert.equal(models.effective_models.orchestrator, PROVIDER_MODELS[0])
+    assert.equal(models.effective_models.reviewer, PROVIDER_MODELS[3])
+  } finally { await service.stop() }
+})

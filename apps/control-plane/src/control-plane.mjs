@@ -5,7 +5,7 @@ import path from 'node:path'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { URL } from 'node:url'
 import { WebSocketServer, WebSocket } from 'ws'
-import { containsSessionSecret } from '../../../packages/pi-agents/src/session-provider.mjs'
+import { containsSessionSecret, SESSION_MODEL_IDS, validateSessionRoleModels, effectiveSessionRoleModels } from '../../../packages/pi-agents/src/session-provider.mjs'
 
 export const LOOPBACK_HOST = '127.0.0.1'
 export const SESSION_TTL_MS = 15 * 60 * 1000
@@ -17,8 +17,7 @@ export const MAX_WS_PAYLOAD_BYTES = 64 * 1024
 export const PROVIDER = 'openai-responses-compatible'
 export const PAPER_SETUP_FIELDS = Object.freeze(['configured_leverage', 'risk_per_trade_bps', 'max_order_notional_usdt', 'daily_new_notional_cap_usdt', 'max_managed_notional_usdt', 'initial_usdt', 'daily_loss_bps', 'max_drawdown_bps', 'max_spread_bps', 'max_entry_distance_bps', 'trigger_slippage_bps'])
 const STRATEGY_LIMIT = 8000
-const PROVIDER_MODEL_PREFIX = ['g', 'p', 't', '-', '5', '.', '6', '-'].join('')
-export const PROVIDER_MODELS = Object.freeze([`${PROVIDER_MODEL_PREFIX}luna`, `${PROVIDER_MODEL_PREFIX}sol`])
+export const PROVIDER_MODELS = SESSION_MODEL_IDS
 export const MAX_PROVIDER_ENDPOINT_BYTES = 2048
 export const MAX_PROVIDER_API_KEY_BYTES = 8192
 export const ARM_CONFIRMATIONS = Object.freeze({
@@ -315,6 +314,15 @@ export function createControlPlane(options = {}) {
     }
   }
 
+  function modelsDto(session) {
+    const defaultModel = session.providerConfig?.model || PROVIDER_MODELS[0]
+    return { default_model: defaultModel, role_models: { ...session.roleModels }, effective_models: effectiveSessionRoleModels(defaultModel, session.roleModels), allowed_models: [...PROVIDER_MODELS], scope: 'session' }
+  }
+
+  function checkedRoleModels(value, status = 400) {
+    try { return validateSessionRoleModels(value) } catch { fail('CONTROL_ROLE_MODELS_INVALID', '模型配置只能包含固定六个 Agent 和设置中列出的模型；未应用任何修改。', status) }
+  }
+
   function clearProvider(session, reason) {
     const config = session?.providerConfig
     if (!config) return false
@@ -333,6 +341,7 @@ export function createControlPlane(options = {}) {
     clearProvider(session, reason)
     session.strategy = ''
     session.discussion = []
+    session.roleModels = {}
     sessions.delete(sessionId)
     return true
   }
@@ -378,7 +387,7 @@ export function createControlPlane(options = {}) {
       const session = requireSession(request, request.method !== 'GET')
       const body = request.method === 'POST' ? await readJsonBody(request) : null
       const result = await dispatchHttp(url, request.method || 'GET', body, session)
-      const explicitDto = ['/api/provider', '/api/provider/clear', '/api/paper/setup', '/api/strategy', '/api/strategy/discuss'].includes(url.pathname)
+      const explicitDto = ['/api/provider', '/api/provider/clear', '/api/paper/setup', '/api/strategy', '/api/strategy/discuss', '/api/models'].includes(url.pathname)
       sendJson(response, 200, explicitDto ? result : safeOutput(result), {}, { sensitive: explicitDto })
     } catch (error) {
       const failure = safeError(error)
@@ -516,7 +525,7 @@ export function createControlPlane(options = {}) {
   async function configureProvider(session, body) {
     if (session.providerBusy) fail('CONTROL_PROVIDER_BUSY', 'Provider configuration is busy', 409)
     const candidate = validateProviderBody(body, session.providerConfig)
-    if (containsSessionSecret([session.strategy || '', session.discussion || []], { apiKey: candidate.apiKey.toString('utf8'), endpoint: candidate.endpoint })) {
+    if (containsSessionSecret([session.strategy || '', session.discussion || [], session.roleModels || {}], { apiKey: candidate.apiKey.toString('utf8'), endpoint: candidate.endpoint })) {
       candidate.apiKey.fill(0)
       fail('CONTROL_STRATEGY_SECRET', '连接凭据与策略文本冲突，请先清除相关策略内容。', 400)
     }
@@ -565,7 +574,8 @@ export function createControlPlane(options = {}) {
       model: source.model,
       endpoint: source.endpoint,
       apiKey: runtimeKey,
-      strategyPrompt: session.strategy || ''
+      strategyPrompt: session.strategy || '',
+      roleModels: effectiveSessionRoleModels(source.model, session.roleModels)
     })
     const runtimeSecrets = [runtimeKey.toString('utf8'), source.endpoint]
     session.providerBusy = true
@@ -628,20 +638,25 @@ export function createControlPlane(options = {}) {
     const source = session.providerConfig
     if (containsSessionSecret({ message, prompt: session.strategy || '', history: session.discussion || [] }, { apiKey: source.apiKey.toString('utf8'), endpoint: source.endpoint })) fail('CONTROL_STRATEGY_SECRET', '策略和讨论不能包含连接凭据。', 400)
     const key = Buffer.from(source.apiKey)
-    const runtime = Object.freeze({ provider: source.provider, model: source.model, endpoint: source.endpoint, apiKey: key })
+    const effectiveModels = effectiveSessionRoleModels(source.model, session.roleModels)
+    const runtime = Object.freeze({ provider: source.provider, model: effectiveModels.orchestrator, endpoint: source.endpoint, apiKey: key })
     const history = (session.discussion || []).slice(-8).map(({ role, content }) => ({ role, content }))
     session.providerBusy = true
     try {
       let result
-      try { result = await adapter.discussStrategy({ message, prompt: session.strategy || '', history }, runtime) } catch { fail('CONTROL_STRATEGY_FAILED', '策略讨论未完成，请检查模型连接后重试。', 502) }
+      try { result = await adapter.discussStrategy({ message, prompt: session.strategy || '', history, roleModels: effectiveModels }, runtime) } catch (error) {
+        if (error?.code === 'PI_STRATEGY_MODELS_INVALID') fail('CONTROL_ROLE_MODELS_INVALID', '模型建议含不支持的角色或模型，请使用设置中列出的模型。', 502)
+        fail('CONTROL_STRATEGY_FAILED', '策略讨论未完成，请检查模型连接后重试。', 502)
+      }
       if (sessions.get(session.id) !== session || Number(now()) >= session.expiresAt) fail('CONTROL_SESSION_REQUIRED', '会话已失效，请重新登录。', 401)
       // Exact DTO and secret checks run before any chat state is retained.
       if (containsSessionSecret(result, { apiKey: key.toString('utf8'), endpoint: source.endpoint })) fail('CONTROL_STRATEGY_SECRET', '模型返回了连接凭据，结果已丢弃。', 502)
-      exactBody(result, ['reply', 'suggested_prompt'], ['reply'])
+      exactBody(result, ['reply', 'suggested_prompt', 'suggested_role_models'], ['reply'])
       const reply = boundedStrategy(result.reply, session)
       const suggested = result.suggested_prompt === undefined ? '' : boundedStrategy(result.suggested_prompt, session, { empty: true })
+      const suggestedModels = result.suggested_role_models === undefined ? undefined : checkedRoleModels(result.suggested_role_models, 502)
       session.discussion = [...history, { role: 'user', content: message }, { role: 'assistant', content: reply }]
-      return { reply, suggested_prompt: suggested }
+      return { reply, suggested_prompt: suggested, ...(suggestedModels === undefined ? {} : { suggested_role_models: suggestedModels }) }
     } finally { key.fill(0); if (sessions.get(session.id) === session) session.providerBusy = false }
   }
 
@@ -722,7 +737,16 @@ export function createControlPlane(options = {}) {
 
   async function dispatchHttp(url, method, body, session) {
     const route = `${method} ${url.pathname}`
-    if (['/api/paper/setup', '/api/strategy', '/api/strategy/discuss'].includes(url.pathname) && url.search) fail('CONTROL_QUERY_UNKNOWN', 'This route does not accept a query', 400)
+    if (['/api/paper/setup', '/api/strategy', '/api/strategy/discuss', '/api/models'].includes(url.pathname) && url.search) fail('CONTROL_QUERY_UNKNOWN', 'This route does not accept a query', 400)
+    if (route === 'GET /api/models') return modelsDto(session)
+    if (route === 'POST /api/models') {
+      exactBody(body, ['role_models'], ['role_models'])
+      if (session.providerBusy) fail('CONTROL_PROVIDER_BUSY', '模型正在运行，请等待完成后再应用模型配置。', 409)
+      const changes = checkedRoleModels(body.role_models)
+      if (activeOutputSecrets().some((secret) => Object.values(changes).some((model) => model.includes(secret)))) fail('CONTROL_STRATEGY_SECRET', '模型配置不能包含连接凭据。', 400)
+      session.roleModels = Object.freeze({ ...session.roleModels, ...changes })
+      return modelsDto(session)
+    }
     if (route === 'GET /api/paper/setup') return paperSetupCall('paperSetupStatus')
     if (route === 'POST /api/paper/setup') {
       exactBody(body, PAPER_SETUP_FIELDS)

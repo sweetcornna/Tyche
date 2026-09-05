@@ -66,16 +66,30 @@ accounts, configured limits and configuration digests are checked and never
 reset or silently replaced. The standalone `@tyche/control-plane` package CLI
 is only a projection shell; use the script above for the complete workflow.
 
-**自动交易 / 策略** lets you paste a semantic BTC/ETH strategy or discuss it with
-the main Agent through the session model. Discussion has no tools or account
+The conversation workspace has a fixed Agent list on the left, the main Agent
+chat in the center, and settings, strategy drafts and run details on the right.
+It uses a neutral desktop-chat layout while retaining Tyche's identity. Open
+**运行设置** for the model connection and first-run Paper inputs, or open the
+strategy panel to paste a semantic BTC/ETH prompt. Discussion has no tools or account
 access and does not apply changes. Select **应用策略** to snapshot the strategy
 for the next unstarted analysis; all six weekly/daily roles retain their fixed
 contracts. Existing same-cycle receipts still reuse their results, so applying
 a prompt never forces a second simulated fill. Strategies and discussion are
 session-memory only and disappear on logout, expiry or service restart. This
 page runs one Paper cycle per click; it does not enable a scheduler or testnet
-execution. Event logs, the fixed DAG and testnet controls are collapsed into
-run details and advanced settings.
+execution. Event logs, the fixed DAG and testnet controls are in run details
+and advanced settings.
+
+Ask the main Agent to change models for any of the six workflow roles. It
+returns a model-change suggestion; select **应用模型配置** to apply it separately
+from a strategy change. The fixed session catalog contains Luna, Sol, Terra,
+5.5 and 5.4 Mini from the installed Pi Responses metadata. The API service must
+support the selected model. The main Agent uses the effective orchestrator
+model; other roles use their explicit selection or the connection's default
+(Luna initially). Settings remain session-local. Each cycle freezes the full
+role mapping, and persisted provenance records the default, per-role models
+and actual attempt models. Model changes never bypass receipt reuse or grant
+additional tools, roles or trading permissions.
 
 The runnable local cluster keeps the scheduler/control plane and the optional
 testnet executor in separate processes. The cluster service owns no exchange

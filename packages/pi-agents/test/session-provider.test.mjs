@@ -50,12 +50,12 @@ function sessionJob(overrides = {}) {
 
 test('session provider and model allowlists are fixed', async () => {
   assert.equal(SESSION_PROVIDER_ID, 'openai-responses-compatible')
-  assert.deepEqual(SESSION_MODEL_IDS, ['gpt-5.6-luna', 'gpt-5.6-sol'])
+  assert.deepEqual(SESSION_MODEL_IDS, ['gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.5', 'gpt-5.4-mini'])
   await assert.rejects(
     createSessionProviderRuntime({
       endpoint: ENDPOINT,
       apiKey: API_KEY,
-      modelId: 'gpt-5.6-terra',
+      modelId: 'unsupported-model',
       lookup: publicLookup(),
       fetchImpl: async () => { throw new Error('must not fetch') }
     }),

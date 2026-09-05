@@ -58,12 +58,17 @@ test('source text has no private path, private infrastructure name, backend mode
   const sessionProviderModels = new Map([
     ['packages/pi-agents/src/session-provider.mjs', new Set([
       ['gpt', '5', '6', 'luna'].join('-').replace('-5-6-', '-5.6-'),
-      ['gpt', '5', '6', 'sol'].join('-').replace('-5-6-', '-5.6-')
+      ['gpt', '5', '6', 'sol'].join('-').replace('-5-6-', '-5.6-'),
+      ['gpt', '5', '6', 'terra'].join('-').replace('-5-6-', '-5.6-'),
+      ['gpt', '5.5'].join('-'),
+      ['gpt', '5.4', 'mini'].join('-')
     ])],
     ['packages/pi-agents/test/session-provider.test.mjs', new Set([
       ['gpt', '5', '6', 'luna'].join('-').replace('-5-6-', '-5.6-'),
       ['gpt', '5', '6', 'sol'].join('-').replace('-5-6-', '-5.6-'),
-      ['gpt', '5', '6', 'terra'].join('-').replace('-5-6-', '-5.6-')
+      ['gpt', '5', '6', 'terra'].join('-').replace('-5-6-', '-5.6-'),
+      ['gpt', '5.5'].join('-'),
+      ['gpt', '5.4', 'mini'].join('-')
     ])]
   ])
   const ipPattern = /\b(?:\d{1,3}\.){3}\d{1,3}\b/

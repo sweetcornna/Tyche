@@ -16,6 +16,7 @@ import {
   validateSemanticOutput
 } from './protocol.mjs'
 import { runWorkerProcess } from './worker-client.mjs'
+import { validateSessionRoleModels } from './session-provider.mjs'
 
 const ANALYST_ROLES = Object.freeze(['btc-analyst', 'eth-analyst'])
 const PREFLIGHT_KEYS = new Set(['status', 'evidence_refs', 'blockers'])
@@ -40,7 +41,7 @@ function validateClusterOptions(options) {
   if (options.runJob !== undefined && typeof options.runJob !== 'function') throw new Error('PI_RUNNER_REQUIRED')
   const runId = options.runId || randomUUID()
   requiredString(runId, 'runId', 256)
-  return { ...options, tier: options.tier || options.mode, timeoutMs, runId }
+  return { ...options, roleModels: validateSessionRoleModels(options.roleModels ?? {}), tier: options.tier || options.mode, timeoutMs, runId }
 }
 
 function emitEvent(options, role, asset, attempt, status) {
@@ -108,7 +109,7 @@ function createRoleJob(options, role, asset, attempt, inputs) {
     date: options.date,
     isoWeek: options.isoWeek,
     provider: options.provider,
-    model: options.model,
+    model: options.roleModels[role] || options.model,
     attempt,
     timeoutMs: options.timeoutMs,
     input: { ...jobInput(role, options, inputs), ...(strategy ? { strategy_context: strategy } : {}) }
@@ -224,9 +225,12 @@ function provenance(options, results) {
     piAgentCore: '0.84.4',
     piAi: '0.84.4',
     provider: options.provider,
+    // model remains the legacy default; role_models and attempts record selection.
     model: options.model,
+    default_model: options.model,
+    role_models: Object.fromEntries(ROLES.map((role) => [role, options.roleModels[role] || options.model])),
     roles: [...ROLES],
-    attempts: results.map((result) => ({ role: result.role, attempt: result.attempt, status: result.status }))
+    attempts: results.map((result) => ({ role: result.role, model: result.model, attempt: result.attempt, status: result.status }))
   }
 }
 

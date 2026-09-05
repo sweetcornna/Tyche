@@ -235,6 +235,7 @@ export async function startControlPlaneChild(rawOptions = {}) {
               mode: 'primary',
               configPath: paperSetup.configPath(),
               strategyPrompt: runtime.strategyPrompt || '',
+              roleModels: runtime.roleModels,
               env: workerEnv,
               workerEnv,
               onEvent: (event) => plane.publish(redactSessionValue(projectClusterEvent({ type: 'dag_role', data: event }), sessionSecrets))

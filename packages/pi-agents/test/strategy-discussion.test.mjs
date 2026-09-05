@@ -61,3 +61,21 @@ test('escaped credentials in raw discussion input or parsed JSON output never cr
     assert.equal(requests, 3)
   }
 })
+
+test('discussion sends effective model choices and returns only supported role-model suggestions', async () => {
+  const roleModels = Object.fromEntries(['orchestrator', 'preflight', 'btc-analyst', 'eth-analyst', 'synthesizer', 'reviewer'].map((role) => [role, role === 'orchestrator' ? SESSION_MODEL_IDS[1] : SESSION_MODEL_IDS[0]]))
+  let request
+  const suggested = { 'btc-analyst': SESSION_MODEL_IDS[2], reviewer: SESSION_MODEL_IDS[4] }
+  const settings = { ...connection, modelId: roleModels.orchestrator, lookup: publicLookup, fetchImpl: async (_, init) => { request = JSON.parse(init.body); return sse({ reply: 'Models are suggestions until applied.', suggested_role_models: suggested }) } }
+  const result = await discussSessionStrategy({ message: 'Change BTC and reviewer models.', roleModels }, settings)
+  assert.deepEqual(result.suggested_role_models, suggested)
+  assert.equal(request.model, roleModels.orchestrator)
+  const userText = JSON.stringify(request.input)
+  for (const model of SESSION_MODEL_IDS) assert.ok(userText.includes(model))
+  assert.ok(userText.includes('Current effective role models'))
+  assert.ok(userText.includes('orchestrator'))
+  assert.ok(!request.tools || request.tools.length === 0)
+  for (const value of [{ admin: SESSION_MODEL_IDS[0] }, { reviewer: 'unsupported-model' }, { reviewer: SESSION_MODEL_IDS[0], endpoint: 'bad' }]) {
+    await assert.rejects(discussSessionStrategy({ message: 'Change models.', roleModels }, { ...settings, fetchImpl: async () => sse({ reply: 'safe', suggested_role_models: value }) }), { code: 'PI_STRATEGY_MODELS_INVALID' })
+  }
+})

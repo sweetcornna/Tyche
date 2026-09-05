@@ -9,9 +9,9 @@ const ROLES = Object.freeze(WORKFLOW_NODES.map(({ role }) => role))
 const VENUES = Object.freeze(['gate', 'binance'])
 const VENUE_NAMES = Object.freeze({ gate: 'Gate', binance: 'Binance' })
 const ARM_PHRASES = Object.freeze({ gate: 'ARM TESTNET GATE 24H', binance: 'ARM TESTNET BINANCE 24H' })
-const SESSION_PROVIDER = 'openai-responses-compatible'
 const SESSION_MODEL_PREFIX = ['g', 'p', 't', '-', '5', '.', '6', '-'].join('')
-const SESSION_MODELS = Object.freeze([`${SESSION_MODEL_PREFIX}luna`, `${SESSION_MODEL_PREFIX}sol`])
+const DEFAULT_MODEL = `${SESSION_MODEL_PREFIX}luna`
+const EMPTY_MODELS = Object.freeze({ default_model: DEFAULT_MODEL, allowed_models: [DEFAULT_MODEL], role_models: {}, effective_models: Object.fromEntries(ROLES.map((role) => [role, DEFAULT_MODEL])) })
 const EMPTY_PROVIDER = Object.freeze({ configured: false, provider: null, model: null, endpoint: null, scope: 'session', manual_cycle_only: true })
 
 const EMPTY_DAG = { roles: ROLES.map((role) => ({ role, status: 'waiting' })) }
@@ -102,7 +102,7 @@ function MessageStream({ messages }) {
   </div>
 }
 
-function ProviderPanel({ provider, model, endpoint, apiKey, setModel, setEndpoint, setApiKey, busy }) {
+function ProviderPanel({ provider, model, catalog, endpoint, apiKey, setModel, setEndpoint, setApiKey, busy }) {
   const configured = provider?.configured === true
   return <section className="connection-section">
     <div className="section-heading"><h2>模型连接</h2><Tone value={configured ? 'ready' : 'waiting'} label={configured ? '当前会话已连接' : '待填写'} /></div>
@@ -110,8 +110,8 @@ function ProviderPanel({ provider, model, endpoint, apiKey, setModel, setEndpoin
       <label>API endpoint<input type="url" value={endpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="https://example.com/v1" spellCheck="false" disabled={busy} /></label>
       <label>API key<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="new-password" spellCheck="false" disabled={busy} placeholder={configured ? '已保存；留空继续使用' : '填写模型 API key'} /></label>
     </div>
-    <details className="model-options"><summary>模型 · {model}</summary><label>模型<select value={model} onChange={(event) => setModel(event.target.value)} disabled={busy}>{SESSION_MODELS.map((value) => <option value={value} key={value}>{value}</option>)}</select></label></details>
-    <p className="field-note">API key 只保留在当前会话内，退出或重启服务后清除。</p>
+    <details className="model-options"><summary>默认模型 · {model}</summary><label>未单独指定的 Agent 使用此模型<select value={model} onChange={(event) => setModel(event.target.value)} disabled={busy}>{catalog.map((value) => <option value={value} key={value}>{value}</option>)}</select></label></details>
+    <p className="field-note">API key 只保留在当前会话内，退出或重启服务后清除。模型需由你的 API 服务支持。</p>
   </section>
 }
 
@@ -135,18 +135,26 @@ function RunResult({ cycle, workflow, phase, busy }) {
   </section>
 }
 
-function StrategyPanel({ draft, applied, setDraft, onApply, discussion, message, setMessage, onDiscuss, suggestion, busy, setup, onWorkflow }) {
-  return <section className="strategy-panel"><div className="section-heading"><h2>自动交易 / 策略</h2><Tone value={setup?.ready ? 'ready' : 'waiting'} label={setup?.ready ? '模拟设置就绪' : '待完成模拟设置'} /></div>
-    <p className="mode-copy">当前执行：Paper 模拟 · 每次点击运行一个完整周期。</p>
-    <label>策略提示词<textarea value={draft} onChange={(event) => setDraft(event.target.value)} maxLength={8000} rows={6} placeholder="直接粘贴 BTC / ETH 的分析偏好，或与主 Agent 讨论后使用建议。" disabled={busy} /></label>
-    <div className="strategy-actions"><span>{draft === applied ? '已应用' : '有未应用修改'}</span><button type="button" className="quiet-action" onClick={onApply} disabled={busy || draft === applied}>应用策略</button><button type="button" className="quiet-action" onClick={onWorkflow}>前往运行 workflow</button></div>
-    <p className="field-note">策略和讨论仅保留在当前会话内。应用后用于下一未开始的分析；已有周期结果仍会复用。资金、杠杆与执行权限由固定规则控制。</p>
-    <div className="discussion"><h3>与主 Agent 讨论</h3><div className="discussion-messages" aria-live="polite">{discussion.map((item, index) => <div key={index} className={'discussion-' + item.role}><strong>{item.role === 'user' ? '你' : '主 Agent'}</strong><p>{item.content}</p></div>)}</div>
-      {suggestion && <button type="button" className="quiet-action" onClick={() => setDraft(suggestion)} disabled={busy}>将建议放入草稿</button>}
-      <label>讨论内容<textarea value={message} onChange={(event) => setMessage(event.target.value)} maxLength={8000} rows={3} disabled={busy} placeholder="描述你希望如何调整分析策略…" /></label><button type="button" className="quiet-action" onClick={onDiscuss} disabled={busy || !message.trim()}>发送讨论</button>
-      <p className="field-note">讨论只提供解释与建议，应用策略需单独确认。</p>
-    </div>
+function StrategyPanel({ draft, applied, setDraft, onApply, busy }) {
+  return <section className="strategy-panel"><div className="section-heading"><h2>分析策略</h2><span className="save-state">{draft === applied ? '已应用' : '未应用修改'}</span></div>
+    <label>策略提示词<textarea value={draft} onChange={(event) => setDraft(event.target.value)} maxLength={8000} rows={10} placeholder="粘贴 BTC / ETH 的分析偏好，或在主 Agent 对话中讨论。" disabled={busy} /></label>
+    <button type="button" className="primary-action" onClick={onApply} disabled={busy || draft === applied}>应用策略</button>
+    <p className="field-note">仅当前会话有效，应用后用于后续分析。资金、杠杆和执行权限保持固定规则；已完成的周期继续复用。</p>
   </section>
+}
+
+function AgentSidebar({ workflow, models, selected, onSelect, onChat, onSettings }) {
+  return <aside className="agent-sidebar"><div className="brand-lockup"><span className="brand-mark">τ</span><strong>Tyche</strong></div>
+    <nav className="workspace-nav" aria-label="工作台导航"><button type="button" className="nav-current" onClick={onChat}>主 Agent</button><button type="button" onClick={onSettings}>运行设置</button></nav>
+    <div className="sidebar-label">工作流 Agent</div><nav className="agent-list" aria-label="固定六个 Agent">{WORKFLOW_NODES.map(({ role, name }) => <button type="button" key={role} className={selected === role ? 'selected' : ''} onClick={() => onSelect(role)} data-role={role} data-status={workflow.byRole[role].status}><span className="agent-row"><strong>{name}</strong><Tone value={workflow.byRole[role].status} label={workflow.byRole[role].statusLabel} /></span><span className="agent-model">{models.effective_models[role]}</span></button>)}</nav>
+    <div className="sidebar-foot"><span>BTC / ETH</span><span>Paper · 单次运行</span></div>
+  </aside>
+}
+
+function ModelSuggestion({ suggestion, models, onApply, busy }) {
+  if (!suggestion || Object.keys(suggestion).length === 0) return null
+  const applied = Object.entries(suggestion).every(([role, model]) => models.effective_models[role] === model)
+  return <section className="suggestion-card"><div className="section-heading"><h3>模型变更建议</h3><span className="save-state">{applied ? '已应用' : '尚未应用'}</span></div><dl className="model-diff">{Object.entries(suggestion).map(([role, model]) => <div key={role}><dt>{WORKFLOW_NODES.find((node) => node.role === role)?.name}</dt><dd><span>{models.effective_models[role]}</span><span aria-hidden="true">→</span><strong>{model}</strong></dd></div>)}</dl><button type="button" className="quiet-action" onClick={onApply} disabled={busy || applied}>应用模型配置</button><p className="field-note">主 Agent 使用流程编排的模型。修改仅影响后续任务。</p></section>
 }
 
 function compactValue(value) {
@@ -192,7 +200,7 @@ function VenueCard({ venue, data, csrf, onAction, date, isoWeek, planHash, confi
 
 function Login({ onLogin, error }) {
   const [token, setToken] = useState('')
-  return <main className="login-shell"><div className="login-card"><span className="brand-mark large">τ</span><p className="eyebrow">本机回环控制平面</p><h1>让信号留在<br />安全边界内。</h1><p className="login-copy">请输入本地服务打印的一次性 bootstrap token。本页面不会存储该凭据。</p><form onSubmit={(event) => { event.preventDefault(); onLogin(token) }}><label>bootstrap token<input autoFocus value={token} onChange={(event) => setToken(event.target.value)} type="password" spellCheck="false" /></label><button type="submit" className="primary-action" disabled={!token.trim()}>进入工作台</button></form>{error && <p className="form-error">{error}</p>}</div></main>
+  return <main className="login-shell"><div className="login-card"><span className="brand-mark large">τ</span><h1>登录 Tyche</h1><p className="login-copy">请输入本地服务打印的一次性 bootstrap token。本页面不会存储该凭据。</p><form onSubmit={(event) => { event.preventDefault(); onLogin(token) }}><label>bootstrap token<input autoFocus value={token} onChange={(event) => setToken(event.target.value)} type="password" spellCheck="false" /></label><button type="submit" className="primary-action" disabled={!token.trim()}>进入工作台</button></form>{error && <p className="form-error">{error}</p>}</div></main>
 }
 
 export function App() {
@@ -202,14 +210,16 @@ export function App() {
   const [selected, setSelected] = useState('orchestrator')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
-  const [theme, setTheme] = useState('paper')
+  const [theme, setTheme] = useState('light')
   const [status, setStatus] = useState({ service: 'connecting' })
   const [provider, setProvider] = useState(EMPTY_PROVIDER)
-  const [providerModel, setProviderModel] = useState(SESSION_MODELS[0])
+  const [providerModel, setProviderModel] = useState(DEFAULT_MODEL)
   const [providerEndpoint, setProviderEndpoint] = useState('')
   const [providerApiKey, setProviderApiKey] = useState('')
   const [providerBusy, setProviderBusy] = useState(false)
-  const [tab, setTab] = useState('workflow')
+  const [panel, setPanel] = useState(null)
+  const [modelConfig, setModelConfig] = useState(EMPTY_MODELS)
+  const [modelSuggestion, setModelSuggestion] = useState(null)
   const [setup, setSetup] = useState(null)
   const [paperDraft, setPaperDraft] = useState({})
   const [phase, setPhase] = useState('')
@@ -229,6 +239,7 @@ export function App() {
   const [roleEvents, setRoleEvents] = useState({})
   const wsRef = useRef(null)
   const operationRef = useRef(false)
+  const configurationRevisionRef = useRef(0)
   const cycleRunningRef = useRef(false)
   const workflowRunner = useMemo(() => createWorkflowRunner(controlApi), [])
 
@@ -237,9 +248,10 @@ export function App() {
   }, [])
 
   const refresh = useCallback(async () => {
-    const [nextStatus, nextProvider, nextCycle, nextDag, nextPaper, nextTestnet, nextSetup] = await Promise.all([controlApi.status(), controlApi.providerStatus(), controlApi.cycle(), controlApi.dag(), controlApi.paper(), controlApi.testnet(), controlApi.paperSetup()])
-    setProvider(nextProvider?.configured ? nextProvider : EMPTY_PROVIDER)
-    setStatus(nextStatus); setSetup(nextSetup); setPaper(nextPaper)
+    const revision = configurationRevisionRef.current
+    const [nextStatus, nextProvider, nextCycle, nextDag, nextPaper, nextTestnet, nextSetup, nextModels] = await Promise.all([controlApi.status(), controlApi.providerStatus(), controlApi.cycle(), controlApi.dag(), controlApi.paper(), controlApi.testnet(), controlApi.paperSetup(), controlApi.models()])
+    if (!operationRef.current && revision === configurationRevisionRef.current) { setProvider(nextProvider?.configured ? nextProvider : EMPTY_PROVIDER); setSetup(nextSetup); setModelConfig(nextModels) }
+    setStatus(nextStatus); setPaper(nextPaper)
     if (!cycleRunningRef.current) { setCycle(nextCycle); setDag(nextDag) }
     setTestnet((current) => Object.fromEntries(VENUES.map((venue) => [venue, { ...(nextTestnet?.[venue] || {}), plan_summary: nextTestnet?.[venue]?.plan_summary || current?.[venue]?.plan_summary } ])))
     setPlanHashes((current) => Object.fromEntries(VENUES.map((venue) => [venue, nextTestnet?.[venue]?.plan_summary?.plan_hash || nextTestnet?.[venue]?.plan_hash || current[venue] || ''])))
@@ -278,8 +290,8 @@ export function App() {
     try {
       setLoginError('')
       const response = await controlApi.session(bootstrapToken.trim())
-      setProvider(EMPTY_PROVIDER); setProviderModel(SESSION_MODELS[0]); setProviderEndpoint(''); setProviderApiKey('')
-      setStrategyDraft(''); setAppliedStrategy(''); setDiscussion([]); setSuggestion(''); setDiscussionMessage('')
+      setProvider(EMPTY_PROVIDER); setProviderModel(DEFAULT_MODEL); setProviderEndpoint(''); setProviderApiKey('')
+      setStrategyDraft(''); setAppliedStrategy(''); setDiscussion([]); setSuggestion(''); setDiscussionMessage(''); setModelConfig(EMPTY_MODELS); setModelSuggestion(null); configurationRevisionRef.current++
       setCsrf(response.csrf_token); setSessionExpiry(response.expires_at); pushMessage('会话', '当前标签页已通过验证', 'system')
     } catch (error) { setLoginError(`登录失败：${error.message}`) }
   }
@@ -287,6 +299,7 @@ export function App() {
   const runCycle = async () => {
     if (operationRef.current) return
     operationRef.current = true
+    configurationRevisionRef.current++
     cycleRunningRef.current = true
     try {
       setBusy(true); setNotice('')
@@ -294,38 +307,50 @@ export function App() {
       if (response) { setCycle(response); pushMessage('workflow', statusLabel(response.status || response.outcome), response.ok === false ? 'warning' : 'event') }
       cycleRunningRef.current = false
       await refresh()
-    } catch (error) { setNotice(`运行失败：${error.message}`); setCycle((current) => current.status === 'running' ? { ok: false, status: 'failed', blocked_stage: 'workflow', message: error.message } : current) } finally { setProviderApiKey(''); setBusy(false); cycleRunningRef.current = false; operationRef.current = false }
+    } catch (error) { setPanel('settings'); setNotice(`运行失败：${error.message}`); setCycle((current) => current.status === 'running' ? { ok: false, status: 'failed', blocked_stage: 'workflow', message: error.message } : current) } finally { setProviderApiKey(''); setBusy(false); cycleRunningRef.current = false; operationRef.current = false }
   }
 
   const acceptProvider = (response) => {
     setProvider(response); setProviderModel(response.model || providerModel); setProviderEndpoint(response.endpoint || providerEndpoint); setProviderApiKey('')
+    setModelConfig((current) => ({ ...current, default_model: response.model, effective_models: Object.fromEntries(ROLES.map((role) => [role, current.role_models[role] || response.model])) }))
   }
 
   const discuss = async () => {
     if (operationRef.current) return
     operationRef.current = true
+    configurationRevisionRef.current++
     try {
       setProviderBusy(true); setNotice('')
       const connection = await saveConnection(controlApi, csrf, provider, { endpoint: providerEndpoint, apiKey: providerApiKey, model: providerModel })
       acceptProvider(connection)
       const response = await controlApi.discussStrategy(discussionMessage, csrf)
-      setDiscussion((current) => [...current.slice(-8), { role: 'user', content: discussionMessage }, { role: 'assistant', content: response.reply }]); setSuggestion(response.suggested_prompt || ''); setDiscussionMessage('')
-    } catch (error) { setNotice(`讨论失败：${error.message}`) } finally { setProviderApiKey(''); setProviderBusy(false); operationRef.current = false }
+      setDiscussion((current) => [...current.slice(-8), { role: 'user', content: discussionMessage }, { role: 'assistant', content: response.reply }]); setSuggestion(response.suggested_prompt || ''); setModelSuggestion(response.suggested_role_models || null); setDiscussionMessage('')
+    } catch (error) { if (!provider.configured) setPanel('settings'); setNotice(`讨论失败：${error.message}`) } finally { setProviderApiKey(''); setProviderBusy(false); operationRef.current = false }
   }
 
   const applyStrategy = async () => {
     if (operationRef.current) return
     operationRef.current = true
+    configurationRevisionRef.current++
     try { setProviderBusy(true); setNotice(''); const response = await controlApi.applyStrategy(strategyDraft, csrf); setAppliedStrategy(response.prompt); setStrategyDraft(response.prompt) } catch (error) { setNotice(`应用失败：${error.message}`) } finally { setProviderBusy(false); operationRef.current = false }
+  }
+
+  const applyModels = async () => {
+    if (operationRef.current || !modelSuggestion) return
+    operationRef.current = true
+    configurationRevisionRef.current++
+    try { setProviderBusy(true); setNotice(''); setModelConfig(await controlApi.applyModels(modelSuggestion, csrf)) } catch (error) { setNotice(`模型配置未应用：${error.message}`) } finally { setProviderBusy(false); operationRef.current = false }
   }
 
   const clearProvider = async () => {
     if (operationRef.current) return
     operationRef.current = true
+    configurationRevisionRef.current++
     try {
       setProviderBusy(true); setNotice('')
       const response = await controlApi.clearProvider(csrf)
-      setProvider(response?.configured ? response : EMPTY_PROVIDER); setProviderModel(SESSION_MODELS[0]); setProviderEndpoint(''); pushMessage('模型连接', '当前会话的模型连接已清除', 'system')
+      setProvider(response?.configured ? response : EMPTY_PROVIDER); setProviderModel(DEFAULT_MODEL); setProviderEndpoint(''); pushMessage('模型连接', '当前会话的模型连接已清除', 'system')
+      setModelConfig((current) => ({ ...current, default_model: DEFAULT_MODEL, effective_models: Object.fromEntries(ROLES.map((role) => [role, current.role_models[role] || DEFAULT_MODEL])) }))
     } catch (error) {
       setNotice(`模型连接清除失败：${error.message}`); pushMessage('模型连接', `清除失败：${error.message}`, 'warning')
     } finally {
@@ -335,8 +360,8 @@ export function App() {
 
   const logout = async () => {
     try { await controlApi.logout(csrf) } finally {
-      setProviderApiKey(''); setProviderModel(SESSION_MODELS[0]); setProviderEndpoint(''); setProvider(EMPTY_PROVIDER); setCsrf(null)
-      setStrategyDraft(''); setAppliedStrategy(''); setDiscussion([]); setSuggestion(''); setDiscussionMessage('')
+      setProviderApiKey(''); setProviderModel(DEFAULT_MODEL); setProviderEndpoint(''); setProvider(EMPTY_PROVIDER); setCsrf(null)
+      setStrategyDraft(''); setAppliedStrategy(''); setDiscussion([]); setSuggestion(''); setDiscussionMessage(''); setModelConfig(EMPTY_MODELS); setModelSuggestion(null); configurationRevisionRef.current++
     }
   }
 
@@ -365,18 +390,29 @@ export function App() {
   if (!csrf) return <Login onLogin={login} error={loginError} />
 
   const working = busy || providerBusy
-  return <div className={`app-shell theme-${theme}`}>
-    <main className="workspace">
-      <header className="topbar"><div className="brand-lockup"><span className="brand-mark">τ</span><div><strong>tyche</strong><small>BTC / ETH</small></div></div><h1>分析与模拟交易</h1></header>
-      <nav className="workspace-tabs" aria-label="工作台页面"><button type="button" aria-current={tab === 'workflow' ? 'page' : undefined} onClick={() => setTab('workflow')}>运行 workflow</button><button type="button" aria-current={tab === 'strategy' ? 'page' : undefined} onClick={() => setTab('strategy')}>自动交易 / 策略</button></nav>
-      <form className="entry-form" noValidate onSubmit={(event) => { event.preventDefault(); if (tab === 'workflow') runCycle() }}>
-        <ProviderPanel provider={provider} model={providerModel} endpoint={providerEndpoint} apiKey={providerApiKey} setModel={setProviderModel} setEndpoint={setProviderEndpoint} setApiKey={setProviderApiKey} busy={working} />
-        {tab === 'workflow' ? <><PaperSetup setup={setup} draft={paperDraft} onChange={(key, value) => setPaperDraft((current) => ({ ...current, [key]: value }))} busy={working} /><div className="run-action"><button type="submit" className="primary-action" disabled={working || !setup || setup.status === 'blocked'}>{busy ? phase : '运行 workflow'}</button><p className="field-note">分析 → 确定性计划 → Paper 模拟。日期与周次自动使用当日 UTC。</p></div></> : <StrategyPanel draft={strategyDraft} applied={appliedStrategy} setDraft={setStrategyDraft} onApply={applyStrategy} discussion={discussion} message={discussionMessage} setMessage={setDiscussionMessage} onDiscuss={discuss} suggestion={suggestion} busy={working} setup={setup} onWorkflow={() => setTab('workflow')} />}
-      </form>
+  const currentModels = modelConfig.effective_models
+  const hasRun = busy || cycle?.outcome || cycle?.status === 'failed'
+  return <div className={`app-shell theme-${theme} ${panel ? 'panel-open' : ''}`}>
+    <AgentSidebar workflow={workflow} models={modelConfig} selected={selected} onSelect={(role) => { setSelected(role); setPanel('details') }} onChat={() => setPanel(null)} onSettings={() => setPanel('settings')} />
+    <main className="chat-workspace">
+      <header className="chat-topbar"><div><h1>主 Agent</h1><span className="main-model">{currentModels.orchestrator}</span></div><div className="topbar-actions"><button type="button" className="quiet-action" onClick={() => setPanel((current) => current ? null : 'settings')} aria-expanded={Boolean(panel)}>设置与详情</button><button type="button" className="primary-action run-workflow" onClick={runCycle} disabled={working || !setup || setup.status === 'blocked'}>{busy ? phase : '运行 workflow'}</button></div></header>
+      {(!provider.configured || !setup?.ready) && <div className="readiness-banner"><span>{!provider.configured ? '填写模型连接后，即可开始讨论。' : '模型已连接。运行前请完成首次模拟设置。'}</span><button type="button" onClick={() => setPanel('settings')}>打开设置</button></div>}
       {notice && <div className="notice" role="alert">{notice}</div>}
-      <RunResult cycle={cycle} workflow={workflow} phase={phase} busy={busy} />
-      <details className="run-details"><summary>运行详情</summary><div className="details-grid"><Docket selected={selected} workflow={workflow} onSelect={setSelected} /><section><div className="stream-heading"><h2>事件日志 · {selectedNode?.name}</h2><Tone value={selectedNode?.status || 'waiting'} /></div><MessageStream messages={messages} /><p className="field-note">模拟状态：{statusLabel(paper?.status || cycle?.outcome)}</p></section></div></details>
-      <details className="advanced"><summary>高级</summary><div className="advanced-actions"><span>会话有效至 {formatTime(sessionExpiry)}</span><Tone value={status?.service || status?.status} /><button type="button" className="quiet-action" onClick={clearProvider} disabled={working || !provider.configured}>清除模型连接</button><button type="button" className="theme-toggle" onClick={() => setTheme((current) => current === 'paper' ? 'night' : 'paper')}>{theme === 'paper' ? '深色模式' : '浅色模式'}</button><button type="button" className="logout" onClick={logout} disabled={working}>退出会话</button></div><h2>测试网控制</h2><div className="venue-panels">{VENUES.map((venueName) => <VenueCard key={venueName} venue={venueName} data={testnet[venueName]} csrf={working ? null : csrf} onAction={action} date={currentCycleWindow().date} isoWeek={currentCycleWindow().isoWeek} planHash={planHashes[venueName]} confirmation={confirmations[venueName]} setConfirmation={(value) => setConfirmations((current) => ({ ...current, [venueName]: value }))} armConfirmation={armConfirmations[venueName]} setArmConfirmation={(value) => setArmConfirmations((current) => ({ ...current, [venueName]: value }))} />)}</div></details>
+      {hasRun && <RunResult cycle={cycle} workflow={workflow} phase={phase} busy={busy} />}
+      <section className="chat-scroll" aria-label="主 Agent 对话"><div className="conversation">
+        {discussion.length === 0 && <div className="chat-empty"><h2>从主 Agent 开始</h2><p>讨论 BTC / ETH 分析策略，或告诉我每个 Agent 应使用什么模型。</p><p>建议会先展示，只有明确应用后才会生效。</p></div>}
+        <div className="discussion-messages" aria-live="polite">{discussion.map((item, index) => <article key={index} className={'discussion-' + item.role}><span className="message-author">{item.role === 'user' ? '你' : '主 Agent'}</span><p>{item.content}</p></article>)}</div>
+        {providerBusy && <div className="chat-pending" role="status">正在处理…</div>}
+        {suggestion && <section className="suggestion-card"><h3>策略建议</h3><p className="suggested-text">{suggestion}</p><button type="button" className="quiet-action" disabled={working} onClick={() => { setStrategyDraft(suggestion); setPanel('strategy') }}>放入策略草稿</button><span className="field-note">编辑后单独应用</span></section>}
+        <ModelSuggestion suggestion={modelSuggestion} models={modelConfig} onApply={applyModels} busy={working} />
+      </div></section>
+      <div className="composer-area"><form className="chat-composer" onSubmit={(event) => { event.preventDefault(); discuss() }}><label className="sr-only" htmlFor="discussion-input">发送给主 Agent</label><textarea id="discussion-input" value={discussionMessage} onChange={(event) => setDiscussionMessage(event.target.value)} maxLength={8000} rows={3} disabled={working} placeholder="讨论策略，或调整 Agent 模型…" onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing) { event.preventDefault(); discuss() } }} /><div className="composer-controls"><span>主 Agent · {currentModels.orchestrator}</span><button type="submit" className="send-action" disabled={working || !discussionMessage.trim()}>发送</button></div></form><p className="composer-note">⌘ / Ctrl + Enter 发送 · 会话内保存 · Paper 单次运行</p></div>
     </main>
+    {panel && <aside className="context-panel" aria-label="设置与运行详情"><header className="panel-header"><h2>工作台</h2><button type="button" className="icon-action" aria-label="关闭设置" onClick={() => setPanel(null)}>×</button></header><nav className="panel-tabs" aria-label="设置分类">{[['settings', '设置'], ['strategy', '策略'], ['details', '运行详情']].map(([value, label]) => <button type="button" key={value} aria-pressed={panel === value} onClick={() => setPanel(value)}>{label}</button>)}</nav><div className="panel-scroll">
+      {panel === 'settings' && <form className="entry-form" noValidate onSubmit={(event) => { event.preventDefault(); runCycle() }}><ProviderPanel provider={provider} model={providerModel} catalog={modelConfig.allowed_models} endpoint={providerEndpoint} apiKey={providerApiKey} setModel={setProviderModel} setEndpoint={setProviderEndpoint} setApiKey={setProviderApiKey} busy={working} /><PaperSetup setup={setup} draft={paperDraft} onChange={(key, value) => setPaperDraft((current) => ({ ...current, [key]: value }))} busy={working} /><p className="field-note">填写后点击顶部「运行 workflow」。日期与周次自动使用当日 UTC。</p><details className="saved-models"><summary>当前 Agent 模型</summary><dl>{WORKFLOW_NODES.map(({ role, name }) => <div key={role}><dt>{name}</dt><dd>{currentModels[role]}</dd></div>)}</dl><p className="field-note">可在主 Agent 对话中提出变更，确认建议后应用。</p></details></form>}
+      {panel === 'strategy' && <StrategyPanel draft={strategyDraft} applied={appliedStrategy} setDraft={setStrategyDraft} onApply={applyStrategy} busy={working} />}
+      {panel === 'details' && <section className="run-details"><Docket selected={selected} workflow={workflow} onSelect={setSelected} /><div className="stream-heading"><h2>事件日志 · {selectedNode?.name}</h2><Tone value={selectedNode?.status || 'waiting'} /></div><MessageStream messages={messages} /><p className="field-note">模拟状态：{statusLabel(paper?.status || cycle?.outcome)}</p></section>}
+      <details className="advanced"><summary>高级</summary><div className="advanced-actions"><span>会话有效至 {formatTime(sessionExpiry)}</span><Tone value={status?.service || status?.status} /><button type="button" className="quiet-action" onClick={clearProvider} disabled={working || !provider.configured}>清除模型连接</button><button type="button" className="quiet-action" onClick={() => setTheme((current) => current === 'light' ? 'night' : 'light')}>{theme === 'light' ? '深色模式' : '浅色模式'}</button><button type="button" className="quiet-action" onClick={logout} disabled={working}>退出会话</button></div><h2>测试网控制</h2><div className="venue-panels">{VENUES.map((venueName) => <VenueCard key={venueName} venue={venueName} data={testnet[venueName]} csrf={working ? null : csrf} onAction={action} date={currentCycleWindow().date} isoWeek={currentCycleWindow().isoWeek} planHash={planHashes[venueName]} confirmation={confirmations[venueName]} setConfirmation={(value) => setConfirmations((current) => ({ ...current, [venueName]: value }))} armConfirmation={armConfirmations[venueName]} setArmConfirmation={(value) => setArmConfirmations((current) => ({ ...current, [venueName]: value }))} />)}</div></details>
+    </div></aside>}
   </div>
 }

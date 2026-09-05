@@ -14,6 +14,7 @@ import {
   promptForJob,
   MAX_OUTPUT_BYTES,
   MAX_PAYLOAD_BYTES,
+  SESSION_MODEL_IDS,
   runCluster,
   runPiAgentJob,
   runWorkerProcess,
@@ -558,4 +559,25 @@ test('cluster never writes canonical Tyche artifacts', async () => {
   assert.equal(result.schema, 'tyche_pi_cluster/v1')
   assert.equal(result.provenance.schema, 'tyche_pi_provenance/v1')
   assert.equal(result.results.every((item) => item.schema === 'tyche_pi_result/v1'), true)
+})
+
+test('role-model snapshots select every real job and retries reject results from a different model', async () => {
+  const configured = { orchestrator: SESSION_MODEL_IDS[1], 'btc-analyst': SESSION_MODEL_IDS[2], 'eth-analyst': SESSION_MODEL_IDS[3], reviewer: SESSION_MODEL_IDS[4] }
+  const expected = { ...configured }
+  const seen = []
+  const result = await runCluster(clusterOptions({ model: SESSION_MODEL_IDS[0], roleModels: configured, runJob: async (current) => {
+    seen.push({ role: current.role, model: current.model, attempt: current.attempt })
+    if (current.role === 'orchestrator') configured['btc-analyst'] = 'unsupported-model'
+    if (current.role === 'reviewer' && current.attempt === 0) return ok({ ...current, model: SESSION_MODEL_IDS[0] }, stageOutput(current))
+    return ok(current, stageOutput(current))
+  } }))
+  assert.equal(result.status, 'ok')
+  for (const current of seen) assert.equal(current.model, expected[current.role] || SESSION_MODEL_IDS[0])
+  assert.deepEqual(seen.filter(({ role }) => role === 'reviewer').map(({ attempt }) => attempt), [0, 1])
+  assert.equal(result.provenance.default_model, SESSION_MODEL_IDS[0])
+  assert.equal(result.provenance.role_models['btc-analyst'], expected['btc-analyst'])
+  for (const attempt of result.provenance.attempts) assert.equal(attempt.model, expected[attempt.role] || SESSION_MODEL_IDS[0])
+  let called = false
+  for (const roleModels of [{ admin: SESSION_MODEL_IDS[0] }, { reviewer: 'unsupported-model' }, []]) await assert.rejects(runCluster(clusterOptions({ roleModels, runJob: async () => { called = true } })), /PI_SESSION_ROLE_MODELS_INVALID/)
+  assert.equal(called, false)
 })

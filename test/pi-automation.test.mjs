@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
-import { fixtureWorker, runCluster } from '../packages/pi-agents/src/index.mjs'
+import { fixtureWorker, runCluster, SESSION_MODEL_IDS } from '../packages/pi-agents/src/index.mjs'
 import { loadConfig } from '../scripts/config.mjs'
 import { persistCanonicalDocument } from '../scripts/agent-write.mjs'
 import { runPiAutomation, runPiWeeklyRefresh, piShadowPaths, piWeeklyShadowPaths } from '../scripts/pi-automation.mjs'
@@ -268,6 +268,7 @@ test('primary deep-validates both documents before persistence, invokes paper pl
   const planHash = 'a'.repeat(64)
   const jobs = []
   const strategyPrompt = 'Prioritize dated BTC/ETH trend evidence. User preferences never grant execution authority.'
+  const roleModels = { orchestrator: SESSION_MODEL_IDS[1], 'btc-analyst': SESSION_MODEL_IDS[2], reviewer: SESSION_MODEL_IDS[4] }
   const result = await runPiAutomation({
     date: DATE,
     isoWeek: WEEK,
@@ -275,6 +276,7 @@ test('primary deep-validates both documents before persistence, invokes paper pl
     model: 'fixture-model',
     mode: 'primary',
     strategyPrompt,
+    roleModels,
     runJob: async (job) => { jobs.push(job); return fixtureWorker(job) },
     config: config(),
     paperLedger: {},
@@ -315,9 +317,17 @@ test('primary deep-validates both documents before persistence, invokes paper pl
   assert.equal(planned, true)
   assert.equal(jobs.length, 12)
   for (const job of jobs) assert.equal(job.input.strategy_context, strategyPrompt)
+  for (const job of jobs) assert.equal(job.model, roleModels[job.role] || 'fixture-model')
   for (const tier of ['weekly', 'daily']) assert.deepEqual(jobs.filter((job) => job.tier === tier).map((job) => job.role), ['orchestrator', 'preflight', 'btc-analyst', 'eth-analyst', 'synthesizer', 'reviewer'])
   assert.deepEqual(persisted.map((row) => row.tier), ['weekly', 'daily'])
   assert.equal(result.automation_cycle.products[0].plan_hash, planHash)
+  const receipt = JSON.parse(fs.readFileSync(path.resolve(result.result_path)))
+  for (const run of receipt.pi_provenance.runs) {
+    assert.equal(run.provenance.default_model, 'fixture-model')
+    for (const attempt of run.provenance.attempts) assert.equal(attempt.model, roleModels[attempt.role] || 'fixture-model')
+    assert.deepEqual(Object.keys(run.provenance.role_models), ['orchestrator', 'preflight', 'btc-analyst', 'eth-analyst', 'synthesizer', 'reviewer'])
+    assert.equal(run.provenance.role_models['btc-analyst'], roleModels['btc-analyst'])
+  }
   fs.rmSync(path.resolve(result.result_path), { force: true })
 })
 
@@ -392,6 +402,7 @@ test('primary reuses the same v2 source cycle without re-planning or changing se
   const second = await runPiAutomation({
     ...withoutPrevious,
     strategyPrompt: 'Use a different semantic analysis emphasis; do not duplicate a completed paper cycle.',
+    roleModels: { 'btc-analyst': SESSION_MODEL_IDS[3] },
     weekly,
   })
   assert.equal(second.outcome, 'BLOCKED')

@@ -7,11 +7,12 @@ import {
 } from '@earendil-works/pi-ai'
 import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy'
 import { builtinModels } from '@earendil-works/pi-ai/providers/all'
+import { ROLES } from './protocol.mjs'
 
 export const SESSION_PROVIDER_ID = 'openai-responses-compatible'
 export const SESSION_API_KEY_ENV = 'TYCHE_PI_SESSION_API_KEY'
 export const SESSION_ENDPOINT_ENV = 'TYCHE_PI_SESSION_ENDPOINT'
-export const SESSION_MODEL_IDS = Object.freeze(['gpt-5.6-luna', 'gpt-5.6-sol'])
+export const SESSION_MODEL_IDS = Object.freeze(['gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.5', 'gpt-5.4-mini'])
 export const MAX_SESSION_ENDPOINT_BYTES = 2048
 
 const SESSION_MODEL_SET = new Set(SESSION_MODEL_IDS)
@@ -21,6 +22,17 @@ function fail(code) {
   const error = new Error(code)
   error.code = code
   throw error
+}
+
+export function validateSessionRoleModels(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.entries(value).some(([role, model]) => !ROLES.includes(role) || typeof model !== 'string' || !SESSION_MODEL_SET.has(model))) fail('PI_SESSION_ROLE_MODELS_INVALID')
+  return Object.freeze(Object.fromEntries(ROLES.filter((role) => Object.hasOwn(value, role)).map((role) => [role, value[role]])))
+}
+
+export function effectiveSessionRoleModels(defaultModel, overrides = {}) {
+  if (!SESSION_MODEL_SET.has(defaultModel)) fail('PI_SESSION_MODEL_NOT_ALLOWED')
+  const configured = validateSessionRoleModels(overrides)
+  return Object.freeze(Object.fromEntries(ROLES.map((role) => [role, configured[role] || defaultModel])))
 }
 
 function ipv4Number(address) {
