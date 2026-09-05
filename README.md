@@ -2,6 +2,8 @@
 
 Tyche is a clean-room, public-ready financial-agent foundation for BTC and ETH. Claude Code orchestrates weekly strategic analysis and daily tactical analysis; deterministic Node.js scripts own all exchange-facing validation, sizing, plan sealing, and lifecycle truth.
 
+详细中文项目规划、当前验证状态及后续验收路线见 [项目规划](docs/PROJECT_PLAN.md)。
+
 ## Safety boundary
 
 - **Gate Spot is dry-run only.** Tyche can read public Spot data and can optionally read a production Spot account for dry-run sizing. No Spot order-mutation operation exists in this repository.
