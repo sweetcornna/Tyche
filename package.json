@@ -2,14 +2,34 @@
   "name": "tyche-crypto-agent",
   "version": "0.1.0",
   "private": true,
-  "description": "Fail-closed BTC and ETH analysis with deterministic Gate dry-run and testnet controls",
+  "description": "Fail-closed BTC and ETH analysis with public multi-exchange data and deterministic Gate/Binance testnet controls",
   "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19.0"
   },
   "scripts": {
-    "check": "node scripts/config.mjs check && node --check scripts/lib-iolock.mjs && node --check scripts/agent-write.mjs && node --check scripts/concise-report.mjs && node --check scripts/crypto-market.mjs && node --check scripts/gate-rest.mjs && node --check scripts/gate-account-context.mjs && node --check scripts/gate-funding.mjs && node --check scripts/gate-trade.mjs",
-    "test": "node --test",
-    "selftest": "node scripts/gate-trade.mjs selftest"
+    "check": "node scripts/config.mjs check && node --check scripts/lib-iolock.mjs && node --check scripts/agent-write.mjs && node --check scripts/concise-report.mjs && node --check scripts/multi-exchange-market.mjs && node --check scripts/crypto-market.mjs && node --check scripts/crypto-automation.mjs && node --check scripts/paper-trade.mjs && node --check scripts/gate-rest.mjs && node --check scripts/binance-rest.mjs && node --check scripts/gate-account-context.mjs && node --check scripts/gate-funding.mjs && node --check scripts/gate-trade.mjs && node --check scripts/testnet-trade.mjs && node --check scripts/pi-automation.mjs && node --check scripts/tyche-cluster.mjs && node --check scripts/tyche-control-plane.mjs && node --check scripts/control-paper-setup.mjs && node --check scripts/utc-scheduler.mjs && node --check scripts/testnet-executor.mjs && npm run --workspace @tyche/pi-agents check && npm run --workspace @tyche/control-plane check && npm run --workspace @tyche/web check",
+    "market:all": "node scripts/multi-exchange-market.mjs",
+    "automation": "node scripts/crypto-automation.mjs",
+    "paper": "node scripts/paper-trade.mjs",
+    "trade:testnet": "node scripts/testnet-trade.mjs",
+    "pi:automation": "node scripts/pi-automation.mjs",
+    "cluster": "node scripts/tyche-cluster.mjs",
+    "scheduler": "node scripts/utc-scheduler.mjs",
+    "executor": "node scripts/testnet-executor.mjs",
+    "test": "node --test test/*.test.mjs packages/pi-agents/test/*.test.mjs apps/control-plane/test/*.test.mjs apps/web/test/*.test.mjs",
+    "test:e2e": "node --test test/automation-e2e.test.mjs",
+    "selftest": "node scripts/gate-trade.mjs selftest && npm run --workspace @tyche/pi-agents selftest",
+    "pi:fixture": "npm run --workspace @tyche/pi-agents fixture",
+    "web:build": "npm run --workspace @tyche/web build",
+    "control:check": "npm run --workspace @tyche/control-plane check",
+    "control:test": "npm run --workspace @tyche/control-plane test"
+  },
+  "dependencies": {
+    "ccxt": "4.5.77"
   }
 }

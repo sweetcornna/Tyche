@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { loadConfig, validateConfig } from './config.mjs'
+import { executionConfigForVenue as mapExecutionConfig, loadConfig, validateConfig } from './config.mjs'
 import { readJsonStrict, updateJsonLocked, writeJsonAtomic, writeTextAtomic } from './lib-iolock.mjs'
 import {
   applyFundingPolicy,
@@ -43,6 +43,7 @@ const ASSET_BY_PAIR = Object.freeze({ BTC_USDT: 'BTC', ETH_USDT: 'ETH' })
 const BOT_TEXT = /^t-TY[EP][0-9a-f]{20,24}$/
 const SHA256 = /^[0-9a-f]{64}$/
 const SECRET_KEY = /(?:api.?key|secret|token|password|credential|signature|authorization|cookie|private.?key|raw.?account)/i
+export const AUTOMATIC_TESTNET_AUTHORIZATION = 'TYCHE_AUTOMATIC_TESTNET_V1'
 const CANDIDATE_KEYS = new Set([
   'schema', 'asset', 'product', 'symbol', 'position_intent', 'order_style', 'entry_price', 'stop_price',
   'take_profit_price', 'reduce_fraction_bps', 'data_as_of', 'anchor_week', 'anchor_fresh',
@@ -196,6 +197,11 @@ function positiveDecimal(value, label) {
   const text = String(value ?? '').trim()
   if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(text) || !decimalPositive(text)) return blocked('DECIMAL_POSITIVE_REQUIRED', `${label} must be a positive plain decimal`)
   return { ok: true, value: text }
+}
+
+function nonNegativeDecimal(value) {
+  const text = String(value ?? '').trim()
+  return /^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(text) ? text : null
 }
 
 function timestampFresh(value, current, maxAgeSeconds, exactDay = false) {
@@ -405,14 +411,171 @@ export function parseUsdmRule(input = {}) {
     quanto_multiplier: input.quanto_multiplier === undefined ? null : String(input.quanto_multiplier),
     min_contracts: String(input.order_size_min ?? '1'),
     max_contracts: input.order_size_max === undefined ? null : String(input.order_size_max),
+    min_notional: input.min_notional === undefined ? null : String(input.min_notional),
     max_leverage: input.leverage_max === undefined ? null : String(input.leverage_max),
+    maintenance_rate: input.maintenance_rate === undefined ? null : String(input.maintenance_rate),
+    maker_fee_rate: input.maker_fee_rate === undefined ? null : String(input.maker_fee_rate),
+    taker_fee_rate: input.taker_fee_rate === undefined ? null : String(input.taker_fee_rate),
+    funding_interval: input.funding_interval === undefined ? null : Number(input.funding_interval),
+    funding_next_apply: input.funding_next_apply === undefined ? null : Number(input.funding_next_apply),
+    trade_status: input.status === undefined || input.status === null ? null : String(input.status).toLowerCase(),
+    circuit_breaker: input.enable_circuit_breaker === true,
     delisting: input.in_delisting === true,
     fetched_at: input._fetched_at || input.fetched_at || null
   }
-  if (!rule.symbol || !decimalPositive(rule.tick_size) || !decimalPositive(rule.quanto_multiplier) || !decimalPositive(rule.min_contracts) || rule.delisting) {
-    return blocked(rule.delisting ? 'USDM_CONTRACT_DELISTING' : 'USDM_RULE_INVALID', 'USDT-M contract rule is incomplete or unavailable')
+  if (!rule.symbol || !decimalPositive(rule.tick_size) || !decimalPositive(rule.quanto_multiplier) || !decimalPositive(rule.min_contracts) || rule.delisting || rule.circuit_breaker || rule.trade_status !== 'trading') {
+    const code = rule.delisting ? 'USDM_CONTRACT_DELISTING' : rule.circuit_breaker ? 'USDM_CONTRACT_CIRCUIT_BREAKER' : rule.trade_status !== 'trading' ? 'USDM_CONTRACT_NOT_TRADING' : 'USDM_RULE_INVALID'
+    return blocked(code, 'USDT-M contract rule is incomplete or unavailable')
   }
   return { ok: true, ...rule }
+}
+
+function candidateSignal(candidate, index) {
+  return String(candidate?.signal_id || `candidate:${index}`)
+}
+
+function candidateRank(candidate, snapshot) {
+  const action = upper(candidate.position_intent)
+  const long = action === 'ENTER_LONG'
+  const entry = Number(candidate.entry_price)
+  const stop = Number(candidate.stop_price)
+  const target = Number(candidate.take_profit_price)
+  const risk = long ? entry - stop : stop - entry
+  const reward = long ? target - entry : entry - target
+  const rr = risk > 0 ? reward / risk : -Infinity
+  const markRaw = snapshot?.assets?.[candidate.asset]?.usdm?.ticker?.mark_price ?? snapshot?.assets?.[candidate.asset]?.usdm?.ticker?.last
+  const mark = Number(markRaw)
+  const distance = mark > 0 && entry > 0 ? Math.abs(entry - mark) / mark : Infinity
+  return { rr, distance }
+}
+
+function selectionContext(options = {}) {
+  if (options.managedQuantities) return Object.fromEntries([...PAIRS].map((pair) => [pair, String(options.managedQuantities[pair] || '0')]))
+  const accounts = options.context?.accounts || {}
+  return Object.fromEntries([...PAIRS].map((pair) => [pair, String(accounts[`usdm:${pair}`]?.managed_quantity || '0')]))
+}
+
+export function selectUsdmCandidates(candidates = [], options = {}) {
+  const rows = []
+  const rejected = []
+  const signalCounts = new Map(candidates.map((candidate, index) => [candidateSignal(candidate, index), 0]))
+  for (const [index, candidate] of candidates.entries()) {
+    const signal = candidateSignal(candidate, index)
+    signalCounts.set(signal, (signalCounts.get(signal) || 0) + 1)
+  }
+  const rawDirections = new Map()
+  for (const candidate of candidates) {
+    const pair = exactPair(candidate?.symbol)
+    const action = upper(candidate?.position_intent)
+    if (!pair || !['ENTER_LONG', 'ENTER_SHORT'].includes(action)) continue
+    if (!rawDirections.has(pair)) rawDirections.set(pair, new Set())
+    rawDirections.get(pair).add(action)
+  }
+  const conflictedPairs = new Set([...rawDirections.entries()].filter(([, directions]) => directions.size > 1).map(([pair]) => pair))
+  const managed = selectionContext(options)
+  const controls = {
+    entry_block_code: options.controls?.entry_block_code || null,
+    max_spread_bps: options.controls?.max_spread_bps ?? null,
+    max_entry_distance_bps: options.controls?.max_entry_distance_bps ?? null
+  }
+  for (const [index, candidate] of candidates.entries()) {
+    const valid = validateCandidate(candidate, options)
+    const signal = candidateSignal(candidate, index)
+    const rawPair = exactPair(candidate?.symbol)
+    const rawAction = upper(candidate?.position_intent)
+    if (rawPair && conflictedPairs.has(rawPair) && ['ENTER_LONG', 'ENTER_SHORT'].includes(rawAction)) {
+      rejected.push({ index, symbol: rawPair, signal_id: signal, code: 'SIGNAL_DIRECTION_CONFLICT' })
+      continue
+    }
+    if ((signalCounts.get(signal) || 0) > 1) {
+      rejected.push({ index, symbol: rawPair, signal_id: signal, code: 'DUPLICATE_SIGNAL_ID' })
+      continue
+    }
+    if (!valid.ok) {
+      rejected.push({ index, symbol: candidate?.symbol || null, signal_id: signal, code: valid.code, message: valid.message })
+      continue
+    }
+    if (valid.no_trade) {
+      rejected.push({ index, symbol: valid.symbol, signal_id: signal, code: 'NO_TRADE' })
+      continue
+    }
+    rows.push({ index, candidate, valid, signal, rank: valid.reducing ? null : candidateRank(candidate, options.marketSnapshot) })
+  }
+
+  const reductions = []
+  const entries = []
+  for (const pair of [...PAIRS].sort()) {
+    const scoped = rows.filter((row) => row.valid.symbol === pair)
+    const reducing = scoped.filter((row) => row.valid.reducing).sort((left, right) => {
+      const exitLeft = left.valid.action.startsWith('EXIT_') ? 0 : 1
+      const exitRight = right.valid.action.startsWith('EXIT_') ? 0 : 1
+      return exitLeft - exitRight || Number(right.valid.reduction_bps) - Number(left.valid.reduction_bps) || left.signal.localeCompare(right.signal)
+    })
+    for (const row of [...reducing]) {
+      let quantitySign = 0
+      try { quantitySign = decimalCompare(managed[pair], '0') } catch {}
+      const expectsLong = ['REDUCE_LONG', 'EXIT_LONG'].includes(row.valid.action)
+      if ((quantitySign > 0 && !expectsLong) || (quantitySign < 0 && expectsLong) || quantitySign === 0) {
+        reducing.splice(reducing.indexOf(row), 1)
+        rejected.push({ index: row.index, symbol: pair, signal_id: row.signal, code: quantitySign === 0 ? 'MANAGED_QUANTITY_UNAVAILABLE' : 'MANAGED_DIRECTION_MISMATCH' })
+      }
+    }
+    if (reducing.length) {
+      reductions.push(reducing[0])
+      for (const row of reducing.slice(1)) rejected.push({ index: row.index, symbol: pair, signal_id: row.signal, code: 'REDUCTION_SUPERSEDED' })
+      for (const row of scoped.filter((candidate) => !candidate.valid.reducing)) rejected.push({ index: row.index, symbol: pair, signal_id: row.signal, code: 'SAME_CYCLE_REVERSAL_FORBIDDEN' })
+      continue
+    }
+    const opening = scoped.filter((row) => !row.valid.reducing)
+    const directions = new Set(opening.map((row) => row.valid.direction))
+    if (directions.size > 1) {
+      for (const row of opening) rejected.push({ index: row.index, symbol: pair, signal_id: row.signal, code: 'SIGNAL_DIRECTION_CONFLICT' })
+      continue
+    }
+    if (decimalPositive(decimalAbs(managed[pair]))) {
+      for (const row of opening) rejected.push({ index: row.index, symbol: pair, signal_id: row.signal, code: 'POSITION_ALREADY_MANAGED' })
+      continue
+    }
+    if (controls.entry_block_code) {
+      for (const row of opening) rejected.push({ index: row.index, symbol: pair, signal_id: row.signal, code: controls.entry_block_code })
+      continue
+    }
+    const ticker = options.marketSnapshot?.assets?.[ASSET_BY_PAIR[pair]]?.usdm?.ticker || {}
+    const book = options.marketSnapshot?.assets?.[ASSET_BY_PAIR[pair]]?.usdm?.order_book || {}
+    const bid = Number(ticker.highest_bid ?? ticker.bid ?? book.bids?.[0]?.price)
+    const ask = Number(ticker.lowest_ask ?? ticker.ask ?? book.asks?.[0]?.price)
+    const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : NaN
+    const spreadBps = mid > 0 ? ((ask - bid) / mid) * 10000 : Infinity
+    const eligible = opening.filter((row) => {
+      if (controls.max_spread_bps !== null && !(spreadBps <= Number(controls.max_spread_bps))) {
+        rejected.push({ index: row.index, symbol: pair, signal_id: row.signal, code: 'SPREAD_LIMIT' })
+        return false
+      }
+      if (controls.max_entry_distance_bps !== null && !(row.rank.distance * 10000 <= Number(controls.max_entry_distance_bps))) {
+        rejected.push({ index: row.index, symbol: pair, signal_id: row.signal, code: 'ENTRY_DISTANCE_LIMIT' })
+        return false
+      }
+      return true
+    })
+    eligible.sort((left, right) => right.rank.rr - left.rank.rr || left.rank.distance - right.rank.distance || left.signal.localeCompare(right.signal))
+    if (eligible.length) entries.push(eligible[0])
+    for (const row of eligible.slice(1)) rejected.push({ index: row.index, symbol: pair, signal_id: row.signal, code: 'ENTRY_SUPERSEDED' })
+  }
+  entries.sort((left, right) => right.rank.rr - left.rank.rr || left.rank.distance - right.rank.distance || left.valid.symbol.localeCompare(right.valid.symbol) || left.signal.localeCompare(right.signal))
+  reductions.sort((left, right) => {
+    const exitLeft = left.valid.action.startsWith('EXIT_') ? 0 : 1
+    const exitRight = right.valid.action.startsWith('EXIT_') ? 0 : 1
+    return exitLeft - exitRight || left.valid.symbol.localeCompare(right.valid.symbol) || left.signal.localeCompare(right.signal)
+  })
+  const selected = [...reductions, ...entries]
+  const body = {
+    policy: 'tyche_usdm_selection/v1',
+    managed_quantities: managed,
+    controls,
+    selected: selected.map((row) => ({ index: row.index, symbol: row.valid.symbol, action: row.valid.action, signal_id: row.signal })),
+    rejected: rejected.map((row) => ({ index: row.index, symbol: row.symbol || null, signal_id: row.signal_id, code: row.code }))
+  }
+  return { selected, rejected, proof: { ...body, digest: sha256Hex(body) } }
 }
 
 function quoteFromRows(payload, pair, product, generatedAt) {
@@ -506,12 +669,17 @@ function entrySizing(valid, productConfig, rule, account) {
   if (!decimalPositive(managedRoom)) return blocked('MANAGED_NOTIONAL_LIMIT', 'Managed-notional limit has no remaining room')
   const leverage = valid.product === 'usdm' ? String(productConfig.configured_leverage) : '1'
   const step = valid.product === 'usdm' ? rule.quanto_multiplier : rule.step_size
+  const takerFeeRate = valid.product === 'usdm' ? nonNegativeDecimal(rule.taker_fee_rate) : '0'
+  if (valid.product === 'usdm' && takerFeeRate === null) return blocked('FEE_RATE_UNAVAILABLE', 'USDT-M taker fee rate is required for fee-aware sizing')
+  const capitalCostPerBase = valid.product === 'usdm'
+    ? decimalMultiply(valid.entry_price, decimalAdd(divideToStep('1', leverage, '0.000000000000000001'), decimalMultiply(takerFeeRate, '2')))
+    : valid.entry_price
   const candidates = [
     divideToStep(riskBudget, riskDistance, step),
     divideToStep(String(productConfig.max_order_notional_usdt), valid.entry_price, step),
     divideToStep(dailyRoom, valid.entry_price, step),
     divideToStep(managedRoom, valid.entry_price, step),
-    divideToStep(decimalMultiply(account.available_quote, leverage), valid.entry_price, step)
+    divideToStep(account.available_quote, capitalCostPerBase, step)
   ]
   const baseQuantity = minDecimal(candidates)
   if (!baseQuantity || !decimalPositive(baseQuantity)) return blocked('QUANTITY_ROUNDS_TO_ZERO', 'All risk limits round quantity to zero')
@@ -528,7 +696,11 @@ function entrySizing(valid, productConfig, rule, account) {
   if (!Number.isSafeInteger(Number(contractText))) return blocked('CONTRACT_COUNT_UNSAFE', 'USDT-M contract count exceeds the exact integer range')
   if (decimalCompare(contractText, rule.min_contracts) < 0) return blocked('MINIMUM_CONTRACTS', 'Contract count is below the venue minimum')
   if (rule.max_contracts && decimalPositive(rule.max_contracts) && decimalCompare(contractText, rule.max_contracts) > 0) return blocked('MAXIMUM_CONTRACTS', 'Contract count exceeds the venue maximum')
-  return { ok: true, quantity: contractText, base_quantity: decimalMultiply(contractText, rule.quanto_multiplier), estimated_notional: decimalMultiply(decimalMultiply(contractText, rule.quanto_multiplier), valid.entry_price), risk_budget: riskBudget }
+  const estimatedNotional = decimalMultiply(decimalMultiply(contractText, rule.quanto_multiplier), valid.entry_price)
+  if (rule.min_notional && decimalPositive(rule.min_notional) && decimalCompare(estimatedNotional, rule.min_notional) < 0) return blocked('MINIMUM_NOTIONAL', 'USDT-M notional is below the venue minimum')
+  const estimatedOpenFee = decimalMultiply(estimatedNotional, takerFeeRate)
+  const estimatedCloseFee = decimalMultiply(estimatedNotional, takerFeeRate)
+  return { ok: true, quantity: contractText, base_quantity: decimalMultiply(contractText, rule.quanto_multiplier), estimated_notional: estimatedNotional, risk_budget: riskBudget, estimated_open_fee: estimatedOpenFee, estimated_close_fee: estimatedCloseFee, margin_debit: decimalAdd(divideToStep(estimatedNotional, leverage, '0.00000001'), decimalAdd(estimatedOpenFee, estimatedCloseFee)) }
 }
 
 function reductionSizing(valid, rule, account) {
@@ -555,7 +727,7 @@ function dualExpressionConflict(candidate, product, ledger) {
 }
 
 function buildIntent(valid, options) {
-  const { config, rule, account, environment, sourceDate, sourceWeek } = options
+  const { config, rule, account, environment, sourceDate, sourceWeek, venue = 'gate' } = options
   const sizing = valid.reducing ? reductionSizing(valid, rule, account) : entrySizing(valid, config, rule, account)
   if (!sizing.ok) return sizing
   const entry = !valid.reducing
@@ -563,6 +735,7 @@ function buildIntent(valid, options) {
   const side = entry ? (valid.direction === 'short' ? 'SELL' : 'BUY') : (longExposure ? 'SELL' : 'BUY')
   const price = priceForSide(valid.entry_price, rule.tick_size, side)
   const seed = {
+    venue,
     product: valid.product,
     environment,
     symbol: valid.symbol,
@@ -609,6 +782,9 @@ function buildIntent(valid, options) {
     intent.size = sign * contracts
     intent.reduce_only = !entry
     if (entry) {
+      intent.estimated_open_fee = sizing.estimated_open_fee
+      intent.estimated_close_fee = sizing.estimated_close_fee
+      intent.margin_debit = sizing.margin_debit
       intent.protection = {
         required: true,
         stop_price: triggerPrice(valid.stop_price, rule.tick_size, valid.direction, 'stop'),
@@ -702,6 +878,28 @@ function verifyPlanDerivation(plan, source, options = {}) {
     weeklyAnchorMaxAgeDays: config.analysis.weekly_anchor_max_age_days
   })
   if (!sourceCheck.ok) return sourceCheck
+  let derivationCandidates = sourceCheck.candidates
+  if (plan.product === 'usdm') {
+    const claimed = plan.selection_proof
+    if (!claimed || claimed.policy !== 'tyche_usdm_selection/v1' || !claimed.digest) return blocked('PLAN_SELECTION_PROOF_MISSING', 'USDT-M plan lacks a deterministic selection proof')
+    const body = clone(claimed)
+    delete body.digest
+    if (claimed.digest !== sha256Hex(body)) return blocked('PLAN_SELECTION_PROOF_INVALID', 'USDT-M selection proof digest is invalid')
+    const selection = selectUsdmCandidates(sourceCheck.candidates, {
+      product: plan.product,
+      isoWeek: plan.source?.iso_week,
+      date: plan.source?.date,
+      now: options.now,
+      maxAgeSeconds: config.analysis.candidate_max_age_seconds,
+      minimumRR: config.analysis.minimum_rr,
+      marketSnapshot: options.marketSnapshot,
+      weeklyAnchor: options.weeklyAnchor,
+      managedQuantities: claimed.managed_quantities,
+      controls: claimed.controls
+    })
+    if (stableStringify(selection.proof) !== stableStringify(claimed)) return blocked('PLAN_SELECTION_DRIFT', 'USDT-M candidate selection differs from the sealed proof')
+    derivationCandidates = selection.selected.map((row) => row.candidate)
+  }
   const used = new Set()
   let projectedDailyUsed = null
   let projectedManaged = null
@@ -716,7 +914,7 @@ function verifyPlanDerivation(plan, source, options = {}) {
     if (!projectedManagedQuantity.has(actual.symbol)) projectedManagedQuantity.set(actual.symbol, String(proof.account.managed_quantity || '0'))
     const account = { ...proof.account, daily_new_notional_used: projectedDailyUsed, managed_notional: projectedManaged, available_quote: projectedAvailable, managed_quantity: projectedManagedQuantity.get(actual.symbol) }
     let matched = null
-    for (const [index, candidate] of sourceCheck.candidates.entries()) {
+    for (const [index, candidate] of derivationCandidates.entries()) {
       if (used.has(index)) continue
       const valid = validateCandidate(candidate, {
         product: plan.product,
@@ -734,6 +932,7 @@ function verifyPlanDerivation(plan, source, options = {}) {
         rule: proof.rule,
         account,
         environment: plan.environment,
+        venue: plan.venue || 'gate',
         sourceDate: plan.source?.date,
         sourceWeek: plan.source?.iso_week
       })
@@ -748,7 +947,7 @@ function verifyPlanDerivation(plan, source, options = {}) {
       projectedDailyUsed = decimalAdd(projectedDailyUsed, matched.estimated_notional)
       projectedManaged = decimalAdd(projectedManaged, matched.estimated_notional)
       const marginUse = plan.product === 'usdm'
-        ? divideToStep(matched.estimated_notional, String(config.gate.usdm.configured_leverage), '0.00000001')
+        ? matched.margin_debit
         : matched.estimated_notional
       projectedAvailable = decimalSubtract(projectedAvailable, marginUse)
     } else if (matched.role === 'REDUCTION') {
@@ -762,8 +961,10 @@ function verifyPlanDerivation(plan, source, options = {}) {
 }
 
 export function createPlan(source = {}, options = {}) {
-  const config = options.config
-  validateConfig(config)
+  const venue = String(options.venue || 'gate').trim().toLowerCase()
+  const suppliedConfig = options.config
+  validateConfig(suppliedConfig)
+  const config = venue === 'binance' ? mapExecutionConfig(suppliedConfig, venue) : suppliedConfig
   const product = String(options.product || '').toLowerCase()
   const productConfig = config.gate[product]
   const environment = String(options.environment || productConfig?.environment || '').toLowerCase()
@@ -778,8 +979,27 @@ export function createPlan(source = {}, options = {}) {
     weeklyAnchorMaxAgeDays: config.analysis.weekly_anchor_max_age_days
   })
   const blockers = [...(options.context?.blockers || [])]
+  if (!['gate', 'binance'].includes(venue)) blockers.push({ code: 'VENUE_UNSUPPORTED', message: 'Venue must be gate or binance' })
   const skipped = sourceCheck.ok ? [...sourceCheck.rejected] : []
   const intents = []
+  let selection = null
+  let planningCandidates = sourceCheck.ok ? sourceCheck.candidates : []
+  if (sourceCheck.ok && product === 'usdm') {
+    selection = selectUsdmCandidates(sourceCheck.candidates, {
+      product,
+      isoWeek: sourceCheck.iso_week,
+      date: sourceCheck.date,
+      now: current,
+      maxAgeSeconds: config.analysis.candidate_max_age_seconds,
+      minimumRR: config.analysis.minimum_rr,
+      marketSnapshot: options.marketSnapshot,
+      weeklyAnchor: options.weeklyAnchor,
+      context: options.context,
+      controls: options.selectionControls
+    })
+    planningCandidates = selection.selected.map((row) => row.candidate)
+    skipped.push(...selection.rejected)
+  }
   let projectedDailyUsed = null
   let projectedManaged = null
   let projectedAvailable = null
@@ -792,7 +1012,7 @@ export function createPlan(source = {}, options = {}) {
   if (!['spot', 'usdm'].includes(product)) blockers.push({ code: 'PRODUCT_UNSUPPORTED', message: 'Product must be spot or usdm' })
 
   if (sourceCheck.ok && !blockers.length) {
-    for (const [index, candidate] of sourceCheck.candidates.entries()) {
+    for (const [index, candidate] of planningCandidates.entries()) {
       const valid = validateCandidate(candidate, {
         product,
         isoWeek: sourceCheck.iso_week,
@@ -864,6 +1084,7 @@ export function createPlan(source = {}, options = {}) {
         rule,
         account,
         environment,
+        venue,
         sourceDate: sourceCheck.date,
         sourceWeek: sourceCheck.iso_week
       })
@@ -876,7 +1097,7 @@ export function createPlan(source = {}, options = {}) {
         projectedDailyUsed = decimalAdd(projectedDailyUsed, built.intent.estimated_notional)
         projectedManaged = decimalAdd(projectedManaged, built.intent.estimated_notional)
         const marginUse = product === 'usdm'
-          ? divideToStep(built.intent.estimated_notional, String(productConfig.configured_leverage), '0.00000001')
+          ? built.intent.margin_debit
           : built.intent.estimated_notional
         projectedAvailable = decimalSubtract(projectedAvailable, marginUse)
       } else if (built.intent.role === 'REDUCTION') {
@@ -900,6 +1121,7 @@ export function createPlan(source = {}, options = {}) {
     }
   }
   return sealPlan({
+    venue,
     product,
     environment,
     source: { schema: source.schema || null, date: sourceCheck.date || source.date || null, iso_week: sourceCheck.iso_week || source.iso_week || null, anchor_stale: sourceCheck.anchor_stale ?? null, anchor_proof_code: sourceCheck.anchor_proof?.ok ? null : sourceCheck.anchor_proof?.code || null },
@@ -908,6 +1130,7 @@ export function createPlan(source = {}, options = {}) {
     intents,
     blockers,
     skipped,
+    selection_proof: selection?.proof || null,
     risk_policy: riskPolicy(productConfig || {}, config),
     risk_policy_digest: sha256Hex(riskPolicy(productConfig || {}, config)),
     market_snapshot_proof: options.marketSnapshot ? { generated_at: options.marketSnapshot.generated_at || null, digest: sha256Hex(options.marketSnapshot) } : null,
@@ -1252,8 +1475,14 @@ function leverageForPlan(plan, fallback = '1') {
   return decimalPositive(configured) ? configured : '1'
 }
 
-function marginDebit(notional, leverage) {
-  return divideToStep(notional, decimalPositive(leverage) ? leverage : '1', '0.00000001')
+function marginDebit(notional, leverage, takerFeeRate = '0') {
+  const margin = divideToStep(notional, decimalPositive(leverage) ? leverage : '1', '0.00000001')
+  const fee = nonNegativeDecimal(takerFeeRate) ?? '0'
+  return decimalAdd(margin, decimalMultiply(decimalMultiply(notional, fee), '2'))
+}
+
+function planMarginDebit(plan, intent, notional) {
+  return marginDebit(notional, leverageForPlan(plan), plan?.proofs?.[intent.symbol]?.rule?.taker_fee_rate || '0')
 }
 
 function fillNotional(match, fill) {
@@ -1276,7 +1505,7 @@ function atomicCapacityUsage(ledger, product, limits = {}) {
       if (!decimalPositive(entry.pending_notional)) continue
       const latestAt = Date.parse(String(entry.latest_at || entry.reservation_at || ''))
       if (entry.state === 'SUBMISSION_RESERVED' || (Number.isFinite(latestAt) && latestAt >= snapshotAt)) {
-        unavailableMargin = decimalAdd(unavailableMargin, marginDebit(entry.pending_notional, leverageForPlan(entry.plan, limits.configuredLeverage)))
+        unavailableMargin = decimalAdd(unavailableMargin, planMarginDebit(entry.plan, entry.intent, entry.pending_notional))
       }
     }
     for (const fill of ledger.fills || []) {
@@ -1284,7 +1513,7 @@ function atomicCapacityUsage(ledger, product, limits = {}) {
       if (!match || match.plan.product !== product || match.intent.role !== 'ENTRY') continue
       const fillAt = Date.parse(String(fill.at || ''))
       if (!Number.isFinite(fillAt) || fillAt < snapshotAt) continue
-      unavailableMargin = decimalAdd(unavailableMargin, marginDebit(fillNotional(match, fill), leverageForPlan(match.plan, limits.configuredLeverage)))
+      unavailableMargin = decimalAdd(unavailableMargin, planMarginDebit(match.plan, match.intent, fillNotional(match, fill)))
     }
   }
   return {
@@ -1305,7 +1534,7 @@ function capacityBlock(ledger, plan, intent, limits) {
   if (decimalCompare(decimalAdd(usage.managed_and_pending_notional, intent.estimated_notional), String(limits.managedCap)) > 0) {
     return { state: 'MANAGED_NOTIONAL_LIMIT', code: 'MANAGED_NOTIONAL_LIMIT_DRIFT' }
   }
-  const newMargin = marginDebit(intent.estimated_notional, limits.configuredLeverage)
+  const newMargin = planMarginDebit(plan, intent, intent.estimated_notional)
   if (!decimalPositive(limits.availableQuote) || decimalCompare(decimalAdd(usage.unavailable_margin, newMargin), String(limits.availableQuote)) > 0) {
     return { state: 'ACCOUNT_AVAILABLE_LIMIT', code: 'ACCOUNT_AVAILABLE_LIMIT_DRIFT' }
   }
@@ -1331,7 +1560,7 @@ function reserveInLedger(ledger, plan, intent, at, limits) {
     reservation_owner_pid: limits.owner?.pid || null,
     ...(intent.role === 'ENTRY' ? {
       reservation_notional: intent.estimated_notional,
-      reservation_margin_debit: marginDebit(intent.estimated_notional, limits.configuredLeverage),
+      reservation_margin_debit: planMarginDebit(plan, intent, intent.estimated_notional),
       account_snapshot_at: limits.accountSnapshotAt || null,
       account_available_quote: limits.availableQuote || null
     } : {}),
@@ -1775,7 +2004,9 @@ async function inspectReservedIntent(client, plan, intent, reservation, options)
     return { kind: 'RED', code: 'RESERVATION_IDENTITY_UNKNOWN' }
   }
   const exchangeOrderId = String(order?.id ?? order?.order_id ?? '')
-  if (!exchangeOrderId || String(order?.text || '') !== intent.intent_id) {
+  try {
+    requireExactOrderIdentity(order, intent)
+  } catch (error) {
     markReservedUnknown(options.ledgerPath, plan, intent, reservation, nowIso(options.now || Date.now), { exchange_order_id: exchangeOrderId, error_code: 'RESERVATION_IDENTITY_MISMATCH' })
     return { kind: 'RED', code: 'RESERVATION_IDENTITY_MISMATCH' }
   }
@@ -1849,7 +2080,7 @@ function managedNotional(ledger, product, quotes, rules) {
   return total
 }
 
-async function acquirePlanningContext(options) {
+export async function acquirePlanningContext(options) {
   const { product, environment, config, symbols, ledger } = options
   const current = options.now ?? Date.now
   const at = nowIso(current)
@@ -1930,8 +2161,13 @@ function strandedReservationsForPlan(ledger, plan) {
 }
 
 function staticReservationRecoveryGate(plan, options = {}) {
-  const config = options.config
-  try { validateConfig(config) } catch (error) { return blocked(error.code || 'CONFIG_INVALID', error.message) }
+  const automatic = options.executionMode === 'automatic_testnet'
+  const expectedVenue = automatic ? String(options.venue || '').toLowerCase() : 'gate'
+  let config = options.config
+  try {
+    validateConfig(config)
+    if (automatic && expectedVenue === 'binance') config = mapExecutionConfig(config, expectedVenue)
+  } catch (error) { return blocked(error.code || 'CONFIG_INVALID', error.message) }
   const verified = verifyPlan(plan, {
     planId: options.planId,
     planHash: options.planHash,
@@ -1941,16 +2177,22 @@ function staticReservationRecoveryGate(plan, options = {}) {
   })
   if (!verified.ok) return verified
   if (plan.product !== 'usdm' || plan.environment !== 'testnet') return blocked('TESTNET_USDM_ONLY', 'Only USDT-M testnet plans can be recovered')
-  if (config.gate.submission_mode !== 'manual_testnet') return blocked('SUBMISSION_MODE_LOCKED', 'Configuration does not authorize manual testnet recovery')
+  if (!['gate', 'binance'].includes(expectedVenue) || String(plan.venue || 'gate') !== expectedVenue) return blocked('PLAN_VENUE_MISMATCH', 'Sealed plan venue does not match the executor')
+  if (automatic) {
+    if (config.gate.submission_mode !== 'automatic_testnet') return blocked('SUBMISSION_MODE_LOCKED', 'Configuration does not authorize automatic testnet recovery')
+    if (options.automaticAuthorization !== AUTOMATIC_TESTNET_AUTHORIZATION) return blocked('AUTOMATIC_TESTNET_AUTHORIZATION_REQUIRED', 'Automatic testnet recovery requires the internal executor capability')
+  } else if (config.gate.submission_mode !== 'manual_testnet') return blocked('SUBMISSION_MODE_LOCKED', 'Configuration does not authorize manual testnet recovery')
   if (config.gate.enabled !== true || config.gate.usdm.enabled !== true) return blocked('USDM_DISABLED', 'USDT-M is disabled')
   if (plan.status !== 'READY' || plan.blockers?.length || !Array.isArray(plan.intents) || plan.intents.length === 0) return blocked('PLAN_BLOCKED', 'Only a sealed READY plan with intents can be recovered')
-  if (!options.commit) return blocked('COMMIT_REQUIRED', 'Recovery requires --commit')
-  const phrase = `EXECUTE GATE TESTNET ${plan.plan_id} ${plan.plan_hash}`
-  if (options.confirm !== phrase) return blocked('TESTNET_CONFIRMATION_MISMATCH', `Exact confirmation required: ${phrase}`)
-  if (options.interactive !== true) return blocked('REAL_TTY_REQUIRED', 'Manual testnet recovery requires a real stdin and stdout TTY')
-  const unattendedResult = unattended(options)
-  if (unattendedResult.blocked) return blocked('UNATTENDED_EXECUTION_FORBIDDEN', 'Manual testnet recovery is unavailable in unattended contexts', unattendedResult)
-  const killPath = options.killPath || path.join(ROOT, config.gate.kill_switch_path)
+  if (!automatic) {
+    if (!options.commit) return blocked('COMMIT_REQUIRED', 'Recovery requires --commit')
+    const phrase = `EXECUTE GATE TESTNET ${plan.plan_id} ${plan.plan_hash}`
+    if (options.confirm !== phrase) return blocked('TESTNET_CONFIRMATION_MISMATCH', `Exact confirmation required: ${phrase}`)
+    if (options.interactive !== true) return blocked('REAL_TTY_REQUIRED', 'Manual testnet recovery requires a real stdin and stdout TTY')
+    const unattendedResult = unattended(options)
+    if (unattendedResult.blocked) return blocked('UNATTENDED_EXECUTION_FORBIDDEN', 'Manual testnet recovery is unavailable in unattended contexts', unattendedResult)
+  }
+  const killPath = options.killPath || path.join(ROOT, expectedVenue === 'binance' ? 'data/binance_KILL' : config.gate.kill_switch_path)
   if (fs.existsSync(killPath)) return blocked('GATE_KILL_ACTIVE', 'Kill switch blocks recovery mutations')
   let ledger
   try { ledger = readLedger(options.ledgerPath || LEDGER_PATH) } catch (error) { return blocked(error.code || 'LEDGER_UNAVAILABLE', error.message) }
@@ -1960,13 +2202,22 @@ function staticReservationRecoveryGate(plan, options = {}) {
   return { ok: true, ledger, reservations }
 }
 
-export function staticExecutionGate(plan, options = {}) {
-  const config = options.config
-  try { validateConfig(config) } catch (error) { return blocked(error.code || 'CONFIG_INVALID', error.message) }
+function staticExecutionGateForMode(plan, options = {}) {
+  const automatic = options.executionMode === 'automatic_testnet'
+  const expectedVenue = automatic ? String(options.venue || '').toLowerCase() : 'gate'
+  let config = options.config
+  try {
+    validateConfig(config)
+    if (automatic && expectedVenue === 'binance') config = mapExecutionConfig(config, expectedVenue)
+  } catch (error) { return blocked(error.code || 'CONFIG_INVALID', error.message) }
   const verified = verifyPlan(plan, { planId: options.planId, planHash: options.planHash, planTtlSeconds: config.gate.plan_ttl_seconds, now: options.now })
   if (!verified.ok) return verified
   if (plan.product !== 'usdm' || plan.environment !== 'testnet') return blocked('TESTNET_USDM_ONLY', 'Only USDT-M testnet plans can execute')
-  if (config.gate.submission_mode !== 'manual_testnet') return blocked('SUBMISSION_MODE_LOCKED', 'Configuration does not authorize manual testnet submission')
+  if (!['gate', 'binance'].includes(expectedVenue) || String(plan.venue || 'gate') !== expectedVenue) return blocked('PLAN_VENUE_MISMATCH', 'Sealed plan venue does not match the executor')
+  if (automatic) {
+    if (config.gate.submission_mode !== 'automatic_testnet') return blocked('SUBMISSION_MODE_LOCKED', 'Configuration does not authorize automatic testnet submission')
+    if (options.automaticAuthorization !== AUTOMATIC_TESTNET_AUTHORIZATION) return blocked('AUTOMATIC_TESTNET_AUTHORIZATION_REQUIRED', 'Automatic testnet submission requires the internal executor capability')
+  } else if (config.gate.submission_mode !== 'manual_testnet') return blocked('SUBMISSION_MODE_LOCKED', 'Configuration does not authorize manual testnet submission')
   if (config.gate.enabled !== true || config.gate.usdm.enabled !== true) return blocked('USDM_DISABLED', 'USDT-M is disabled')
   const currentPolicy = riskPolicy(config.gate.usdm, config)
   if (!plan.risk_policy_digest || plan.risk_policy_digest !== sha256Hex(currentPolicy) || stableStringify(plan.risk_policy) !== stableStringify(currentPolicy)) return blocked('RISK_POLICY_DRIFT', 'Risk limits or leverage changed after the plan was sealed; regenerate the plan')
@@ -1982,13 +2233,15 @@ export function staticExecutionGate(plan, options = {}) {
   if (!derivation.ok) return derivation
   if (plan.status !== 'READY' || plan.blockers?.length) return blocked('PLAN_BLOCKED', 'Only blocker-free READY plans may execute')
   if (!Array.isArray(plan.intents) || plan.intents.length === 0) return blocked('PLAN_EMPTY', 'READY plan must contain at least one intent')
-  if (!options.commit) return blocked('COMMIT_REQUIRED', 'Execution requires --commit')
-  const phrase = `EXECUTE GATE TESTNET ${plan.plan_id} ${plan.plan_hash}`
-  if (options.confirm !== phrase) return blocked('TESTNET_CONFIRMATION_MISMATCH', `Exact confirmation required: ${phrase}`)
-  if (options.interactive !== true) return blocked('REAL_TTY_REQUIRED', 'Manual testnet execution requires a real stdin and stdout TTY')
-  const unattendedResult = unattended(options)
-  if (unattendedResult.blocked) return blocked('UNATTENDED_EXECUTION_FORBIDDEN', 'Manual testnet execution is unavailable in unattended contexts', unattendedResult)
-  const killPath = options.killPath || path.join(ROOT, config.gate.kill_switch_path)
+  if (!automatic) {
+    if (!options.commit) return blocked('COMMIT_REQUIRED', 'Execution requires --commit')
+    const phrase = `EXECUTE GATE TESTNET ${plan.plan_id} ${plan.plan_hash}`
+    if (options.confirm !== phrase) return blocked('TESTNET_CONFIRMATION_MISMATCH', `Exact confirmation required: ${phrase}`)
+    if (options.interactive !== true) return blocked('REAL_TTY_REQUIRED', 'Manual testnet execution requires a real stdin and stdout TTY')
+    const unattendedResult = unattended(options)
+    if (unattendedResult.blocked) return blocked('UNATTENDED_EXECUTION_FORBIDDEN', 'Manual testnet execution is unavailable in unattended contexts', unattendedResult)
+  }
+  const killPath = options.killPath || path.join(ROOT, expectedVenue === 'binance' ? 'data/binance_KILL' : config.gate.kill_switch_path)
   if (fs.existsSync(killPath)) return blocked('GATE_KILL_ACTIVE', 'Kill switch blocks new plans and submissions')
   let ledger
   try { ledger = readLedger(options.ledgerPath || LEDGER_PATH) } catch (error) { return blocked(error.code || 'LEDGER_UNAVAILABLE', error.message) }
@@ -1999,8 +2252,20 @@ export function staticExecutionGate(plan, options = {}) {
   return { ok: true }
 }
 
+export function staticExecutionGate(plan, options = {}) {
+  return staticExecutionGateForMode(plan, { ...options, executionMode: 'manual_testnet', venue: 'gate' })
+}
+
+export function staticAutomaticExecutionGate(plan, options = {}) {
+  return staticExecutionGateForMode(plan, { ...options, executionMode: 'automatic_testnet' })
+}
+
 function sameRule(left, right) {
-  const keys = ['symbol', 'tick_size', 'quanto_multiplier', 'min_contracts', 'max_contracts', 'max_leverage']
+  const keys = [
+    'symbol', 'tick_size', 'quanto_multiplier', 'min_contracts', 'max_contracts', 'min_notional',
+    'max_leverage', 'maintenance_rate', 'maker_fee_rate', 'taker_fee_rate', 'funding_interval',
+    'funding_next_apply', 'trade_status', 'circuit_breaker', 'delisting'
+  ]
   return keys.every((key) => String(left?.[key] ?? '') === String(right?.[key] ?? ''))
 }
 
@@ -2046,6 +2311,10 @@ async function dynamicExecutionPreflight(plan, options) {
     }
   }
   const managedBySymbol = managedQuantities(ledger, 'usdm')
+  for (const intent of plan.intents.filter((row) => row.role === 'ENTRY')) {
+    const lifecycle = latestIntentEvent(ledger, intent.intent_id)?.state || 'PLANNED'
+    if (['PLANNED', 'RESERVATION_RELEASED'].includes(lifecycle) && decimalPositive(decimalAbs(managedBySymbol[intent.symbol] || '0'))) return blocked('POSITION_ALREADY_MANAGED', `${intent.symbol} already has identifiable Tyche-managed exposure`)
+  }
   for (const intent of plan.intents.filter((row) => row.role === 'REDUCTION')) {
     const managed = String(managedBySymbol[intent.symbol] || '0')
     const correctSide = ['REDUCE_LONG', 'EXIT_LONG'].includes(intent.action) ? decimalCompare(managed, '0') > 0 : decimalCompare(managed, '0') < 0
@@ -2066,7 +2335,7 @@ async function dynamicExecutionPreflight(plan, options) {
       return state === 'PLANNED' || state === 'RESERVATION_RELEASED'
     })
     const plannedNew = plannedEntries.reduce((sum, intent) => decimalAdd(sum, intent.estimated_notional), '0')
-    const plannedMargin = plannedEntries.reduce((sum, intent) => decimalAdd(sum, marginDebit(intent.estimated_notional, config.gate.usdm.configured_leverage)), '0')
+    const plannedMargin = plannedEntries.reduce((sum, intent) => decimalAdd(sum, planMarginDebit(plan, intent, intent.estimated_notional)), '0')
     if (decimalCompare(decimalAdd(currentUsage.daily_new_notional_used, plannedNew), String(config.gate.usdm.daily_new_notional_cap_usdt)) > 0) return blocked('DAILY_NOTIONAL_LIMIT_DRIFT', 'Current reservations and fills plus this plan exceed the daily limit')
     if (decimalCompare(decimalAdd(capacityUsage.managed_and_pending_notional, plannedNew), String(config.gate.usdm.max_managed_notional_usdt)) > 0) return blocked('MANAGED_NOTIONAL_LIMIT_DRIFT', 'Current managed fills and pending reservations plus this plan exceed the managed limit')
     if (decimalCompare(decimalAdd(capacityUsage.unavailable_margin, plannedMargin), funding.available_quote) > 0) return blocked('ACCOUNT_AVAILABLE_LIMIT_DRIFT', 'Current account snapshot cannot fund active reservations, later fills, and this plan')
@@ -2079,17 +2348,44 @@ async function dynamicExecutionPreflight(plan, options) {
   return { ok: true, rules, quotes, funding: fundingProjection(funding), reconciliation }
 }
 
-async function exactOrder(client, identity, exchangeId = null) {
-  if (exchangeId !== null && exchangeId !== undefined && exchangeId !== '') {
-    try { return (await client.usdmOrder({ order_id: String(exchangeId) })).data } catch (error) { if (error.ambiguous) throw error }
+function orderText(order) {
+  return String(order?.text || order?.initial?.text || '')
+}
+
+function orderContract(order) {
+  return exactPair(order?.contract || order?.symbol || order?.initial?.contract || order?.initial?.symbol)
+}
+
+function requireExactOrderIdentity(order, intent, label = 'order') {
+  const exchangeOrderId = String(order?.id ?? order?.order_id ?? '')
+  if (!exchangeOrderId || orderText(order) !== String(intent?.intent_id || '')) {
+    throwCode('ORDER_IDENTITY_UNPROVEN', `Exact ${label} identity was not returned by the venue`)
   }
-  return client.findUsdmOrderByText(identity)
+  const contract = orderContract(order)
+  if (contract && contract !== intent.symbol) throwCode('ORDER_CONTRACT_MISMATCH', `Exact ${label} contract does not match the sealed intent`)
+  if (intent.reduce_only === true) {
+    const reduceOnly = order?.reduce_only ?? order?.initial?.reduce_only
+    if (reduceOnly !== undefined && reduceOnly !== true) throwCode('REDUCE_ONLY_UNPROVEN', `Exact ${label} did not prove reduce-only semantics`)
+  }
+  return order
+}
+
+async function exactOrder(client, identity, exchangeId = null, intent = null) {
+  if (exchangeId !== null && exchangeId !== undefined && exchangeId !== '') {
+    try {
+      const order = (await client.usdmOrder({ order_id: String(exchangeId) })).data
+      return intent ? requireExactOrderIdentity(order, intent) : order
+    } catch (error) { if (error.ambiguous) throw error }
+  }
+  const order = await client.findUsdmOrderByText(identity)
+  return intent ? requireExactOrderIdentity(order, intent) : order
 }
 
 async function findPriceOrder(client, identity, exchangeId = null) {
   if (exchangeId !== null && exchangeId !== undefined && exchangeId !== '') {
     try { return (await client.usdmPriceOrder({ order_id: String(exchangeId) })).data } catch (error) { if (error.ambiguous) throw error }
   }
+  if (typeof client.findUsdmPriceOrderByText === 'function') return client.findUsdmPriceOrderByText(identity)
   const rows = []
   for (const status of ['open', 'finished']) {
     const result = await client.usdmPriceOrders({ status, limit: 100 })
@@ -2112,7 +2408,7 @@ async function pollOrder(client, plan, intent, first, options = {}) {
     if (state.terminal) return { order, state }
     if (nowMs(clock) >= deadline) break
     await sleep(Math.min(interval, Math.max(0, deadline - nowMs(clock))))
-    order = await exactOrder(client, intent.intent_id, order?.id ?? order?.order_id)
+    order = await exactOrder(client, intent.intent_id, order?.id ?? order?.order_id, intent)
   }
   const state = classifyOrder(order)
   if (['SUBMITTED', 'PARTIALLY_FILLED', 'UNKNOWN'].includes(state.state)) {
@@ -2122,11 +2418,11 @@ async function pollOrder(client, plan, intent, first, options = {}) {
     try {
       await client.usdmCancelOrder({ order_id: String(exchangeId) })
     } catch (error) {
-      const check = await exactOrder(client, intent.intent_id, exchangeId)
+      const check = await exactOrder(client, intent.intent_id, exchangeId, intent)
       if (!classifyOrder(check).terminal) throwCode('CANCEL_AMBIGUOUS_UNRESOLVED', 'Single-order cancellation was not proven')
       order = check
     }
-    order = await exactOrder(client, intent.intent_id, exchangeId)
+    order = await exactOrder(client, intent.intent_id, exchangeId, intent)
   }
   const final = classifyOrder(order)
   if (!final.terminal) throwCode('ORDER_STATE_UNPROVEN', `Order state remains ${final.state}; cancellation of any remainder is not proven`)
@@ -2158,7 +2454,8 @@ async function identifiableFills(client, plan, intent, order, options) {
     const price = String(row.price ?? '')
     const rowOrderId = String(row.order_id ?? row.order ?? '')
     const rowText = String(row.text || '')
-    if (id === undefined || id === null || id === '' || seen.has(String(id)) || rowOrderId !== expectedOrderId || (rowText && rowText !== intent.intent_id) || !/^\d+$/.test(contracts) || !Number.isSafeInteger(Number(contracts)) || !decimalPositive(contracts) || !decimalPositive(price) || !decimalPositive(multiplier)) continue
+    const rowContract = row?.contract === undefined && row?.symbol === undefined ? intent.symbol : exactPair(row.contract || row.symbol)
+    if (id === undefined || id === null || id === '' || seen.has(String(id)) || rowOrderId !== expectedOrderId || rowContract !== intent.symbol || (rowText && rowText !== intent.intent_id) || !/^\d+$/.test(contracts) || !Number.isSafeInteger(Number(contracts)) || !decimalPositive(contracts) || !decimalPositive(price) || !decimalPositive(multiplier)) continue
     seen.add(String(id))
     const fill = {
       id: String(id),
@@ -2219,7 +2516,8 @@ async function submitWithIdentity(client, plan, intent, payload, options) {
     const response = await client.usdmPlaceOrder(payload)
     acknowledged = true
     let order = response.data
-    if (order?.id === undefined && order?.order_id === undefined) order = await exactOrder(client, intent.intent_id)
+    if (order?.id === undefined && order?.order_id === undefined) order = await exactOrder(client, intent.intent_id, null, intent)
+    requireExactOrderIdentity(order, intent)
     appendRecord(options.ledgerPath, eventFor(plan, intent, 'SUBMITTED', nowIso(options.now || Date.now), { exchange_order_id: String(order?.id ?? order?.order_id ?? ''), ...(options.eventExtra || {}) }))
     return { ok: true, order }
   } catch (error) {
@@ -2235,7 +2533,7 @@ async function submitWithIdentity(client, plan, intent, payload, options) {
     }
     appendRecord(options.ledgerPath, eventFor(plan, intent, 'SUBMISSION_AMBIGUOUS', nowIso(options.now || Date.now), { error_code: error.code || null, ...(options.eventExtra || {}) }))
     try {
-      const order = await exactOrder(client, intent.intent_id)
+      const order = await exactOrder(client, intent.intent_id, null, intent)
       const state = classifyOrder(order)
       if (state.state === 'UNKNOWN') throwCode('AMBIGUOUS_STATE_UNKNOWN', 'Recovered order has unknown state')
       const recoveredState = ['FILLED', 'PARTIALLY_FILLED', 'CANCELLED', 'REJECTED', 'RECONCILE_RED'].includes(state.state) ? state.state : 'SUBMITTED'
@@ -2399,6 +2697,7 @@ async function placeProtection(client, plan, parent, contracts, options) {
       } finally {
         ACTIVE_RESERVATION_OWNERS.delete(owner.id)
       }
+      requireExactOrderIdentity(order, child, 'protection order')
       if (!protectionIsActive(order)) throwCode('PROTECTION_NOT_ACTIVE', `${specification.role} protection is not explicitly open`)
       appendRecord(options.ledgerPath, eventFor(plan, child, 'SUBMITTED', nowIso(options.now || Date.now), { exchange_order_id: String(order?.id ?? order?.order_id ?? ''), ...childEventExtra, ...(recoveredByIdentity ? { recovered_by_identity: true } : {}) }))
       created.push({ child, order })
@@ -2458,6 +2757,7 @@ function executionSummary(plan, ledgerPath, results) {
           : 'COMPLETE'
   return {
     outcome,
+    venue: String(plan.venue || 'gate'),
     product: 'usdm',
     environment: 'testnet',
     plan_id: plan.plan_id,
@@ -2472,8 +2772,17 @@ function executionSummary(plan, ledgerPath, results) {
 }
 
 export async function executePlan(plan, options = {}) {
+  if (options.executionMode === 'automatic_testnet' && String(options.venue || '').toLowerCase() === 'binance') {
+    try {
+      options = { ...options, config: mapExecutionConfig(options.config, 'binance') }
+    } catch (error) {
+      return { outcome: 'BLOCKED', product: plan.product, environment: plan.environment, ...blocked(error.code || 'CONFIG_INVALID', safeText(error.message || error)), lifecycle: [], counts: { submitted: 0, filled: 0, rejected: 0, cancelled: 0 } }
+    }
+  }
   const ledgerPath = options.ledgerPath || LEDGER_PATH
-  const gate = staticExecutionGate(plan, { ...options, ledgerPath })
+  const gate = options.executionMode === 'automatic_testnet'
+    ? staticAutomaticExecutionGate(plan, { ...options, ledgerPath })
+    : staticExecutionGate(plan, { ...options, ledgerPath })
   let recoveryOnly = false
   if (!gate.ok) {
     if (gate.code !== 'PLAN_EXPIRED') return { outcome: 'BLOCKED', product: plan.product, environment: plan.environment, ...gate, lifecycle: [], counts: { submitted: 0, filled: 0, rejected: 0, cancelled: 0 } }
@@ -2483,6 +2792,12 @@ export async function executePlan(plan, options = {}) {
     recoveryOnly = true
   }
   if (!options.client) return { outcome: 'BLOCKED', product: plan.product, environment: plan.environment, ...blocked('CLIENT_REQUIRED', 'An injected USDT-M testnet client is required'), lifecycle: [], counts: { submitted: 0, filled: 0, rejected: 0, cancelled: 0 } }
+  const reportedVenue = String(options.client.venue || '').trim().toLowerCase()
+  const reportedProduct = String(options.client.product || '').trim().toLowerCase()
+  const reportedEnvironment = String(options.client.environment || '').trim().toLowerCase()
+  if (reportedVenue && reportedVenue !== String(plan.venue || '').toLowerCase()) return { outcome: 'BLOCKED', product: plan.product, environment: plan.environment, ...blocked('CLIENT_VENUE_MISMATCH', 'Client venue does not match the sealed plan'), lifecycle: [], counts: { submitted: 0, filled: 0, rejected: 0, cancelled: 0 } }
+  if (reportedProduct && reportedProduct !== 'usdm') return { outcome: 'BLOCKED', product: plan.product, environment: plan.environment, ...blocked('CLIENT_PRODUCT_MISMATCH', 'Execution requires a USDT-M client'), lifecycle: [], counts: { submitted: 0, filled: 0, rejected: 0, cancelled: 0 } }
+  if (reportedEnvironment && reportedEnvironment !== 'testnet') return { outcome: 'BLOCKED', product: plan.product, environment: plan.environment, ...blocked('CLIENT_ENVIRONMENT_MISMATCH', 'Execution requires a testnet client'), lifecycle: [], counts: { submitted: 0, filled: 0, rejected: 0, cancelled: 0 } }
   let recoveries
   try { recoveries = await recoverReservedBeforePreflight(options.client, plan, { ...options, ledgerPath }) } catch (error) {
     return { outcome: 'BLOCKED', product: plan.product, environment: plan.environment, ...blocked(error.code || 'RESERVATION_RECOVERY_FAILED', safeText(error.message || error)), lifecycle: [], counts: { submitted: 0, filled: 0, rejected: 0, cancelled: 0 } }
@@ -2741,7 +3056,7 @@ function parseCli(argv) {
     if (!value || value.startsWith('--')) throwCode('CLI_ARGUMENT_INVALID', `${flag} requires a value`)
     return value
   }
-  if (values.includes('--live')) throwCode('PRODUCTION_EXECUTION_UNSUPPORTED', 'Production mutation flags are unsupported')
+  if (values.includes('--live') || values.includes('--production') || values.includes('--prod')) throwCode('PRODUCTION_EXECUTION_UNSUPPORTED', 'Production mutation flags are unsupported')
   const environmentIndex = values.indexOf('--environment')
   if (environmentIndex >= 0 && /^(?:live|prod|production)$/i.test(String(values[environmentIndex + 1] || ''))) throwCode('PRODUCTION_EXECUTION_UNSUPPORTED', 'Production mutation environments are unsupported')
   return { command, values, get, has: (flag) => values.includes(flag) }
@@ -2926,7 +3241,7 @@ export async function selftest() {
   }
   const weeklyAnchor = { schema: WEEKLY_SCHEMA, date, iso_week: week, generated_at: at, status: 'active', assets: { BTC: { spot_bias: 'long', usdm_bias: 'long' }, ETH: { spot_bias: 'neutral', usdm_bias: 'neutral' } }, execution_candidates: [] }
   const marketSnapshot = { schema: 'tyche_crypto_market/v1', date, iso_week: week, generated_at: at, assets: { BTC: { usdm: { ticker: { last: '100' }, technical: { daily: { level_sets: { selftest: { entry: 100, stop: 90, target: 120 } } }, four_hour: { level_sets: {} } } } }, ETH: {} } }
-  const rule = { name: 'BTC_USDT', order_price_round: '0.1', quanto_multiplier: '0.001', order_size_min: '1', order_size_max: '100000', leverage_max: '3', in_delisting: false, _fetched_at: at }
+  const rule = { name: 'BTC_USDT', order_price_round: '0.1', quanto_multiplier: '0.001', order_size_min: '1', order_size_max: '100000', leverage_max: '3', maintenance_rate: '0.005', maker_fee_rate: '-0.0001', taker_fee_rate: '0.0005', status: 'trading', in_delisting: false, _fetched_at: at }
   const account = { schema: 'tyche_account_epoch/v1', account_epoch_id: 'tae_selftest', product: 'usdm', environment: 'testnet', funding_source: 'usdm_testnet_available', wallet: 'USDT_FUTURES_TESTNET', asset: 'USDT', symbol: 'BTC_USDT', generated_at: at, available_quote: '1000', effective_risk_capital: '1000', managed_quantity: '0', managed_notional: '0', daily_new_notional_used: '0', daily_order_count: 0 }
   const context = { rules: { BTC_USDT: rule }, quotes: { BTC_USDT: { symbol: 'BTC_USDT', price: '100', fetched_at: at } }, accounts: { 'usdm:BTC_USDT': account }, reconciliation: { status: 'ok', generated_at: at, receipt_id: 'tr_selftest', issues: [] }, blockers: [] }
   const plan = createPlan(source, { product: 'usdm', environment: 'testnet', config, context, ledger: EMPTY_LEDGER, date, isoWeek: week, weeklyAnchor, marketSnapshot, now: current })

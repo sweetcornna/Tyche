@@ -13,12 +13,15 @@ Tyche is a public, crypto-only project for BTC and ETH. Keep every change within
 
 - Supported assets are exactly BTC and ETH.
 - Spot is dry-run only. There is no Spot mutation operation.
-- USDT-M execution is testnet-only and requires a human to run the exact confirmation command in a real terminal.
-- Production mutation is unsupported. Do not add a production execution environment, credential name, host mapping, command, compatibility alias, or bypass.
+- USDT-M mutation is testnet-only. Gate retains the exact human TTY confirmation path; `scripts/testnet-trade.mjs` may automatically execute only an explicitly configured Gate or Binance `automatic_testnet` plan.
+- Production mutation is unsupported. Do not add a production execution environment, credential name, mutation host mapping, command, compatibility alias, or bypass. Fixed production public-data hosts are allowed.
 - Workflows require `date` and `isoWeek`, use repository-relative paths, explicitly select `sonnet` or `opus`, and never call the execute command.
 - Workflows reject inherited USDT-M testnet credentials before launching agents. Custom workflow agents are read-only and return structured data; deterministic top-level code persists it and may run only dry-run planning.
-- USDT-M testnet credentials exist only in a separate human-invoked process, preferably injected by an external secret manager; never place their values in a project env file.
-- Do not add schedulers, deployment files, browser/PDF tooling, Python, runtime dependencies, or external orchestration services.
+- The one-shot automation command settles existing USDT-M paper risk first, prepares public evidence, refreshes the weekly anchor when required, validates canonical daily output, selects USDT-M candidates deterministically, and applies only simulated paper fills. Spot is outside this automatic path.
+- The paper ledger is event-sourced and uses only `SIMULATED_*` identities/states. Kill switch, loss, and drawdown breakers block new paper entries but never stop settlement or managed reductions/exits. Venue `submitted` and `filled` remain zero.
+- Gate/Binance USDT-M testnet credentials exist only in the separate venue executor process, preferably injected by an external secret manager; never place their values in a project env file or analysis workflow.
+- Do not add schedulers, deployment files, browser/PDF tooling, Python, or external orchestration services.
+- The only approved runtime dependency is the exact pinned CCXT package used by `scripts/multi-exchange-market.mjs`. It is a credential-free public-data adapter only; no other source may import it or expose private/account/trading methods.
 
 ## Data handling
 

@@ -11,6 +11,10 @@ const SLOT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:json|md)$/
 const WEEKLY_SCHEMA = 'tyche_weekly_strategy/v1'
 const DAILY_SCHEMA = 'tyche_crypto_daily/v1'
 const CANDIDATE_SCHEMA = 'crypto_execution_candidate/v1'
+const CANONICAL_OUTPUTS = Object.freeze({
+  weekly: path.join(ROOT, 'data', 'crypto_strategy.json'),
+  daily: path.join(ROOT, 'data', 'crypto_daily.json')
+})
 const FINAL_KEYS = new Set([
   'schema', 'date', 'iso_week', 'generated_at', 'status', 'anchored_week', 'anchor_fresh',
   'regime', 'assets', 'execution_candidates', 'blockers', 'risks'
@@ -237,6 +241,34 @@ export function validateCanonicalDocument(document, tier) {
   canonicalObjectArray(document.blockers, 'blockers')
   canonicalStringArray(document.risks, 'risks')
   return document
+}
+
+/**
+ * Persist an in-memory canonical document through the same validation and
+ * atomic locking boundary used by the agent inbox.  The tier, rather than a
+ * caller-supplied path, selects one of the two fixed canonical artifacts.
+ */
+export function persistCanonicalDocument(document, tier) {
+  const requested = typeof tier === 'string' ? tier.trim() : String(tier?.tier || tier?.output || '').trim()
+  const requestedLower = requested.toLowerCase()
+  const canonicalTier = Object.prototype.hasOwnProperty.call(CANONICAL_OUTPUTS, requestedLower)
+    ? requestedLower
+    : Object.entries(CANONICAL_OUTPUTS).find(([, target]) => path.resolve(path.isAbsolute(requested) ? requested : path.join(ROOT, requested)) === target)?.[0] || ''
+  if (!Object.prototype.hasOwnProperty.call(CANONICAL_OUTPUTS, canonicalTier)) {
+    canonicalReject('canonical tier must be weekly or daily')
+  }
+  validateCanonicalDocument(document, canonicalTier)
+  const output = CANONICAL_OUTPUTS[canonicalTier]
+  withFileLock(output, () => {
+    writeJsonAtomic(output, document, { mode: 0o600 })
+    try { fs.chmodSync(output, 0o600) } catch {}
+  })
+  return {
+    ok: true,
+    tier: canonicalTier,
+    output: path.relative(ROOT, output).split(path.sep).join('/'),
+    bytes: Buffer.byteLength(`${JSON.stringify(document)}\n`, 'utf8')
+  }
 }
 
 function canonicalTierForOutput(output) {

@@ -59,5 +59,33 @@
       "daily_new_notional_cap_usdt": null,
       "max_managed_notional_usdt": null
     }
+  },
+  "binance": {
+    "enabled": false,
+    "submission_mode": "locked",
+    "plan_ttl_seconds": 900,
+    "quote_max_age_seconds": 15,
+    "account_max_age_seconds": 15,
+    "rules_max_age_seconds": 900,
+    "reconciliation_max_age_seconds": 60,
+    "entry_watch_seconds": 30,
+    "poll_interval_ms": 1000,
+    "kill_switch_path": "data/binance_KILL",
+    "usdm": {
+      "enabled": false,
+      "environment": "dry-run",
+      "wallet": "BINANCE_USDT_FUTURES_TESTNET",
+      "asset": "USDT",
+      "position_mode": "ONE_WAY",
+      "margin_type": "ISOLATED",
+      "configured_leverage": null,
+      "max_leverage": 3,
+      "risk_capital_fraction_bps": 10000,
+      "balance_buffer_bps": 0,
+      "risk_per_trade_bps": null,
+      "max_order_notional_usdt": null,
+      "daily_new_notional_cap_usdt": null,
+      "max_managed_notional_usdt": null
+    }
   }
 }

@@ -3,7 +3,8 @@
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createGateClient } from './gate-rest.mjs'
-import { writeJsonAtomic } from './lib-iolock.mjs'
+import { sha256Hex } from './gate-trade.mjs'
+import { readJsonStrict, writeJsonAtomic } from './lib-iolock.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const ASSETS = Object.freeze(['BTC', 'ETH'])
@@ -26,6 +27,28 @@ function validateWeek(week) {
   const value = String(week || '')
   if (!/^\d{4}-W(?:0[1-9]|[1-4]\d|5[0-3])$/.test(value)) throw failure('MARKET_WEEK_INVALID', 'iso-week must use YYYY-Www')
   return value
+}
+
+export function compactMultiExchangeSnapshot(snapshot, anchors = {}) {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot) || snapshot.schema !== 'tyche_multi_exchange_market/v1' || !/^[a-f0-9]{64}$/.test(String(snapshot.snapshot_hash || '')) || !snapshot.counts || !snapshot.aggregates || !['COMPLETE', 'PARTIAL'].includes(snapshot.status)) throw failure('MULTI_MARKET_SNAPSHOT_INVALID', 'Multi-exchange snapshot shape or status is invalid')
+  const body = { ...snapshot }
+  delete body.snapshot_hash
+  if (sha256Hex(body) !== snapshot.snapshot_hash) throw failure('MULTI_MARKET_SNAPSHOT_HASH_INVALID', 'Multi-exchange snapshot was modified after collection')
+  if (snapshot.date !== anchors.date || snapshot.iso_week !== anchors.isoWeek) throw failure('MULTI_MARKET_SNAPSHOT_ANCHOR_MISMATCH', 'Multi-exchange snapshot does not match the requested anchors')
+  const generated = Date.parse(snapshot.generated_at)
+  const current = Number(anchors.now)
+  const maxAgeMs = Number(anchors.maxAgeSeconds ?? 3600) * 1000
+  if (!Number.isFinite(generated) || (Number.isFinite(current) && (generated > current + 60000 || current - generated > maxAgeMs))) throw failure('MULTI_MARKET_SNAPSHOT_TIME_INVALID', 'Multi-exchange snapshot time is invalid, future-dated, or stale')
+  return {
+    schema: 'tyche_multi_exchange_summary/v1',
+    generated_at: snapshot.generated_at,
+    status: snapshot.status,
+    adapter: snapshot.adapter,
+    counts: snapshot.counts,
+    aggregates: snapshot.aggregates,
+    snapshot_hash: snapshot.snapshot_hash,
+    source_path: 'data/crypto_multi_exchange.json'
+  }
 }
 
 function topLevels(payload, side) {
@@ -68,10 +91,29 @@ function compactContractRule(row) {
     order_size_min: row.order_size_min ?? null,
     order_size_max: row.order_size_max ?? null,
     leverage_max: row.leverage_max ?? null,
+    maintenance_rate: row.maintenance_rate ?? null,
+    maker_fee_rate: row.maker_fee_rate ?? null,
+    taker_fee_rate: row.taker_fee_rate ?? null,
+    funding_interval: row.funding_interval ?? null,
+    funding_next_apply: row.funding_next_apply ?? null,
+    status: row.status ?? null,
     in_delisting: row.in_delisting === true,
+    enable_circuit_breaker: row.enable_circuit_breaker === true,
     mark_price: row.mark_price ?? null,
     funding_rate: row.funding_rate ?? null
   }
+}
+
+function compactRiskTiers(payload, pair) {
+  const rows = Array.isArray(payload) ? payload : Array.isArray(payload?.tiers) ? payload.tiers : []
+  return rows.filter((row) => !row?.contract || String(row.contract).toUpperCase() === pair).slice(0, 100).map((row) => ({
+    tier: row.tier ?? null,
+    risk_limit: row.risk_limit ?? row.upper_limit ?? null,
+    initial_rate: row.initial_rate ?? null,
+    maintenance_rate: row.maintenance_rate ?? null,
+    deduction: row.deduction ?? null,
+    leverage_max: row.leverage_max ?? null
+  }))
 }
 
 function candle(row) {
@@ -135,6 +177,15 @@ function indicatorSummary(payload, options = {}) {
     low20,
     volume_ratio_20: volumeAverage && Number.isFinite(last.volume) ? last.volume / volumeAverage : null
   }
+  summary.last_closed_bar = {
+    opened_at: new Date(latestMs).toISOString(),
+    closed_at: new Date(latestMs + intervalMs).toISOString(),
+    open: last.open,
+    high: last.high,
+    low: last.low,
+    close: last.close,
+    volume: Number.isFinite(last.volume) ? last.volume : null
+  }
   const spanAbove = Math.max(0, high20 - Number(summary.sma20 || last.close))
   const spanBelow = Math.max(0, Number(summary.sma20 || last.close) - low20)
   summary.level_sets = {
@@ -157,7 +208,7 @@ export async function collectMarketSnapshot(options = {}) {
 
   await Promise.all(ASSETS.map(async (asset) => {
     const pair = `${asset}_USDT`
-    const [spotRule, spotTicker, spotBook, spotDaily, spotFourHour, contractRule, contractTicker, contractBook, contractDaily, contractFourHour, funding] = await Promise.all([
+    const [spotRule, spotTicker, spotBook, spotDaily, spotFourHour, contractRule, contractTicker, contractBook, contractDaily, contractFourHour, funding, riskTiers] = await Promise.all([
       spot.spotPair({ currency_pair: pair }),
       spot.spotTickers({ currency_pair: pair }),
       spot.spotOrderBook({ currency_pair: pair, limit: 5, with_id: true }),
@@ -168,7 +219,8 @@ export async function collectMarketSnapshot(options = {}) {
       usdm.usdmOrderBook({ contract: pair, limit: 5, with_id: true }),
       usdm.usdmCandlesticks({ contract: pair, interval: '1d', limit: 365 }),
       usdm.usdmCandlesticks({ contract: pair, interval: '4h', limit: 180 }),
-      usdm.usdmFundingRate({ contract: pair, limit: 20 })
+      usdm.usdmFundingRate({ contract: pair, limit: 20 }),
+      usdm.usdmRiskLimitTiers({ contract: pair, limit: 100 })
     ])
     const tickerSpot = exactRow(spotTicker.data, pair, ['currency_pair', 'id'])
     const tickerUsdm = exactRow(contractTicker.data, pair, ['contract', 'name'])
@@ -200,14 +252,21 @@ export async function collectMarketSnapshot(options = {}) {
           volume_24h_base: tickerUsdm.volume_24h_base ?? null,
           volume_24h_quote: tickerUsdm.volume_24h_quote ?? null
         },
-        order_book: { bids: topLevels(contractBook.data, 'bids'), asks: topLevels(contractBook.data, 'asks') },
+        order_book: {
+          id: contractBook.data?.id ?? null,
+          current: contractBook.data?.current ?? null,
+          update: contractBook.data?.update ?? null,
+          bids: topLevels(contractBook.data, 'bids'),
+          asks: topLevels(contractBook.data, 'asks')
+        },
         technical: { daily: indicatorSummary(contractDaily.data, { currentMs: Date.parse(generatedAt), maxLagSeconds: 172800, intervalSeconds: 86400 }), four_hour: indicatorSummary(contractFourHour.data, { currentMs: Date.parse(generatedAt), maxLagSeconds: 28800, intervalSeconds: 14400 }) },
-        funding_history: Array.isArray(funding.data) ? funding.data.slice(0, 20).map((row) => ({ t: row.t ?? null, r: row.r ?? null })) : []
+        funding_history: Array.isArray(funding.data) ? funding.data.slice(0, 20).map((row) => ({ t: row.t ?? row.funding_time ?? null, r: row.r ?? null })) : [],
+        risk_limit_tiers: compactRiskTiers(riskTiers.data, pair)
       }
     }
   }))
 
-  return {
+  const snapshot = {
     schema: 'tyche_crypto_market/v1',
     date,
     iso_week: isoWeek,
@@ -215,6 +274,8 @@ export async function collectMarketSnapshot(options = {}) {
     source: 'Gate public API v4',
     assets: Object.fromEntries(ASSETS.map((asset) => [asset, assets[asset]]))
   }
+  if (options.multiExchangeSnapshot) snapshot.multi_exchange = compactMultiExchangeSnapshot(options.multiExchangeSnapshot, { date, isoWeek, now: Date.parse(generatedAt) })
+  return snapshot
 }
 
 function outputPath(input) {
@@ -231,18 +292,27 @@ function outputPath(input) {
 function parseArgs(argv) {
   const values = argv.slice(2)
   const command = values[0]
-  const get = (flag) => {
-    const index = values.indexOf(flag)
-    if (index < 0 || !values[index + 1] || values[index + 1].startsWith('--')) throw failure('MARKET_ARGS_INVALID', `${flag} is required`)
-    return values[index + 1]
+  const allowedFlags = new Set(['--date', '--iso-week', '--out', '--multi-exchange'])
+  const unknownFlags = values.filter((value) => value.startsWith('--') && !allowedFlags.has(value))
+  if (unknownFlags.length) throw failure('MARKET_ARGS_FORBIDDEN', `Unsupported arguments: ${[...new Set(unknownFlags)].join(',')}`)
+  const get = (flag, fallback = null) => {
+    const indexes = values.map((value, index) => value === flag ? index : -1).filter((index) => index >= 0)
+    if (indexes.length > 1) throw failure('MARKET_ARGS_DUPLICATE', `${flag} may appear only once`)
+    if (!indexes.length) return fallback
+    if (!values[indexes[0] + 1] || values[indexes[0] + 1].startsWith('--')) throw failure('MARKET_ARGS_INVALID', `${flag} requires a value`)
+    return values[indexes[0] + 1]
   }
   if (command !== 'snapshot') throw failure('MARKET_COMMAND_UNSUPPORTED', 'Supported command: snapshot')
-  return { date: get('--date'), isoWeek: get('--iso-week'), output: get('--out') }
+  return { date: get('--date'), isoWeek: get('--iso-week'), output: get('--out'), multiExchangePath: get('--multi-exchange') }
 }
 
 async function cli(argv) {
   const args = parseArgs(argv)
-  const snapshot = await collectMarketSnapshot(args)
+  const requestedMultiPath = args.multiExchangePath ? path.resolve(ROOT, args.multiExchangePath) : null
+  const fixedMultiPath = path.join(ROOT, 'data', 'crypto_multi_exchange.json')
+  if (requestedMultiPath && requestedMultiPath !== fixedMultiPath) throw failure('MARKET_MULTI_PATH_INVALID', 'Multi-exchange input is fixed to data/crypto_multi_exchange.json')
+  const multiExchangeSnapshot = requestedMultiPath ? readJsonStrict(requestedMultiPath) : null
+  const snapshot = await collectMarketSnapshot({ ...args, multiExchangeSnapshot })
   const target = outputPath(args.output)
   writeJsonAtomic(target, snapshot)
   process.stdout.write(`${JSON.stringify({ ok: true, schema: snapshot.schema, date: snapshot.date, iso_week: snapshot.iso_week, output: path.relative(ROOT, target).split(path.sep).join('/') }, null, 2)}\n`)

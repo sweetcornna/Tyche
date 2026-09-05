@@ -10,6 +10,8 @@ Agents must never reconstruct prices, indicators, funding, position size, levera
 
 Agents may state directional analysis and may propose semantic entry/stop/target values only when those values are copied from the current public market snapshot and cite the snapshot fields used. Agents may not calculate or emit quantities, notionals, contracts, leverage, identities, signatures, endpoints, `reduce_only`, or lifecycle state.
 
+Sealed multi-exchange aggregates may support cross-venue confirmation, price-dispersion warnings, liquidity context, and funding context. They are not execution evidence. A consensus, best bid, or best ask from another venue can never replace a Gate level-set price, Gate execution book, mark-price protection bar, risk tier, or funding record.
+
 Weekly analysis emits no execution candidates. Daily entries require a fresh weekly anchor. A missing or stale anchor allows only managed reduction/exit candidates.
 
 ## Deterministic output

@@ -147,6 +147,18 @@ test('analysis rejects inherited USDT-M mutation credentials before launching an
   assert.equal(calls, 0)
 })
 
+test('both workflows reject inherited Binance testnet credentials before launching an agent', async () => {
+  for (const [file, input, credential] of [
+    ['crypto-preflight.mjs', { date: '2030-01-07', isoWeek: '2030-W02' }, 'BINANCE_USDM_TESTNET_API_KEY'],
+    ['crypto-analysis.mjs', { tier: 'daily', date: '2030-01-07', isoWeek: '2030-W02' }, 'BINANCE_USDM_TESTNET_SECRET_KEY']
+  ]) {
+    const run = workflowFunction(file)
+    let calls = 0
+    await assert.rejects(run(input, async () => { calls += 1 }, { env: { [credential]: 'present' } }), new RegExp(`WORKFLOW_MUTATION_CREDENTIAL_PRESENT:${credential}`))
+    assert.equal(calls, 0)
+  }
+})
+
 test('read-only public workflow context completes and returns structured data without persistence agents', async () => {
   const preflight = workflowFunction('crypto-preflight.mjs')
   let preflightCalls = 0
