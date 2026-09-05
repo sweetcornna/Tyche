@@ -132,7 +132,7 @@ test('Pi 0.84.4 Agent API accepts only submit_analysis and returns validated out
   const faux = fauxProvider({ provider: 'fixture', models: [{ id: 'fixture-model' }] })
   faux.setResponses([fauxAssistantMessage(fauxToolCall('submit_analysis', { analysis: { summary: 'agent output' } }))])
   const result = await runPiAgentJob(job(), {
-    model: faux.getModel(),
+    model: { ...faux.getModel(), reasoning: true, thinkingLevelMap: { medium: 'medium', high: 'high', xhigh: 'xhigh' } },
     streamFn: faux.provider.streamSimple.bind(faux.provider)
   })
   assert.equal(result.status, 'ok')
@@ -151,7 +151,7 @@ test('malicious or invalid tool calls fail closed without executing another tool
   const malicious = fauxProvider({ provider: 'fixture', models: [{ id: 'fixture-model' }] })
   malicious.setResponses([fauxAssistantMessage(fauxToolCall('bash', { command: 'touch should-not-run' }))])
   const unauthorized = await runPiAgentJob(job(), {
-    model: malicious.getModel(),
+    model: { ...malicious.getModel(), reasoning: true, thinkingLevelMap: { medium: 'medium', high: 'high', xhigh: 'xhigh' } },
     streamFn: malicious.provider.streamSimple.bind(malicious.provider)
   })
   assert.equal(unauthorized.status, 'error')
@@ -159,7 +159,7 @@ test('malicious or invalid tool calls fail closed without executing another tool
   const invalid = fauxProvider({ provider: 'fixture', models: [{ id: 'fixture-model' }] })
   invalid.setResponses([fauxAssistantMessage(fauxToolCall('submit_analysis', { analysis: 'not-an-object' }))])
   const malformed = await runPiAgentJob(job(), {
-    model: invalid.getModel(),
+    model: { ...invalid.getModel(), reasoning: true, thinkingLevelMap: { medium: 'medium', high: 'high', xhigh: 'xhigh' } },
     streamFn: invalid.provider.streamSimple.bind(invalid.provider)
   })
   assert.equal(malformed.status, 'error')

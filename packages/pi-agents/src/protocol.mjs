@@ -13,6 +13,8 @@ export const ROLES = Object.freeze([
 ])
 
 export const ASSETS = Object.freeze(['BTC', 'ETH'])
+export const EFFORTS = Object.freeze(['medium', 'high', 'xhigh'])
+export const DEFAULT_ROLE_EFFORTS = Object.freeze({ orchestrator: 'high', preflight: 'medium', 'btc-analyst': 'high', 'eth-analyst': 'high', synthesizer: 'high', reviewer: 'xhigh' })
 export const TIERS = Object.freeze(['weekly', 'daily'])
 export const MAX_ATTEMPTS = 2
 export const DEFAULT_TIMEOUT_MS = 30_000
@@ -21,16 +23,16 @@ export const MAX_PAYLOAD_BYTES = 2 * 1024 * 1024
 
 const JOB_KEYS = new Set([
   'schema', 'jobId', 'runId', 'role', 'asset', 'tier', 'date', 'isoWeek',
-  'provider', 'model', 'attempt', 'timeoutMs', 'input'
+  'provider', 'model', 'effort', 'attempt', 'timeoutMs', 'input'
 ])
 const RESULT_KEYS = new Set([
   'schema', 'jobId', 'runId', 'role', 'asset', 'tier', 'date', 'isoWeek',
-  'provider', 'model', 'attempt', 'status', 'startedAt', 'finishedAt',
+  'provider', 'model', 'effort', 'attempt', 'status', 'startedAt', 'finishedAt',
   'output', 'error', 'provenance'
 ])
 const ERROR_KEYS = new Set(['code', 'message'])
 const PROVENANCE_KEYS = new Set([
-  'schema', 'adapter', 'piAgentCore', 'piAi', 'provider', 'model', 'role', 'attempt'
+  'schema', 'adapter', 'piAgentCore', 'piAi', 'provider', 'model', 'effort', 'role', 'attempt'
 ])
 
 // These are deliberately transport-boundary fields, not generic market terms.
@@ -143,6 +145,7 @@ function requiredTimestamp(value, path) {
 }
 
 function validateCommon(value, path) {
+  if (!EFFORTS.includes(value.effort)) fail('PI_SCHEMA_EFFORT', `${path}.effort must be medium, high or xhigh`, `${path}.effort`)
   requiredString(value.jobId, `${path}.jobId`)
   requiredString(value.runId, `${path}.runId`)
   if (!ROLES.includes(value.role)) fail('PI_SCHEMA_ROLE', `${path}.role is not an allowed role`, `${path}.role`)
@@ -177,6 +180,7 @@ function validateProvenance(value, path) {
   requiredString(value.piAi, `${path}.piAi`, 32)
   requiredString(value.provider, `${path}.provider`, 128)
   requiredString(value.model, `${path}.model`, 256)
+  if (!EFFORTS.includes(value.effort)) fail('PI_SCHEMA_EFFORT', `${path}.effort is invalid`, `${path}.effort`)
   if (!ROLES.includes(value.role)) fail('PI_SCHEMA_ROLE', `${path}.role is invalid`, `${path}.role`)
   if (!Number.isInteger(value.attempt) || value.attempt < 0 || value.attempt >= MAX_ATTEMPTS) fail('PI_SCHEMA_ATTEMPT', `${path}.attempt is invalid`, `${path}.attempt`)
 }
@@ -189,7 +193,7 @@ export function validateResult(value) {
   requiredTimestamp(value.startedAt, 'result.startedAt')
   requiredTimestamp(value.finishedAt, 'result.finishedAt')
   validateProvenance(value.provenance, 'result.provenance')
-  if (value.provenance.provider !== value.provider || value.provenance.model !== value.model || value.provenance.role !== value.role || value.provenance.attempt !== value.attempt) {
+  if (value.provenance.provider !== value.provider || value.provenance.model !== value.model || value.provenance.effort !== value.effort || value.provenance.role !== value.role || value.provenance.attempt !== value.attempt) {
     fail('PI_SCHEMA_PROVENANCE_MISMATCH', 'result provenance does not match result identity', 'result.provenance')
   }
   if (value.status === 'ok') {
@@ -215,7 +219,7 @@ export function validateSemanticOutput(value) {
 
 export function assertResultMatchesJob(result, job) {
   validateResult(result)
-  const fields = ['jobId', 'runId', 'role', 'asset', 'tier', 'date', 'isoWeek', 'provider', 'model', 'attempt']
+  const fields = ['jobId', 'runId', 'role', 'asset', 'tier', 'date', 'isoWeek', 'provider', 'model', 'effort', 'attempt']
   for (const field of fields) {
     if (result[field] !== job[field]) fail('PI_RESULT_IDENTITY_MISMATCH', `result.${field} does not match job.${field}`, `result.${field}`)
   }
@@ -245,6 +249,7 @@ export function makeResult(job, fields = {}) {
     isoWeek: job.isoWeek,
     provider: job.provider,
     model: job.model,
+    effort: job.effort,
     attempt: job.attempt,
     status: fields.status || 'error',
     startedAt,
@@ -261,6 +266,7 @@ export function makeResult(job, fields = {}) {
       piAi: '0.84.4',
       provider: job.provider,
       model: job.model,
+      effort: job.effort,
       role: job.role,
       attempt: job.attempt
     }
@@ -280,6 +286,7 @@ export function makeJob(fields) {
     isoWeek: fields.isoWeek,
     provider: fields.provider,
     model: fields.model,
+    effort: fields.effort === undefined ? DEFAULT_ROLE_EFFORTS[fields.role] : fields.effort,
     attempt: fields.attempt ?? 0,
     timeoutMs: fields.timeoutMs,
     input: fields.input

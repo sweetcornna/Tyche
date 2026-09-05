@@ -81,14 +81,27 @@ execution. Event logs, the fixed DAG and testnet controls are in run details
 and advanced settings.
 
 Ask the main Agent to change models for any of the six workflow roles. It
-returns a model-change suggestion; select **应用模型配置** to apply it separately
-from a strategy change. The fixed session catalog contains Luna, Sol, Terra,
-5.5 and 5.4 Mini from the installed Pi Responses metadata. The API service must
-support the selected model. The main Agent uses the effective orchestrator
-model; other roles use their explicit selection or the connection's default
-(Luna initially). Settings remain session-local. Each cycle freezes the full
-role mapping, and persisted provenance records the default, per-role models
-and actual attempt models. Model changes never bypass receipt reuse or grant
+returns a model/effort suggestion; select **应用模型配置** to apply it separately
+from a strategy change. Every role initially uses Astra. Orchestration (including
+the main conversation), BTC/ETH analysis and synthesis use `high`; preflight
+uses `medium`, and review uses `xhigh`. These are the only effort levels exposed.
+Luna, Sol, Terra, 5.5 and 5.4 Mini remain available for explicit model changes.
+The selected model must support the exact requested effort; Tyche rejects an
+unsupported pairing instead of letting the SDK silently lower it.
+
+Astra uses an explicit custom Responses definition because the pinned Pi
+catalog does not contain it. Its 272,000-token context and text/image input
+metadata were verified from the local host catalog. The 16,384-token session
+output budget is an application request ceiling, not a claim about the model's
+maximum output. Astra pricing is unavailable; SDK-required zero placeholders
+are not displayed as prices or cost estimates. The user's API gateway must
+support the requested model and effort; local metadata alone does not prove
+that gateway support. Existing models retain their pinned SDK metadata.
+
+The main Agent uses the orchestrator's effective model and effort. Settings
+remain session-local. Each cycle freezes both complete role mappings; job and
+result identity checks, retries and persisted provenance include the actual
+model and effort. Configuration changes never bypass receipt reuse or grant
 additional tools, roles or trading permissions.
 
 The runnable local cluster keeps the scheduler/control plane and the optional

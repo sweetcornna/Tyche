@@ -37,13 +37,19 @@ or same-cycle receipt reuse. Provider changes, discussion and cycle launch are
 mutually excluded while the model is busy. Connection values and credentials
 are checked before model input and excluded from discussion output and errors.
 
-Session role-model configuration accepts only the six fixed roles and the five
-Responses model IDs already present in the pinned Pi catalog. Discussion may
+Session role-model configuration accepts only the six fixed roles and the fixed
+Responses model catalog: explicit Astra metadata plus the five retained pinned
+SDK models. Effort is limited to medium, high and xhigh and must be supported
+without remapping by the actual selected model. Discussion may
 propose changes but cannot apply them. Explicit model application is protected
 by the same session/CSRF and busy checks as strategy application. A cycle freezes
-all effective role choices before its first asynchronous prerequisite check;
-the main discussion uses the orchestrator choice. Jobs, result identity checks
-and persisted provenance follow each actual role model. Changing models never
+all effective role model/effort choices before its first asynchronous prerequisite
+check; the main discussion uses the orchestrator choices. Worker protocols require
+effort as part of the job, result and provenance identity. The actual resolved
+model is checked before Agent execution, and the session transport also checks
+the requested effort before calling the SDK. Astra explicitly maps each of the
+three levels to itself, preventing silent SDK downgrade. Jobs, retries and
+persisted provenance follow each actual role model and effort. Changing models never
 changes the semantic schema, credentials, execution gates or receipt reuse.
 
 Protective orders are created only after identifiable fills prove the executed contract count. They are reduce-only and use that proven amount. Tyche has no transfer operation and no account-wide cancellation operation.

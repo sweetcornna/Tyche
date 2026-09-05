@@ -16,7 +16,7 @@ import {
   validateSemanticOutput
 } from './protocol.mjs'
 import { runWorkerProcess } from './worker-client.mjs'
-import { validateSessionRoleModels } from './session-provider.mjs'
+import { validateSessionRoleModels, effectiveSessionRoleEfforts, assertSessionModelEffort, SESSION_PROVIDER_ID } from './session-provider.mjs'
 
 const ANALYST_ROLES = Object.freeze(['btc-analyst', 'eth-analyst'])
 const PREFLIGHT_KEYS = new Set(['status', 'evidence_refs', 'blockers'])
@@ -41,7 +41,10 @@ function validateClusterOptions(options) {
   if (options.runJob !== undefined && typeof options.runJob !== 'function') throw new Error('PI_RUNNER_REQUIRED')
   const runId = options.runId || randomUUID()
   requiredString(runId, 'runId', 256)
-  return { ...options, roleModels: validateSessionRoleModels(options.roleModels ?? {}), tier: options.tier || options.mode, timeoutMs, runId }
+  const roleModels = validateSessionRoleModels(options.roleModels ?? {})
+  const roleEfforts = effectiveSessionRoleEfforts(options.roleEfforts)
+  if (options.provider === SESSION_PROVIDER_ID) for (const role of ROLES) assertSessionModelEffort(roleModels[role] || options.model, roleEfforts[role])
+  return { ...options, roleModels, roleEfforts, tier: options.tier || options.mode, timeoutMs, runId }
 }
 
 function emitEvent(options, role, asset, attempt, status) {
@@ -110,6 +113,7 @@ function createRoleJob(options, role, asset, attempt, inputs) {
     isoWeek: options.isoWeek,
     provider: options.provider,
     model: options.roleModels[role] || options.model,
+    effort: options.roleEfforts[role],
     attempt,
     timeoutMs: options.timeoutMs,
     input: { ...jobInput(role, options, inputs), ...(strategy ? { strategy_context: strategy } : {}) }
@@ -229,8 +233,9 @@ function provenance(options, results) {
     model: options.model,
     default_model: options.model,
     role_models: Object.fromEntries(ROLES.map((role) => [role, options.roleModels[role] || options.model])),
+    role_efforts: { ...options.roleEfforts },
     roles: [...ROLES],
-    attempts: results.map((result) => ({ role: result.role, model: result.model, attempt: result.attempt, status: result.status }))
+    attempts: results.map((result) => ({ role: result.role, model: result.model, effort: result.effort, attempt: result.attempt, status: result.status }))
   }
 }
 

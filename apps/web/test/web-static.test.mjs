@@ -36,8 +36,6 @@ test('session model form is fixed, ephemeral, and has one complete workflow acti
   const api = fs.readFileSync(path.join(SOURCE, 'api.js'), 'utf8')
   const entry = fs.readFileSync(path.join(SOURCE, 'workflow-entry.js'), 'utf8')
   assert.match(entry, /provider: 'openai-responses-compatible'/)
-  assert.match(app, /const SESSION_MODEL_PREFIX = \['g', 'p', 't', '-', '5', '\.', '6', '-'\]\.join\(''\)/)
-  assert.match(app, /const DEFAULT_MODEL = `\$\{SESSION_MODEL_PREFIX\}luna`/)
   assert.match(app, /catalog=\{modelConfig\.allowed_models\}/)
   assert.match(api, /providerStatus: \(\) => request\('\/api\/provider'\)/)
   assert.match(api, /configureProvider:[^\n]+api_key: apiKey/)

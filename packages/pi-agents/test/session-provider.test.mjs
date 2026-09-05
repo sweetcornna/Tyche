@@ -50,7 +50,7 @@ function sessionJob(overrides = {}) {
 
 test('session provider and model allowlists are fixed', async () => {
   assert.equal(SESSION_PROVIDER_ID, 'openai-responses-compatible')
-  assert.deepEqual(SESSION_MODEL_IDS, ['gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.5', 'gpt-5.4-mini'])
+  assert.deepEqual(SESSION_MODEL_IDS, ['gpt-6-astra', 'gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.5', 'gpt-5.4-mini'])
   await assert.rejects(
     createSessionProviderRuntime({
       endpoint: ENDPOINT,
@@ -242,7 +242,7 @@ test('custom runtime uses the fixed Responses model and injected fetch', async (
     systemPrompt: 'test',
     messages: [{ role: 'user', content: [{ type: 'text', text: 'test' }], timestamp: Date.now() }],
     tools: []
-  }, { maxRetries: 0 })
+  }, { maxRetries: 0, reasoning: 'high' })
   const result = await stream.result()
   assert.equal(result.api, 'openai-responses')
   assert.equal(result.provider, SESSION_PROVIDER_ID)

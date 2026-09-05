@@ -57,6 +57,7 @@ test('source text has no private path, private infrastructure name, backend mode
   const backendPattern = new RegExp(['g', 'p', 't', '-'].join('') + '\\d', 'i')
   const sessionProviderModels = new Map([
     ['packages/pi-agents/src/session-provider.mjs', new Set([
+      ['gpt', '6', 'astra'].join('-'),
       ['gpt', '5', '6', 'luna'].join('-').replace('-5-6-', '-5.6-'),
       ['gpt', '5', '6', 'sol'].join('-').replace('-5-6-', '-5.6-'),
       ['gpt', '5', '6', 'terra'].join('-').replace('-5-6-', '-5.6-'),
@@ -64,6 +65,7 @@ test('source text has no private path, private infrastructure name, backend mode
       ['gpt', '5.4', 'mini'].join('-')
     ])],
     ['packages/pi-agents/test/session-provider.test.mjs', new Set([
+      ['gpt', '6', 'astra'].join('-'),
       ['gpt', '5', '6', 'luna'].join('-').replace('-5-6-', '-5.6-'),
       ['gpt', '5', '6', 'sol'].join('-').replace('-5-6-', '-5.6-'),
       ['gpt', '5', '6', 'terra'].join('-').replace('-5-6-', '-5.6-'),

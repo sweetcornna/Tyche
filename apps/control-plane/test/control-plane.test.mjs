@@ -917,7 +917,7 @@ test('model configuration is exact, session-local, and rejects invalid mappings 
     const session = await openSession(info)
     const post = (body, extras = {}) => httpRequest(info, '/api/models', { method: 'POST', body, ...session, ...extras })
     const initial = (await httpRequest(info, '/api/models', session)).json
-    assert.equal(initial.allowed_models.length, 5)
+    assert.equal(initial.allowed_models.length, 6)
     assert.equal(Object.keys(initial.effective_models).length, 6)
     assert.ok(Object.values(initial.effective_models).every((model) => model === PROVIDER_MODELS[0]))
     assert.equal((await post({ role_models: {} }, { csrf: '' })).status, 403)
@@ -1008,5 +1008,62 @@ test('clearing a connection restores the default model while preserving applied 
     assert.equal(models.default_model, PROVIDER_MODELS[0])
     assert.equal(models.effective_models.orchestrator, PROVIDER_MODELS[0])
     assert.equal(models.effective_models.reviewer, PROVIDER_MODELS[3])
+  } finally { await service.stop() }
+})
+
+test('Astra defaults and explicit effort suggestions remain atomic, frozen, and session-local', async () => {
+  const defaults = { orchestrator: 'high', preflight: 'medium', 'btc-analyst': 'high', 'eth-analyst': 'high', synthesizer: 'high', reviewer: 'xhigh' }
+  const suggested = { orchestrator: 'medium', reviewer: 'high' }
+  const discussionEfforts = []
+  let release
+  let entered
+  let snapshot
+  const started = new Promise((resolve) => { entered = resolve })
+  const { service, info } = await startService({ adapters: { validateProviderConfig: async () => ({ ok: true }), discussStrategy: async (input, runtime) => { discussionEfforts.push(runtime.effort); assert.equal(runtime.model, PROVIDER_MODELS[0]); assert.equal(input.roleEfforts.orchestrator, runtime.effort); return { reply: '仅为 fixture 建议，尚未应用。', suggested_role_efforts: suggested } }, runCycle: async (_, runtime) => { snapshot = runtime; entered(); await new Promise((resolve) => { release = resolve }); return { outcome: 'NO_ACTION' } } } })
+  try {
+    const session = await openSession(info); await configureProvider(info, session)
+    const post = (route, body) => httpRequest(info, route, { method: 'POST', body, ...session })
+    const initial = (await httpRequest(info, '/api/models', session)).json
+    assert.equal(initial.default_model, PROVIDER_MODELS[0])
+    assert.ok(Object.values(initial.effective_models).every((model) => model === PROVIDER_MODELS[0]))
+    assert.deepEqual(initial.effective_efforts, defaults)
+    assert.deepEqual(initial.allowed_efforts, ['medium', 'high', 'xhigh'])
+    const discussion = await post('/api/strategy/discuss', { message: '调整主 Agent 和复核 effort。' })
+    assert.deepEqual(discussion.json.suggested_role_efforts, suggested)
+    assert.deepEqual((await httpRequest(info, '/api/models', session)).json.role_efforts, {})
+    for (const body of [{ role_efforts: { reviewer: 'invalid' } }, { role_efforts: { reviewer: null } }, { role_efforts: { admin: 'high' } }, { role_models: { reviewer: PROVIDER_MODELS[0] }, role_efforts: { reviewer: 1 } }, { role_efforts: suggested, permissions: ['execute'] }, { role_efforts: { reviewer: PROVIDER_KEY } }]) {
+      const rejected = await post('/api/models', body)
+      assert.equal(rejected.status, 400)
+      assert.equal(rejected.text.includes(PROVIDER_KEY), false)
+      assert.deepEqual((await httpRequest(info, '/api/models', session)).json, initial)
+    }
+    assert.equal((await post('/api/models', { role_efforts: suggested })).status, 200)
+    await post('/api/strategy/discuss', { message: '确认主 Agent effort。' })
+    assert.deepEqual(discussionEfforts, ['high', 'medium'])
+    const pending = post('/api/cycle', { date: DATE, iso_week: WEEK }); await started
+    assert.deepEqual(snapshot.roleEfforts, { ...defaults, ...suggested })
+    assert.equal(Object.isFrozen(snapshot.roleEfforts), true)
+    assert.ok(Object.values(snapshot.roleModels).every((model) => model === PROVIDER_MODELS[0]))
+    assert.equal((await post('/api/models', { role_efforts: { reviewer: 'xhigh' } })).status, 409)
+    release(); assert.equal((await pending).status, 200)
+    await post('/api/logout', {})
+    assert.equal((await httpRequest(info, '/api/models', session)).status, 401)
+  } finally { await service.stop() }
+})
+
+test('invalid or late effort suggestions cannot apply configuration or revive an expired session', async () => {
+  let clock = Date.now()
+  let output = { reply: 'safe', suggested_role_efforts: { reviewer: 'invalid' } }
+  let expire = false
+  const { service, info } = await startService({ now: () => clock, adapters: { validateProviderConfig: async () => ({ ok: true }), discussStrategy: async () => { if (expire) clock += SESSION_TTL_MS; return output } } })
+  try {
+    const session = await openSession(info); await configureProvider(info, session)
+    const post = () => httpRequest(info, '/api/strategy/discuss', { method: 'POST', body: { message: '修改 effort。' }, ...session })
+    assert.equal((await post()).status, 502)
+    assert.deepEqual((await httpRequest(info, '/api/models', session)).json.role_efforts, {})
+    assert.deepEqual((await httpRequest(info, '/api/strategy', session)).json.discussion, [])
+    output = { reply: 'safe', suggested_role_efforts: { reviewer: 'high' } }; expire = true
+    assert.equal((await post()).status, 401)
+    assert.equal((await httpRequest(info, '/api/models', session)).status, 401)
   } finally { await service.stop() }
 })

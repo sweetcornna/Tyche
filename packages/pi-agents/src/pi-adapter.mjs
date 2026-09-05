@@ -11,6 +11,8 @@ import {
 import {
   containsSessionSecret,
   createSessionProviderRuntime,
+  assertSessionModelEffort,
+  assertModelEffort,
   redactSessionSecrets,
   SESSION_API_KEY_ENV,
   SESSION_ENDPOINT_ENV,
@@ -64,6 +66,7 @@ function submitAnalysisTool(capture) {
 
 async function resolveModelAndStream(job, options) {
   if (job.provider === SESSION_PROVIDER_ID) {
+    assertSessionModelEffort(job.model, job.effort)
     const env = options.env || process.env
     const runtime = await createSessionProviderRuntime({
       endpoint: env?.[SESSION_ENDPOINT_ENV],
@@ -102,12 +105,13 @@ export async function runPiAgentJob(inputJob, options = {}) {
   try {
     if (job.provider === SESSION_PROVIDER_ID && containsSessionSecret(job.input, sessionSecrets)) throw new Error('PI_SESSION_SECRET_IN_INPUT')
     const { model, streamFn } = await resolveModelAndStream(job, options)
+    assertModelEffort(model, job.effort)
     const tool = submitAnalysisTool(capture)
     agent = new Agent({
       initialState: {
         systemPrompt: 'Tyche semantic analysis worker. Use only the supplied input and submit_analysis.',
         model,
-        thinkingLevel: 'off',
+        thinkingLevel: job.effort,
         tools: [tool]
       },
       streamFn,

@@ -3,16 +3,18 @@ import net from 'node:net'
 import {
   createModels,
   createProvider,
+  getSupportedThinkingLevels,
   envApiKeyAuth
 } from '@earendil-works/pi-ai'
 import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy'
 import { builtinModels } from '@earendil-works/pi-ai/providers/all'
-import { ROLES } from './protocol.mjs'
+import { ROLES, EFFORTS, DEFAULT_ROLE_EFFORTS } from './protocol.mjs'
 
 export const SESSION_PROVIDER_ID = 'openai-responses-compatible'
 export const SESSION_API_KEY_ENV = 'TYCHE_PI_SESSION_API_KEY'
 export const SESSION_ENDPOINT_ENV = 'TYCHE_PI_SESSION_ENDPOINT'
-export const SESSION_MODEL_IDS = Object.freeze(['gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.5', 'gpt-5.4-mini'])
+export const SESSION_MODEL_IDS = Object.freeze(['gpt-6-astra', 'gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.5', 'gpt-5.4-mini'])
+export const SESSION_OUTPUT_BUDGET = 16384
 export const MAX_SESSION_ENDPOINT_BYTES = 2048
 
 const SESSION_MODEL_SET = new Set(SESSION_MODEL_IDS)
@@ -33,6 +35,24 @@ export function effectiveSessionRoleModels(defaultModel, overrides = {}) {
   if (!SESSION_MODEL_SET.has(defaultModel)) fail('PI_SESSION_MODEL_NOT_ALLOWED')
   const configured = validateSessionRoleModels(overrides)
   return Object.freeze(Object.fromEntries(ROLES.map((role) => [role, configured[role] || defaultModel])))
+}
+
+export function validateSessionRoleEfforts(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.entries(value).some(([role, effort]) => !ROLES.includes(role) || !EFFORTS.includes(effort))) fail('PI_SESSION_ROLE_EFFORTS_INVALID')
+  return Object.freeze(Object.fromEntries(ROLES.filter((role) => Object.hasOwn(value, role)).map((role) => [role, value[role]])))
+}
+
+export function effectiveSessionRoleEfforts(overrides = {}) {
+  return Object.freeze({ ...DEFAULT_ROLE_EFFORTS, ...validateSessionRoleEfforts(overrides) })
+}
+
+export function assertSessionModelEffort(modelId, effort) {
+  const model = cloneSessionModel(modelId, '', builtinModels())
+  assertModelEffort(model, effort)
+}
+
+export function assertModelEffort(model, effort) {
+  if (!EFFORTS.includes(effort) || !getSupportedThinkingLevels(model).includes(effort) || (model.thinkingLevelMap?.[effort] ?? effort) !== effort) fail('PI_SESSION_MODEL_EFFORT_UNSUPPORTED')
 }
 
 function ipv4Number(address) {
@@ -257,6 +277,17 @@ function deepFreeze(value) {
 
 function cloneSessionModel(id, endpoint, sourceModels) {
   if (!SESSION_MODEL_SET.has(id)) fail('PI_SESSION_MODEL_NOT_ALLOWED')
+  if (id === SESSION_MODEL_IDS[0]) return deepFreeze({
+    id, name: 'Astra (Tyche session)', api: 'openai-responses', provider: SESSION_PROVIDER_ID, baseUrl: endpoint,
+    reasoning: true,
+    thinkingLevelMap: { off: null, minimal: null, low: null, medium: 'medium', high: 'high', xhigh: 'xhigh', max: null },
+    // Context and modalities were verified from the local host catalog. This
+    // request budget is an application ceiling, not a claimed model maximum.
+    input: ['text', 'image'], contextWindow: 272000, maxTokens: SESSION_OUTPUT_BUDGET,
+    // The SDK requires numeric rates. These are unpriced placeholders only;
+    // Tyche does not expose usage costs or claim a known/free Astra price.
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+  })
   const source = sourceModels.getModel('openai', id)
   if (!source || source.api !== 'openai-responses') fail('PI_SESSION_MODEL_SOURCE_INVALID')
   const model = structuredClone(source)
@@ -290,10 +321,12 @@ export async function createSessionProviderRuntime({
   }
   const api = {
     stream(model, context, options) {
-      return responses.stream(trustedModel(model), context, { ...options, fetch: restrictedFetch })
+      assertSessionModelEffort(model?.id, options?.reasoningEffort)
+      return responses.stream(trustedModel(model), context, { ...options, maxTokens: outputBudget(options), fetch: restrictedFetch })
     },
     streamSimple(model, context, options) {
-      return responses.streamSimple(trustedModel(model), context, { ...options, fetch: restrictedFetch })
+      assertSessionModelEffort(model?.id, options?.reasoning)
+      return responses.streamSimple(trustedModel(model), context, { ...options, maxTokens: outputBudget(options), fetch: restrictedFetch })
     }
   }
   const provider = createProvider({
@@ -321,8 +354,15 @@ export async function createSessionProviderRuntime({
     provider,
     models,
     model,
+    pricing: modelId === SESSION_MODEL_IDS[0] ? 'unavailable' : 'catalog',
     streamFn: models.streamSimple.bind(models)
   })
+}
+
+function outputBudget(options) {
+  const requested = options?.maxTokens ?? SESSION_OUTPUT_BUDGET
+  if (!Number.isInteger(requested) || requested < 1) fail('PI_SESSION_OUTPUT_BUDGET_INVALID')
+  return Math.min(requested, SESSION_OUTPUT_BUDGET)
 }
 
 export function redactSessionSecrets(error, { apiKey, endpoint } = {}) {

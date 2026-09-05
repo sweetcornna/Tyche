@@ -5,7 +5,8 @@ import path from 'node:path'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { URL } from 'node:url'
 import { WebSocketServer, WebSocket } from 'ws'
-import { containsSessionSecret, SESSION_MODEL_IDS, validateSessionRoleModels, effectiveSessionRoleModels } from '../../../packages/pi-agents/src/session-provider.mjs'
+import { containsSessionSecret, SESSION_MODEL_IDS, validateSessionRoleModels, effectiveSessionRoleModels, validateSessionRoleEfforts, effectiveSessionRoleEfforts, assertSessionModelEffort } from '../../../packages/pi-agents/src/session-provider.mjs'
+import { EFFORTS } from '../../../packages/pi-agents/src/protocol.mjs'
 
 export const LOOPBACK_HOST = '127.0.0.1'
 export const SESSION_TTL_MS = 15 * 60 * 1000
@@ -316,11 +317,19 @@ export function createControlPlane(options = {}) {
 
   function modelsDto(session) {
     const defaultModel = session.providerConfig?.model || PROVIDER_MODELS[0]
-    return { default_model: defaultModel, role_models: { ...session.roleModels }, effective_models: effectiveSessionRoleModels(defaultModel, session.roleModels), allowed_models: [...PROVIDER_MODELS], scope: 'session' }
+    return { default_model: defaultModel, role_models: { ...session.roleModels }, role_efforts: { ...session.roleEfforts }, effective_models: effectiveSessionRoleModels(defaultModel, session.roleModels), effective_efforts: effectiveSessionRoleEfforts(session.roleEfforts), allowed_models: [...PROVIDER_MODELS], allowed_efforts: [...EFFORTS], scope: 'session' }
   }
 
   function checkedRoleModels(value, status = 400) {
     try { return validateSessionRoleModels(value) } catch { fail('CONTROL_ROLE_MODELS_INVALID', '模型配置只能包含固定六个 Agent 和设置中列出的模型；未应用任何修改。', status) }
+  }
+
+  function checkedRoleEfforts(value, status = 400) {
+    try { return validateSessionRoleEfforts(value) } catch { fail('CONTROL_ROLE_EFFORTS_INVALID', 'effort 只能为固定六个 Agent 选择 medium、high 或 xhigh；未应用任何修改。', status) }
+  }
+
+  function checkedModelEfforts(models, efforts, status = 400) {
+    try { for (const [role, model] of Object.entries(models)) assertSessionModelEffort(model, efforts[role]) } catch { fail('CONTROL_MODEL_EFFORT_UNSUPPORTED', '所选模型不支持请求的 effort；请明确选择支持的档位，系统不会自动降档。', status) }
   }
 
   function clearProvider(session, reason) {
@@ -342,6 +351,7 @@ export function createControlPlane(options = {}) {
     session.strategy = ''
     session.discussion = []
     session.roleModels = {}
+    session.roleEfforts = {}
     sessions.delete(sessionId)
     return true
   }
@@ -525,7 +535,8 @@ export function createControlPlane(options = {}) {
   async function configureProvider(session, body) {
     if (session.providerBusy) fail('CONTROL_PROVIDER_BUSY', 'Provider configuration is busy', 409)
     const candidate = validateProviderBody(body, session.providerConfig)
-    if (containsSessionSecret([session.strategy || '', session.discussion || [], session.roleModels || {}], { apiKey: candidate.apiKey.toString('utf8'), endpoint: candidate.endpoint })) {
+    try { checkedModelEfforts(effectiveSessionRoleModels(candidate.model, session.roleModels), effectiveSessionRoleEfforts(session.roleEfforts)) } catch (error) { candidate.apiKey.fill(0); throw error }
+    if (containsSessionSecret([session.strategy || '', session.discussion || [], session.roleModels || {}, session.roleEfforts || {}], { apiKey: candidate.apiKey.toString('utf8'), endpoint: candidate.endpoint })) {
       candidate.apiKey.fill(0)
       fail('CONTROL_STRATEGY_SECRET', '连接凭据与策略文本冲突，请先清除相关策略内容。', 400)
     }
@@ -575,7 +586,8 @@ export function createControlPlane(options = {}) {
       endpoint: source.endpoint,
       apiKey: runtimeKey,
       strategyPrompt: session.strategy || '',
-      roleModels: effectiveSessionRoleModels(source.model, session.roleModels)
+      roleModels: effectiveSessionRoleModels(source.model, session.roleModels),
+      roleEfforts: effectiveSessionRoleEfforts(session.roleEfforts)
     })
     const runtimeSecrets = [runtimeKey.toString('utf8'), source.endpoint]
     session.providerBusy = true
@@ -636,27 +648,30 @@ export function createControlPlane(options = {}) {
     if (session.discussionRequests.length >= 12) fail('CONTROL_STRATEGY_RATE_LIMIT', '讨论请求过于频繁，请稍后重试。', 429)
     session.discussionRequests.push(current)
     const source = session.providerConfig
-    if (containsSessionSecret({ message, prompt: session.strategy || '', history: session.discussion || [] }, { apiKey: source.apiKey.toString('utf8'), endpoint: source.endpoint })) fail('CONTROL_STRATEGY_SECRET', '策略和讨论不能包含连接凭据。', 400)
+    if (containsSessionSecret({ message, prompt: session.strategy || '', history: session.discussion || [], roleEfforts: session.roleEfforts || {} }, { apiKey: source.apiKey.toString('utf8'), endpoint: source.endpoint })) fail('CONTROL_STRATEGY_SECRET', '策略和讨论不能包含连接凭据。', 400)
     const key = Buffer.from(source.apiKey)
     const effectiveModels = effectiveSessionRoleModels(source.model, session.roleModels)
-    const runtime = Object.freeze({ provider: source.provider, model: effectiveModels.orchestrator, endpoint: source.endpoint, apiKey: key })
+    const effectiveEfforts = effectiveSessionRoleEfforts(session.roleEfforts)
+    const runtime = Object.freeze({ provider: source.provider, model: effectiveModels.orchestrator, effort: effectiveEfforts.orchestrator, endpoint: source.endpoint, apiKey: key })
     const history = (session.discussion || []).slice(-8).map(({ role, content }) => ({ role, content }))
     session.providerBusy = true
     try {
       let result
-      try { result = await adapter.discussStrategy({ message, prompt: session.strategy || '', history, roleModels: effectiveModels }, runtime) } catch (error) {
+      try { result = await adapter.discussStrategy({ message, prompt: session.strategy || '', history, roleModels: effectiveModels, roleEfforts: effectiveEfforts }, runtime) } catch (error) {
         if (error?.code === 'PI_STRATEGY_MODELS_INVALID') fail('CONTROL_ROLE_MODELS_INVALID', '模型建议含不支持的角色或模型，请使用设置中列出的模型。', 502)
         fail('CONTROL_STRATEGY_FAILED', '策略讨论未完成，请检查模型连接后重试。', 502)
       }
       if (sessions.get(session.id) !== session || Number(now()) >= session.expiresAt) fail('CONTROL_SESSION_REQUIRED', '会话已失效，请重新登录。', 401)
       // Exact DTO and secret checks run before any chat state is retained.
       if (containsSessionSecret(result, { apiKey: key.toString('utf8'), endpoint: source.endpoint })) fail('CONTROL_STRATEGY_SECRET', '模型返回了连接凭据，结果已丢弃。', 502)
-      exactBody(result, ['reply', 'suggested_prompt', 'suggested_role_models'], ['reply'])
+      exactBody(result, ['reply', 'suggested_prompt', 'suggested_role_models', 'suggested_role_efforts'], ['reply'])
       const reply = boundedStrategy(result.reply, session)
       const suggested = result.suggested_prompt === undefined ? '' : boundedStrategy(result.suggested_prompt, session, { empty: true })
       const suggestedModels = result.suggested_role_models === undefined ? undefined : checkedRoleModels(result.suggested_role_models, 502)
+      const suggestedEfforts = result.suggested_role_efforts === undefined ? undefined : checkedRoleEfforts(result.suggested_role_efforts, 502)
+      checkedModelEfforts({ ...effectiveModels, ...suggestedModels }, { ...effectiveEfforts, ...suggestedEfforts }, 502)
       session.discussion = [...history, { role: 'user', content: message }, { role: 'assistant', content: reply }]
-      return { reply, suggested_prompt: suggested, ...(suggestedModels === undefined ? {} : { suggested_role_models: suggestedModels }) }
+      return { reply, suggested_prompt: suggested, ...(suggestedModels === undefined ? {} : { suggested_role_models: suggestedModels }), ...(suggestedEfforts === undefined ? {} : { suggested_role_efforts: suggestedEfforts }) }
     } finally { key.fill(0); if (sessions.get(session.id) === session) session.providerBusy = false }
   }
 
@@ -740,11 +755,17 @@ export function createControlPlane(options = {}) {
     if (['/api/paper/setup', '/api/strategy', '/api/strategy/discuss', '/api/models'].includes(url.pathname) && url.search) fail('CONTROL_QUERY_UNKNOWN', 'This route does not accept a query', 400)
     if (route === 'GET /api/models') return modelsDto(session)
     if (route === 'POST /api/models') {
-      exactBody(body, ['role_models'], ['role_models'])
+      exactBody(body, ['role_models', 'role_efforts'])
+      if (!Object.hasOwn(body, 'role_models') && !Object.hasOwn(body, 'role_efforts')) fail('CONTROL_BODY_FIELD_REQUIRED', '请提供 role_models 或 role_efforts。')
       if (session.providerBusy) fail('CONTROL_PROVIDER_BUSY', '模型正在运行，请等待完成后再应用模型配置。', 409)
-      const changes = checkedRoleModels(body.role_models)
-      if (activeOutputSecrets().some((secret) => Object.values(changes).some((model) => model.includes(secret)))) fail('CONTROL_STRATEGY_SECRET', '模型配置不能包含连接凭据。', 400)
-      session.roleModels = Object.freeze({ ...session.roleModels, ...changes })
+      const changes = body.role_models === undefined ? {} : checkedRoleModels(body.role_models)
+      const effortChanges = body.role_efforts === undefined ? {} : checkedRoleEfforts(body.role_efforts)
+      if (activeOutputSecrets().some((secret) => [...Object.values(changes), ...Object.values(effortChanges)].some((value) => value.includes(secret)))) fail('CONTROL_STRATEGY_SECRET', '模型配置不能包含连接凭据。', 400)
+      const models = Object.freeze({ ...session.roleModels, ...changes })
+      const efforts = Object.freeze({ ...session.roleEfforts, ...effortChanges })
+      checkedModelEfforts(effectiveSessionRoleModels(session.providerConfig?.model || PROVIDER_MODELS[0], models), effectiveSessionRoleEfforts(efforts))
+      session.roleModels = models
+      session.roleEfforts = efforts
       return modelsDto(session)
     }
     if (route === 'GET /api/paper/setup') return paperSetupCall('paperSetupStatus')
