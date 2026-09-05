@@ -22,6 +22,21 @@ The one-shot automation command is USDT-M paper-only. It first settles existing 
 
 Paper state is event-sourced in `data/paper/active.json`, hash-chained, atomically updated, and never reused as Gate account or order state. Paper order/fill identities use `po_`/`pf_` prefixes, lifecycle types are explicitly `SIMULATED_*`, and paper performance never grants testnet authority.
 
+The loopback UI's fixed Paper setup endpoint accepts only eleven scalar user
+settings, behind the existing Host/Origin, session and CSRF checks. It can write
+only the ignored local configuration and the fixed active Paper file, validates
+both, serializes initialization, rejects symbolic links and conflicting existing
+state, and never enables venue submission. Its DTO exposes settings and readiness,
+not raw account or ledger data. Custom startup files are never rewritten.
+
+Session model credentials remain in memory. Strategy discussion uses the same
+restricted provider transport with no tools; prompts and bounded discussion
+history remain session-local. Applying a strategy changes only subsequent
+semantic analysis input, never capital, risk gates, fixed roles, execution mode
+or same-cycle receipt reuse. Provider changes, discussion and cycle launch are
+mutually excluded while the model is busy. Connection values and credentials
+are checked before model input and excluded from discussion output and errors.
+
 Protective orders are created only after identifiable fills prove the executed contract count. They are reduce-only and use that proven amount. Tyche has no transfer operation and no account-wide cancellation operation.
 
 ## Runtime privacy

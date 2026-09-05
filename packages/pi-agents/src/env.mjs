@@ -28,6 +28,7 @@ const PROVIDER_ENV_ALLOWLIST = Object.freeze({
   cohere: ['COHERE_API_KEY'],
   opencode: ['OPENCODE_API_KEY'],
   'opencode-go': ['OPENCODE_API_KEY'],
+  'openai-responses-compatible': ['TYCHE_PI_SESSION_API_KEY', 'TYCHE_PI_SESSION_ENDPOINT'],
   fixture: []
 })
 

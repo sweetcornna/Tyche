@@ -5,6 +5,11 @@ import os from 'node:os'
 import path from 'node:path'
 import { loadConfig } from '../scripts/config.mjs'
 import {
+  SESSION_API_KEY_ENV,
+  SESSION_ENDPOINT_ENV,
+  SESSION_PROVIDER_ID
+} from '../packages/pi-agents/src/index.mjs'
+import {
   CLUSTER_SCHEMA,
   LOOPBACK_HOST,
   STATIC_ROOT,
@@ -14,13 +19,14 @@ import {
   projectClusterEvent,
   resolveClusterConfigPath
 } from '../scripts/tyche-cluster.mjs'
-import { startControlPlaneChild } from '../scripts/tyche-control-plane.mjs'
+import { parseControlPlaneArgs, startControlPlaneChild } from '../scripts/tyche-control-plane.mjs'
 
 const DATE = '2030-01-07'
 const WEEK = '2030-W02'
 const PLAN_HASH = 'a'.repeat(64)
 const CYCLE_HASH = 'b'.repeat(64)
 const CONFIG = loadConfig()
+const SESSION_MODEL = ['gpt', '5', '6', 'luna'].join('-').replace('-5-6-', '-5.6-')
 
 function slot(kind = 'daily', key = `${kind}:${DATE}T04:10:00.000Z`) {
   return { kind, key, date: DATE, iso_week: WEEK, start_at: `${DATE}T04:10:00.000Z`, end_at: `${DATE}T04:25:00.000Z` }
@@ -126,6 +132,136 @@ test('cluster validates fixed paths, required model/provider, and one explicit v
   both.binance.usdm.enabled = true
   both.binance.usdm.environment = 'testnet'
   assert.equal(hasSingleTestnetVenue(both, 'gate'), false)
+})
+
+test('control-plane child may start before provider setup but rejects an incomplete startup pair', async () => {
+  const parsed = parseControlPlaneArgs(['node', 'tyche-control-plane.mjs', '--port', '0'])
+  assert.equal(parsed.provider, null)
+  assert.equal(parsed.model, null)
+  assert.throws(
+    () => parseControlPlaneArgs(['node', 'tyche-control-plane.mjs', '--provider', 'fixture']),
+    { code: 'CONTROL_CHILD_PROVIDER_PAIR_REQUIRED' }
+  )
+  await assert.rejects(
+    startControlPlaneChild({ model: 'fixture', port: 0, controlPlaneFactory() {} }),
+    { code: 'CONTROL_CHILD_PROVIDER_PAIR_REQUIRED' }
+  )
+})
+
+test('session provider validates without inference and powers only a primary manual paper cycle', async () => {
+  const apiKey = 'sk-session-control-fixture'
+  const endpoint = 'https://provider.example.invalid/v1'
+  const endpointUrl = new URL(endpoint)
+  const published = []
+  const stateWrites = []
+  const validationCalls = []
+  const cycleSnapshots = []
+  let controlOptions
+  let ready = ''
+  const originalWrite = process.stdout.write
+  process.stdout.write = (chunk) => { ready += String(chunk); return true }
+  let child
+  try {
+    child = await startControlPlaneChild({
+      port: 0,
+      env: { PATH: '/safe/bin', LANG: 'C', FINANCE_API_KEY: 'must-not-cross' },
+      configPath: path.join(process.cwd(), 'config', 'tyche.json'),
+      stateReader: () => ({ recent_cycle: null, dag: {}, paper: {} }),
+      stateWriter: (patch) => { stateWrites.push(structuredClone(patch)); return patch },
+      providerRuntimeFactory: async (input) => {
+        validationCalls.push(input)
+        assert.equal(input.apiKey, apiKey)
+        assert.equal(input.endpoint, endpoint)
+        assert.equal(input.modelId, SESSION_MODEL)
+        return { model: {} }
+      },
+      runPiAutomation: async (input) => {
+        cycleSnapshots.push({
+          provider: input.provider,
+          model: input.model,
+          mode: input.mode,
+          configPath: input.configPath,
+          env: { ...input.env },
+          sameEnv: input.env === input.workerEnv
+        })
+        input.onEvent({ role: 'btc-analyst', asset: 'BTC', attempt: 0, status: 'completed', secret: apiKey, endpoint })
+        return {
+          outcome: 'BLOCKED',
+          phase: 'BLOCKED',
+          date: DATE,
+          iso_week: WEEK,
+          blocked_stage: 'settlement',
+          code: 'PAPER_LEDGER_MISSING',
+          message: `Paper ledger is not initialized: key=${apiKey}; endpoint=${endpoint}; origin=${endpointUrl.origin}; host=${endpointUrl.hostname}`,
+          submitted: 0,
+          filled: 0
+        }
+      },
+      controlPlaneFactory: (options) => {
+        controlOptions = options
+        return {
+          async start() {
+            options.onBootstrapToken('bootstrap-session-fixture')
+            return { host: LOOPBACK_HOST, port: 9922 }
+          },
+          async stop() {},
+          publish(event) { published.push(structuredClone(event)) }
+        }
+      }
+    })
+  } finally {
+    process.stdout.write = originalWrite
+  }
+  assert.match(ready, /bootstrap-session-fixture/)
+  assert.equal(controlOptions.staticRoot, STATIC_ROOT)
+
+  const validationBuffer = Buffer.from(apiKey)
+  const validation = await controlOptions.adapters.validateProviderConfig(Object.freeze({
+    provider: SESSION_PROVIDER_ID,
+    model: SESSION_MODEL,
+    endpoint,
+    apiKey: validationBuffer
+  }))
+  assert.deepEqual(validation, { ok: true })
+  assert.equal(validationBuffer.toString('utf8'), apiKey)
+  assert.equal(Object.hasOwn(validationCalls[0], 'apiKey'), false)
+  assert.equal(Object.hasOwn(validationCalls[0], 'endpoint'), false)
+
+  const runtimeBuffer = Buffer.from(apiKey)
+  const result = await controlOptions.adapters.runCycle({ date: DATE, isoWeek: WEEK }, Object.freeze({
+    provider: SESSION_PROVIDER_ID,
+    model: SESSION_MODEL,
+    endpoint,
+    apiKey: runtimeBuffer
+  }))
+  assert.equal(cycleSnapshots.length, 1)
+  assert.deepEqual(cycleSnapshots[0], {
+    provider: SESSION_PROVIDER_ID,
+    model: SESSION_MODEL,
+    mode: 'primary',
+    configPath: path.join(process.cwd(), 'config', 'tyche.json'),
+    env: {
+      PATH: '/safe/bin',
+      LANG: 'C',
+      [SESSION_API_KEY_ENV]: apiKey,
+      [SESSION_ENDPOINT_ENV]: endpoint
+    },
+    sameEnv: true
+  })
+  assert.equal(result.blocked_stage, 'settlement')
+  assert.equal(result.code, 'PAPER_LEDGER_MISSING')
+  assert.match(result.message, /Paper ledger is not initialized/)
+  assert.match(result.message, /session-secret-redacted/)
+  assert.equal(result.submitted, 0)
+  assert.equal(result.filled, 0)
+  assert.equal(runtimeBuffer.toString('utf8'), apiKey)
+  assert.equal(stateWrites.length, 1)
+  assert.equal(published.some((event) => event.type === 'dag_role'), true)
+  assert.equal(published.some((event) => event.type === 'cycle'), true)
+  const serialized = JSON.stringify({ stateWrites, published, result })
+  for (const secret of [apiKey, endpoint, endpointUrl.origin, endpointUrl.hostname]) assert.equal(serialized.includes(secret), false, secret)
+  assert.doesNotMatch(serialized, /FINANCE_API_KEY|must-not-cross/)
+  await child.plane.stop()
 })
 
 test('start performs immediate tick once, is idempotent, and stops gracefully', async () => {

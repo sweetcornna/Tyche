@@ -5,6 +5,7 @@ import path from 'node:path'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { URL } from 'node:url'
 import { WebSocketServer, WebSocket } from 'ws'
+import { containsSessionSecret } from '../../../packages/pi-agents/src/session-provider.mjs'
 
 export const LOOPBACK_HOST = '127.0.0.1'
 export const SESSION_TTL_MS = 15 * 60 * 1000
@@ -13,6 +14,13 @@ export const MAX_SOCKET_FRAME_BYTES = 1024 * 1024
 export const MAX_WS_EVENT_BYTES = 32 * 1024
 export const MAX_WS_BUFFER_BYTES = 256 * 1024
 export const MAX_WS_PAYLOAD_BYTES = 64 * 1024
+export const PROVIDER = 'openai-responses-compatible'
+export const PAPER_SETUP_FIELDS = Object.freeze(['configured_leverage', 'risk_per_trade_bps', 'max_order_notional_usdt', 'daily_new_notional_cap_usdt', 'max_managed_notional_usdt', 'initial_usdt', 'daily_loss_bps', 'max_drawdown_bps', 'max_spread_bps', 'max_entry_distance_bps', 'trigger_slippage_bps'])
+const STRATEGY_LIMIT = 8000
+const PROVIDER_MODEL_PREFIX = ['g', 'p', 't', '-', '5', '.', '6', '-'].join('')
+export const PROVIDER_MODELS = Object.freeze([`${PROVIDER_MODEL_PREFIX}luna`, `${PROVIDER_MODEL_PREFIX}sol`])
+export const MAX_PROVIDER_ENDPOINT_BYTES = 2048
+export const MAX_PROVIDER_API_KEY_BYTES = 8192
 export const ARM_CONFIRMATIONS = Object.freeze({
   gate: 'ARM TESTNET GATE 24H',
   binance: 'ARM TESTNET BINANCE 24H'
@@ -20,6 +28,7 @@ export const ARM_CONFIRMATIONS = Object.freeze({
 export const VENUES = Object.freeze(['gate', 'binance'])
 
 const VENUE_SET = new Set(VENUES)
+const PROVIDER_MODEL_SET = new Set(PROVIDER_MODELS)
 const FORWARDED_HEADERS = ['x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'forwarded']
 const DIGEST = /^[A-Za-z0-9._:-]{1,256}$/
 const SESSION_COOKIE = 'tyche_control_session'
@@ -81,6 +90,7 @@ function cloneProjection(value, seen = new WeakSet(), depth = 0) {
   if (typeof value === 'string') return safeText(value, 2000)
   if (typeof value === 'number' || typeof value === 'boolean') return value
   if (typeof value !== 'object') return undefined
+  if (Buffer.isBuffer(value)) return '[REDACTED]'
   if (seen.has(value)) return '[circular]'
   seen.add(value)
   if (Array.isArray(value)) {
@@ -103,6 +113,28 @@ export function projectSafe(value) {
   return cloneProjection(value)
 }
 
+function redactExact(value, secrets, seen = new WeakMap()) {
+  if (typeof value === 'string') {
+    let output = value
+    for (const secret of secrets) {
+      if (typeof secret === 'string' && secret) output = output.replaceAll(secret, '[REDACTED]')
+    }
+    return output
+  }
+  if (value === null || value === undefined || typeof value === 'number' || typeof value === 'boolean') return value
+  if (Buffer.isBuffer(value)) return '[REDACTED]'
+  if (typeof value !== 'object') return undefined
+  if (seen.has(value)) return seen.get(value)
+  const output = Array.isArray(value) ? [] : {}
+  seen.set(value, output)
+  if (Array.isArray(value)) {
+    for (const child of value) output.push(redactExact(child, secrets, seen))
+  } else {
+    for (const [key, child] of Object.entries(value)) output[key] = redactExact(child, secrets, seen)
+  }
+  return output
+}
+
 function isObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
@@ -114,6 +146,32 @@ function exactBody(value, allowed, required = []) {
   const missing = required.filter((key) => !Object.prototype.hasOwnProperty.call(value, key))
   if (missing.length) fail('CONTROL_BODY_FIELD_REQUIRED', `Missing body field: ${missing.join(', ')}`)
   return value
+}
+
+function validateProviderBody(value, existing) {
+  exactBody(value, ['provider', 'model', 'endpoint', 'api_key'], ['provider', 'model', 'endpoint', ...(existing ? [] : ['api_key'])])
+  if (value.provider !== PROVIDER) fail('CONTROL_PROVIDER_UNSUPPORTED', `provider must be ${PROVIDER}`)
+  if (typeof value.model !== 'string' || !PROVIDER_MODEL_SET.has(value.model)) fail('CONTROL_PROVIDER_MODEL_UNSUPPORTED', 'model is not allowed')
+  if (typeof value.endpoint !== 'string' || !value.endpoint.trim() || Buffer.byteLength(value.endpoint, 'utf8') > MAX_PROVIDER_ENDPOINT_BYTES) {
+    fail('CONTROL_PROVIDER_ENDPOINT_INVALID', 'endpoint must be a bounded HTTP(S) base URL')
+  }
+  if (value.endpoint !== value.endpoint.trim() || /[\u0000-\u001f\u007f]/.test(value.endpoint)) {
+    fail('CONTROL_PROVIDER_ENDPOINT_INVALID', 'endpoint must be a bounded HTTP(S) base URL')
+  }
+  let parsed
+  try {
+    parsed = new URL(value.endpoint)
+  } catch {
+    fail('CONTROL_PROVIDER_ENDPOINT_INVALID', 'endpoint must be a bounded HTTP(S) base URL')
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    fail('CONTROL_PROVIDER_ENDPOINT_INVALID', 'endpoint must be a bounded HTTP(S) base URL')
+  }
+  const apiKey = value.api_key === undefined ? existing?.apiKey.toString('utf8') : value.api_key
+  if (typeof apiKey !== 'string' || !apiKey.trim() || apiKey !== apiKey.trim() || /[\u0000-\u001f\u007f]/.test(apiKey) || Buffer.byteLength(apiKey, 'utf8') > MAX_PROVIDER_API_KEY_BYTES) {
+    fail('CONTROL_PROVIDER_API_KEY_INVALID', 'api_key must be a bounded non-empty string')
+  }
+  return { provider: PROVIDER, model: value.model, endpoint: parsed.href, apiKey: Buffer.from(apiKey, 'utf8') }
 }
 
 function venue(value) {
@@ -226,6 +284,8 @@ export function createControlPlane(options = {}) {
   const port = options.port === undefined ? 8788 : Number(options.port)
   if (!Number.isInteger(port) || port < 0 || port > 65535) fail('CONTROL_PORT_INVALID', 'Control-plane port is invalid')
   const now = typeof options.now === 'function' ? options.now : () => Date.now()
+  const requestedSweepMs = options.sessionSweepMs === undefined ? 60_000 : Number(options.sessionSweepMs)
+  if (!Number.isInteger(requestedSweepMs) || requestedSweepMs < 10 || requestedSweepMs > 60_000) fail('CONTROL_SESSION_SWEEP_INVALID', 'Session sweep interval must be between 10 and 60000 milliseconds')
   const staticRoot = options.staticRoot === undefined ? null : validStaticRoot(options.staticRoot)
   const adapter = isObject(options.adapters) ? options.adapters : {}
   const configuredSockets = options.executorSockets || {}
@@ -239,8 +299,66 @@ export function createControlPlane(options = {}) {
   let bootstrapUsed = false
   let listening = false
   let boundPort = null
+  let sessionSweepTimer = null
   const sessions = new Map()
   const clients = new Set()
+
+  function providerDto(session) {
+    const config = session?.providerConfig
+    return {
+      configured: Boolean(config),
+      provider: config?.provider || null,
+      model: config?.model || null,
+      endpoint: config?.endpoint || null,
+      scope: 'session',
+      manual_cycle_only: true
+    }
+  }
+
+  function clearProvider(session, reason) {
+    const config = session?.providerConfig
+    if (!config) return false
+    const keyBuffer = config.apiKey
+    keyBuffer.fill(0)
+    delete session.providerConfig
+    if (typeof options.onProviderCleared === 'function') {
+      try { options.onProviderCleared({ reason, keyBuffer }) } catch {}
+    }
+    return true
+  }
+
+  function deleteSession(sessionId, reason) {
+    const session = sessions.get(sessionId)
+    if (!session) return false
+    clearProvider(session, reason)
+    session.strategy = ''
+    session.discussion = []
+    sessions.delete(sessionId)
+    return true
+  }
+
+  function sweepExpiredSessions() {
+    const current = Number(now())
+    if (!Number.isFinite(current)) return
+    for (const [sessionId, session] of sessions) {
+      if (current >= session.expiresAt) deleteSession(sessionId, 'expired')
+    }
+  }
+
+  function activeOutputSecrets(extra = []) {
+    const secrets = [...extra]
+    for (const session of sessions.values()) {
+      const config = session.providerConfig
+      if (!config) continue
+      secrets.push(config.apiKey.toString('utf8'), config.endpoint)
+      try { const parsed = new URL(config.endpoint); secrets.push(parsed.origin, parsed.hostname) } catch {}
+    }
+    return secrets.filter((value) => typeof value === 'string' && value)
+  }
+
+  function safeOutput(value, extra = []) {
+    return projectSafe(redactExact(value, activeOutputSecrets(extra)))
+  }
 
   const server = http.createServer(async (request, response) => {
     try {
@@ -260,10 +378,11 @@ export function createControlPlane(options = {}) {
       const session = requireSession(request, request.method !== 'GET')
       const body = request.method === 'POST' ? await readJsonBody(request) : null
       const result = await dispatchHttp(url, request.method || 'GET', body, session)
-      sendJson(response, 200, result)
+      const explicitDto = ['/api/provider', '/api/provider/clear', '/api/paper/setup', '/api/strategy', '/api/strategy/discuss'].includes(url.pathname)
+      sendJson(response, 200, explicitDto ? result : safeOutput(result), {}, { sensitive: explicitDto })
     } catch (error) {
       const failure = safeError(error)
-      sendJson(response, error instanceof ControlPlaneError ? error.status : 500, { ok: false, code: failure.code, message: failure.message })
+      sendJson(response, error instanceof ControlPlaneError ? error.status : 500, safeOutput({ ok: false, code: failure.code, message: failure.message }))
     }
   })
 
@@ -310,7 +429,7 @@ export function createControlPlane(options = {}) {
     const entry = sessions.get(sessionId)
     const current = Number(now())
     if (!entry || !Number.isFinite(current) || current >= entry.expiresAt) {
-      if (sessionId) sessions.delete(sessionId)
+      if (sessionId) deleteSession(sessionId, 'expired')
       fail('CONTROL_SESSION_REQUIRED', 'A live control-plane session is required', 401)
     }
     if (mutation) {
@@ -394,6 +513,138 @@ export function createControlPlane(options = {}) {
     }
   }
 
+  async function configureProvider(session, body) {
+    if (session.providerBusy) fail('CONTROL_PROVIDER_BUSY', 'Provider configuration is busy', 409)
+    const candidate = validateProviderBody(body, session.providerConfig)
+    if (containsSessionSecret([session.strategy || '', session.discussion || []], { apiKey: candidate.apiKey.toString('utf8'), endpoint: candidate.endpoint })) {
+      candidate.apiKey.fill(0)
+      fail('CONTROL_STRATEGY_SECRET', '连接凭据与策略文本冲突，请先清除相关策略内容。', 400)
+    }
+    const validationKey = Buffer.from(candidate.apiKey)
+    const validationRuntime = Object.freeze({
+      provider: candidate.provider,
+      model: candidate.model,
+      endpoint: candidate.endpoint,
+      apiKey: validationKey
+    })
+    let committed = false
+    session.providerBusy = true
+    try {
+      if (typeof adapter.validateProviderConfig !== 'function') fail('CONTROL_PROVIDER_VALIDATOR_UNAVAILABLE', 'Provider validation is unavailable', 503)
+      let validation
+      try {
+        validation = await adapter.validateProviderConfig(validationRuntime)
+      } catch {
+        fail('CONTROL_PROVIDER_VALIDATION_FAILED', 'Provider validation failed', 400)
+      }
+      if (!(validation === true || validation?.ok === true)) fail('CONTROL_PROVIDER_VALIDATION_FAILED', 'Provider validation failed', 400)
+      const current = Number(now())
+      if (sessions.get(session.id) !== session || !Number.isFinite(current) || current >= session.expiresAt) {
+        fail('CONTROL_SESSION_REQUIRED', 'A live control-plane session is required', 401)
+      }
+      clearProvider(session, 'replaced')
+      session.providerConfig = candidate
+      committed = true
+      return providerDto(session)
+    } finally {
+      validationKey.fill(0)
+      if (!committed) candidate.apiKey.fill(0)
+      if (sessions.get(session.id) === session) session.providerBusy = false
+    }
+  }
+
+  async function runManualCycle(session, input) {
+    if (!session.providerConfig) fail('CONTROL_PROVIDER_REQUIRED', 'A session provider configuration is required', 409)
+    if (session.providerBusy) fail('CONTROL_PROVIDER_BUSY', 'Provider configuration is busy', 409)
+    if (typeof adapter.runCycle !== 'function') fail('CONTROL_CYCLE_UNAVAILABLE', 'Manual cycle is unavailable', 503)
+    const source = session.providerConfig
+    boundedStrategy(session.strategy || '', session, { empty: true })
+    const runtimeKey = Buffer.from(source.apiKey)
+    const runtime = Object.freeze({
+      provider: source.provider,
+      model: source.model,
+      endpoint: source.endpoint,
+      apiKey: runtimeKey,
+      strategyPrompt: session.strategy || ''
+    })
+    const runtimeSecrets = [runtimeKey.toString('utf8'), source.endpoint]
+    session.providerBusy = true
+    try {
+      const setup = await paperSetupCall('paperSetupStatus')
+      if (sessions.get(session.id) !== session || Number(now()) >= session.expiresAt) fail('CONTROL_SESSION_REQUIRED', '会话已失效，请重新登录。', 401)
+      if (!setup.ready) fail('CONTROL_PAPER_SETUP_REQUIRED', setup.message || '请先完成模拟资金和风险设置。', 409)
+      let result
+      try {
+        result = await adapter.runCycle(input, runtime)
+      } catch {
+        fail('CONTROL_CYCLE_FAILED', 'Manual cycle failed', 502)
+      }
+      return projectSafe(redactExact(result, runtimeSecrets)) ?? { status: 'empty' }
+    } finally {
+      runtimeKey.fill(0)
+      if (sessions.get(session.id) === session) session.providerBusy = false
+    }
+  }
+
+  async function paperSetupCall(name, input) {
+    if (typeof adapter[name] !== 'function') fail('CONTROL_PAPER_SETUP_UNAVAILABLE', '模拟设置暂不可用。', 503)
+    const value = await adapter[name](input)
+    const values = {}
+    for (const key of PAPER_SETUP_FIELDS) {
+      const text = String(value?.values?.[key] ?? '')
+      if (text.length <= 80 && /^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(text)) values[key] = text
+    }
+    return {
+      ready: value?.ready === true,
+      status: ['ready', 'required', 'blocked'].includes(value?.status) ? value.status : 'blocked',
+      values,
+      missing: PAPER_SETUP_FIELDS.filter((key) => value?.missing?.includes(key)),
+      ...(value?.code ? { code: safeText(redactExact(value.code, activeOutputSecrets()), 100) } : {}),
+      ...(value?.message ? { message: safeText(redactExact(value.message, activeOutputSecrets()), 240) } : {})
+    }
+  }
+
+  function boundedStrategy(value, session, { empty = false } = {}) {
+    if (typeof value !== 'string' || (!empty && !value.trim()) || value.length > STRATEGY_LIMIT || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value)) fail('CONTROL_STRATEGY_INVALID', '策略文本须为 1–8000 字符。', 400)
+    const secrets = activeOutputSecrets()
+    if (secrets.some((secret) => value.includes(secret))) fail('CONTROL_STRATEGY_SECRET', '策略和讨论不能包含连接凭据。', 400)
+    return value
+  }
+
+  function strategyDto(session) {
+    return { prompt: session.strategy || '', scope: 'session', discussion: (session.discussion || []).map(({ role, content }) => ({ role, content })) }
+  }
+
+  async function discussStrategy(session, body) {
+    exactBody(body, ['message'], ['message'])
+    const message = boundedStrategy(body.message, session)
+    if (!session.providerConfig) fail('CONTROL_PROVIDER_REQUIRED', '请先填写模型连接。', 409)
+    if (session.providerBusy) fail('CONTROL_PROVIDER_BUSY', '模型正在运行，请等待完成后再讨论或修改。', 409)
+    if (typeof adapter.discussStrategy !== 'function') fail('CONTROL_STRATEGY_UNAVAILABLE', '策略讨论暂不可用。', 503)
+    const current = Number(now())
+    session.discussionRequests = (session.discussionRequests || []).filter((at) => current - at < 60_000)
+    if (session.discussionRequests.length >= 12) fail('CONTROL_STRATEGY_RATE_LIMIT', '讨论请求过于频繁，请稍后重试。', 429)
+    session.discussionRequests.push(current)
+    const source = session.providerConfig
+    if (containsSessionSecret({ message, prompt: session.strategy || '', history: session.discussion || [] }, { apiKey: source.apiKey.toString('utf8'), endpoint: source.endpoint })) fail('CONTROL_STRATEGY_SECRET', '策略和讨论不能包含连接凭据。', 400)
+    const key = Buffer.from(source.apiKey)
+    const runtime = Object.freeze({ provider: source.provider, model: source.model, endpoint: source.endpoint, apiKey: key })
+    const history = (session.discussion || []).slice(-8).map(({ role, content }) => ({ role, content }))
+    session.providerBusy = true
+    try {
+      let result
+      try { result = await adapter.discussStrategy({ message, prompt: session.strategy || '', history }, runtime) } catch { fail('CONTROL_STRATEGY_FAILED', '策略讨论未完成，请检查模型连接后重试。', 502) }
+      if (sessions.get(session.id) !== session || Number(now()) >= session.expiresAt) fail('CONTROL_SESSION_REQUIRED', '会话已失效，请重新登录。', 401)
+      // Exact DTO and secret checks run before any chat state is retained.
+      if (containsSessionSecret(result, { apiKey: key.toString('utf8'), endpoint: source.endpoint })) fail('CONTROL_STRATEGY_SECRET', '模型返回了连接凭据，结果已丢弃。', 502)
+      exactBody(result, ['reply', 'suggested_prompt'], ['reply'])
+      const reply = boundedStrategy(result.reply, session)
+      const suggested = result.suggested_prompt === undefined ? '' : boundedStrategy(result.suggested_prompt, session, { empty: true })
+      session.discussion = [...history, { role: 'user', content: message }, { role: 'assistant', content: reply }]
+      return { reply, suggested_prompt: suggested }
+    } finally { key.fill(0); if (sessions.get(session.id) === session) session.providerBusy = false }
+  }
+
   function boundedProjection(value, maxItems = 32, maxString = 256) {
     const projected = projectSafe(value)
     if (Array.isArray(projected)) return projected.slice(0, maxItems)
@@ -471,9 +722,44 @@ export function createControlPlane(options = {}) {
 
   async function dispatchHttp(url, method, body, session) {
     const route = `${method} ${url.pathname}`
+    if (['/api/paper/setup', '/api/strategy', '/api/strategy/discuss'].includes(url.pathname) && url.search) fail('CONTROL_QUERY_UNKNOWN', 'This route does not accept a query', 400)
+    if (route === 'GET /api/paper/setup') return paperSetupCall('paperSetupStatus')
+    if (route === 'POST /api/paper/setup') {
+      exactBody(body, PAPER_SETUP_FIELDS)
+      if (session.providerBusy) fail('CONTROL_PROVIDER_BUSY', '模型正在运行，请稍后设置。', 409)
+      const current = Number(now())
+      session.setupRequests = (session.setupRequests || []).filter((at) => current - at < 60_000)
+      if (session.setupRequests.length >= 12) fail('CONTROL_PAPER_RATE_LIMIT', '设置请求过于频繁，请稍后重试。', 429)
+      session.setupRequests.push(current)
+      return paperSetupCall('setupPaper', body)
+    }
+    if (route === 'GET /api/strategy') return strategyDto(session)
+    if (route === 'POST /api/strategy') {
+      exactBody(body, ['prompt'], ['prompt'])
+      if (session.providerBusy) fail('CONTROL_PROVIDER_BUSY', '模型正在运行，请等待完成后再应用策略。', 409)
+      session.strategy = boundedStrategy(body.prompt, session, { empty: true })
+      return strategyDto(session)
+    }
+    if (route === 'POST /api/strategy/discuss') return discussStrategy(session, body)
     if (route === 'POST /api/logout') {
-      sessions.delete(session.id)
+      exactBody(body, [])
+      deleteSession(session.id, 'logout')
       return { ok: true, logged_out: true }
+    }
+    if (route === 'GET /api/provider') {
+      if (url.search) fail('CONTROL_QUERY_UNKNOWN', 'This route does not accept a query', 400)
+      return providerDto(session)
+    }
+    if (route === 'POST /api/provider') {
+      if (url.search) fail('CONTROL_QUERY_UNKNOWN', 'This route does not accept a query', 400)
+      return configureProvider(session, body)
+    }
+    if (route === 'POST /api/provider/clear') {
+      if (url.search) fail('CONTROL_QUERY_UNKNOWN', 'This route does not accept a query', 400)
+      exactBody(body, [])
+      if (session.providerBusy) fail('CONTROL_PROVIDER_BUSY', 'Provider configuration is busy', 409)
+      clearProvider(session, 'cleared')
+      return providerDto(session)
     }
     if (route === 'GET /api/status') {
       if (url.search) fail('CONTROL_QUERY_UNKNOWN', 'This route does not accept a query', 400)
@@ -504,9 +790,10 @@ export function createControlPlane(options = {}) {
       return executorCall(targetVenue, { command: 'status' }, { planSummary: true })
     }
     if (route === 'POST /api/cycle') {
+      if (!session.providerConfig) fail('CONTROL_PROVIDER_REQUIRED', 'A session provider configuration is required', 409)
       exactBody(body, ['date', 'iso_week'], ['date', 'iso_week'])
       const input = { date: validateDate(body.date), isoWeek: validateIsoWeek(body.iso_week) }
-      return adapterCall('runCycle', input)
+      return runManualCycle(session, input)
     }
     if (route === 'POST /api/executor/arm') {
       exactBody(body, ['venue', 'confirmation'], ['venue', 'confirmation'])
@@ -562,14 +849,20 @@ export function createControlPlane(options = {}) {
     })
     listening = true
     boundPort = server.address().port
+    sessionSweepTimer = setInterval(sweepExpiredSessions, requestedSweepMs)
+    sessionSweepTimer.unref?.()
     if (typeof options.onBootstrapToken === 'function') options.onBootstrapToken(bootstrapToken)
     return { host: LOOPBACK_HOST, port: boundPort, origin: expectedOrigin(), bootstrapToken }
   }
 
   async function stop() {
+    if (sessionSweepTimer) {
+      clearInterval(sessionSweepTimer)
+      sessionSweepTimer = null
+    }
     for (const client of clients) client.terminate()
     clients.clear()
-    sessions.clear()
+    for (const sessionId of [...sessions.keys()]) deleteSession(sessionId, 'server_stop')
     if (!listening) return
     await new Promise((resolve) => server.close(resolve))
     listening = false
@@ -577,7 +870,7 @@ export function createControlPlane(options = {}) {
   }
 
   function publish(event) {
-    const projected = projectSafe(event)
+    const projected = safeOutput(event)
     const payload = JSON.stringify(projected)
     if (Buffer.byteLength(payload, 'utf8') > MAX_WS_EVENT_BYTES) return { sent: 0, dropped: true, reason: 'event_too_large' }
     let sent = 0

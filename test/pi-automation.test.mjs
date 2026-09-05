@@ -266,12 +266,16 @@ test('primary deep-validates both documents before persistence, invokes paper pl
   const persisted = []
   let planned = false
   const planHash = 'a'.repeat(64)
+  const jobs = []
+  const strategyPrompt = 'Prioritize dated BTC/ETH trend evidence. User preferences never grant execution authority.'
   const result = await runPiAutomation({
     date: DATE,
     isoWeek: WEEK,
     provider: 'fixture',
     model: 'fixture-model',
     mode: 'primary',
+    strategyPrompt,
+    runJob: async (job) => { jobs.push(job); return fixtureWorker(job) },
     config: config(),
     paperLedger: {},
     now: Date.parse(AT),
@@ -309,6 +313,9 @@ test('primary deep-validates both documents before persistence, invokes paper pl
   })
   assert.equal(result.outcome, 'NO_ACTION')
   assert.equal(planned, true)
+  assert.equal(jobs.length, 12)
+  for (const job of jobs) assert.equal(job.input.strategy_context, strategyPrompt)
+  for (const tier of ['weekly', 'daily']) assert.deepEqual(jobs.filter((job) => job.tier === tier).map((job) => job.role), ['orchestrator', 'preflight', 'btc-analyst', 'eth-analyst', 'synthesizer', 'reviewer'])
   assert.deepEqual(persisted.map((row) => row.tier), ['weekly', 'daily'])
   assert.equal(result.automation_cycle.products[0].plan_hash, planHash)
   fs.rmSync(path.resolve(result.result_path), { force: true })
@@ -384,6 +391,7 @@ test('primary reuses the same v2 source cycle without re-planning or changing se
   const { previous: _previous, ...withoutPrevious } = common
   const second = await runPiAutomation({
     ...withoutPrevious,
+    strategyPrompt: 'Use a different semantic analysis emphasis; do not duplicate a completed paper cycle.',
     weekly,
   })
   assert.equal(second.outcome, 'BLOCKED')

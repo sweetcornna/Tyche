@@ -55,7 +55,19 @@ test('source text has no private path, private infrastructure name, backend mode
     ['sub', '2', 'api'].join('')
   ]
   const backendPattern = new RegExp(['g', 'p', 't', '-'].join('') + '\\d', 'i')
+  const sessionProviderModels = new Map([
+    ['packages/pi-agents/src/session-provider.mjs', new Set([
+      ['gpt', '5', '6', 'luna'].join('-').replace('-5-6-', '-5.6-'),
+      ['gpt', '5', '6', 'sol'].join('-').replace('-5-6-', '-5.6-')
+    ])],
+    ['packages/pi-agents/test/session-provider.test.mjs', new Set([
+      ['gpt', '5', '6', 'luna'].join('-').replace('-5-6-', '-5.6-'),
+      ['gpt', '5', '6', 'sol'].join('-').replace('-5-6-', '-5.6-'),
+      ['gpt', '5', '6', 'terra'].join('-').replace('-5-6-', '-5.6-')
+    ])]
+  ])
   const ipPattern = /\b(?:\d{1,3}\.){3}\d{1,3}\b/
+  const ip = (...octets) => octets.join('.')
   const loopback = ['127', '0', '0', '1'].join('.')
   const wildcard = ['0', '0', '0', '0'].join('.')
   const allowedIpLiterals = new Map([
@@ -63,12 +75,31 @@ test('source text has no private path, private infrastructure name, backend mode
     ['apps/control-plane/src/cli.mjs', new Set([loopback])],
     ['apps/control-plane/src/control-plane.mjs', new Set([loopback])],
     ['apps/control-plane/test/control-plane.test.mjs', new Set([wildcard, loopback])],
-    ['apps/web/vite.config.mjs', new Set([loopback])]
+    ['apps/web/vite.config.mjs', new Set([loopback])],
+    ['packages/pi-agents/src/session-provider.mjs', new Set([
+      ip(0, 0, 0, 0), ip(10, 0, 0, 0), ip(100, 64, 0, 0), ip(127, 0, 0, 0), loopback,
+      ip(168, 63, 129, 16), ip(169, 254, 0, 0), ip(172, 16, 0, 0), ip(192, 0, 0, 0), ip(192, 0, 2, 0),
+      ip(192, 31, 196, 0), ip(192, 52, 193, 0), ip(192, 88, 99, 0), ip(192, 168, 0, 0),
+      ip(192, 175, 48, 0), ip(198, 18, 0, 0), ip(198, 51, 100, 0), ip(203, 0, 113, 0),
+      ip(224, 0, 0, 0), ip(240, 0, 0, 0)
+    ])],
+    ['packages/pi-agents/test/session-provider.test.mjs', new Set([
+      wildcard, loopback, ip(8, 8, 8, 8), ip(10, 0, 0, 1), ip(10, 0, 0, 2),
+      ip(93, 184, 216, 34), ip(100, 64, 0, 1), ip(100, 100, 100, 200),
+      ip(168, 63, 129, 16), ip(169, 254, 169, 254), ip(172, 16, 0, 1), ip(192, 0, 2, 1), ip(192, 168, 0, 1),
+      ip(192, 168, 1, 2), ip(198, 18, 0, 1), ip(198, 51, 100, 1), ip(203, 0, 113, 1),
+      ip(224, 0, 0, 1), ip(255, 255, 255, 255)
+    ])]
   ])
   for (const record of records) {
     assert.equal(record.text.includes(homePrefix), false, record.file)
     assert.equal(privateNames.some((name) => record.text.toLowerCase().includes(name)), false, record.file)
-    assert.equal(backendPattern.test(record.text), false, record.file)
+    const backendIds = record.text.match(new RegExp(backendPattern.source + '[a-z0-9.-]*', 'ig')) || []
+    const allowedBackendIds = sessionProviderModels.get(record.file)
+    if (backendIds.length) {
+      assert.ok(allowedBackendIds, record.file)
+      assert.ok(backendIds.every((id) => allowedBackendIds.has(id.toLowerCase())), record.file)
+    }
     if (ipPattern.test(record.text)) {
       const allowed = allowedIpLiterals.get(record.file)
       assert.ok(allowed, record.file)
@@ -101,6 +132,7 @@ test('runtime dependencies remain explicit and imports stay within their package
       const piAllowed = record.file.startsWith('packages/pi-agents/') && [
         '@earendil-works/pi-agent-core',
         '@earendil-works/pi-ai',
+        '@earendil-works/pi-ai/api/openai-responses.lazy',
         '@earendil-works/pi-ai/providers/all',
         '@earendil-works/pi-ai/providers/faux'
       ].includes(match[1])

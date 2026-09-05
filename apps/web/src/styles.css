@@ -20,12 +20,12 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; min-height: 100vh; background: var(--background); color: var(--text); }
-button, input, textarea { font: inherit; }
+button, input, select, textarea { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: 0.48; }
-button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
 
-.app-shell { display: grid; grid-template-columns: 340px minmax(0, 1fr); min-height: 100vh; color: var(--text); background: var(--background); }
+.app-shell { min-height: 100vh; color: var(--text); background: var(--background); }
 .app-shell.theme-night {
   color-scheme: dark;
   --background: #211f1b;
@@ -163,7 +163,22 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px
 .inspector { display: flex; flex-direction: column; min-width: 0; border-left: 1px solid var(--line); padding-left: 24px; }
 .inspector-scroll { flex: 1; overflow: auto; padding-right: 2px; }
 .panel-block { padding: 16px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); }
-.cycle-panel, .compact-block { margin-bottom: 22px; }
+.provider-panel, .cycle-panel, .compact-block { margin-bottom: 22px; }
+.provider-title { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
+.provider-stamp { display: grid; min-width: 78px; gap: 2px; padding: 6px 8px; border: 1px solid var(--line); color: var(--faint); text-align: center; transform: rotate(-1deg); }
+.provider-stamp span { font-size: 8px; }
+.provider-stamp strong { color: var(--muted); font: 11px Georgia, "Songti SC", serif; }
+.provider-stamp.configured { border-color: var(--complete); color: var(--complete); }
+.provider-stamp.configured strong { color: var(--complete); }
+.provider-intro { max-width: 48ch; margin: 14px 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
+.provider-form { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.provider-form label { display: grid; gap: 5px; color: var(--faint); font-size: 10px; }
+.provider-form input, .provider-form select { min-width: 0; width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 2px; color: var(--ink); background: var(--background); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.provider-form input[readonly] { color: var(--muted); background: var(--panel-2); }
+.provider-wide, .provider-actions { grid-column: 1 / -1; }
+.provider-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
+.provider-actions .primary-action { margin-top: 0; }
+.provider-footnote { margin: 12px 0 0; padding-top: 10px; border-top: 1px solid var(--line); color: var(--faint); font-size: 9px; line-height: 1.6; }
 .cycle-current { display: flex; align-items: center; gap: 10px; margin: 16px 0 14px; padding: 10px; border-left: 2px solid var(--accent); background: var(--accent-soft); }
 .current-mark { color: var(--accent); font-size: 15px; }
 .cycle-current div { display: grid; gap: 2px; }
@@ -174,6 +189,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px
 .field-grid input, .hash-field input { width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 2px; color: var(--ink); background: var(--background); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .primary-action { width: 100%; min-height: 34px; margin-top: 13px; }
 .cycle-note { margin-top: 11px; color: var(--faint); font-size: 10px; line-height: 1.5; }
+.cycle-blocker { margin-top: 12px; padding: 10px; border-left: 2px solid var(--danger); color: var(--danger); background: var(--danger-soft); }
+.cycle-blocker > strong { font-size: 10px; }
+.cycle-blocker dl { display: grid; gap: 5px; margin: 8px 0 0; }
+.cycle-blocker dl div { display: grid; grid-template-columns: 40px minmax(0, 1fr); gap: 7px; }
+.cycle-blocker dt { color: var(--faint); font-size: 9px; }
+.cycle-blocker dd { overflow-wrap: anywhere; margin: 0; font: 9px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .metric-row { display: flex; justify-content: space-between; align-items: end; margin-top: 14px; }
 .metric-row div { display: grid; gap: 2px; }
 .metric-row strong { color: var(--ink); font: 28px Georgia, "Songti SC", serif; }
@@ -266,8 +287,83 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px
   .composer small { grid-column: auto; }
   .venue-grid { gap: 16px; }
   .summary-strip { grid-template-columns: 1fr; }
+  .provider-form { grid-template-columns: 1fr; }
+  .provider-wide, .provider-actions { grid-column: auto; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; }
+}
+
+/* The entry surface keeps setup and one complete Paper action together. */
+.workspace { width: min(100%, 1060px); margin: 0 auto; padding: 36px 48px 60px; }
+.topbar { align-items: center; margin-bottom: 30px; }
+.topbar h1 { margin: 0; font-size: 30px; }
+.workspace-tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--line); margin-bottom: 28px; }
+.workspace-tabs button { padding: 10px 0 13px; border: 0; border-bottom: 2px solid transparent; color: var(--muted); background: transparent; font-size: 15px; }
+.workspace-tabs button[aria-current] { color: var(--ink); border-bottom-color: var(--accent); }
+.entry-form h2, .run-result h2, .advanced h2 { margin: 0; font: 500 22px Georgia, "Songti SC", serif; }
+.section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.connection-section { margin-bottom: 26px; }
+.connection-fields, .setup-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 22px; }
+.entry-form label { display: grid; gap: 8px; color: var(--muted); font-size: 13px; }
+.entry-form input, .entry-form select, .entry-form textarea { width: 100%; min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 3px; color: var(--ink); background: var(--panel); font-size: 14px; }
+.entry-form textarea { resize: vertical; line-height: 1.6; }
+.entry-form input[readonly] { background: var(--panel-2); color: var(--muted); }
+.entry-form .number-field { display: flex; align-items: center; position: relative; }
+.number-field input { padding-right: 70px; }
+.number-field > span { position: absolute; right: 12px; color: var(--muted); font-size: 11px; }
+.field-note { margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.model-options { margin-top: 12px; color: var(--muted); font-size: 12px; }
+.model-options label { max-width: 320px; margin-top: 12px; }
+summary { cursor: pointer; }
+summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.paper-setup { padding-top: 22px; border-top: 1px solid var(--line); }
+.paper-setup fieldset { margin: 24px 0 0; padding: 0; border: 0; }
+.paper-setup legend { margin-bottom: 14px; color: var(--ink); font-size: 14px; font-weight: 600; }
+.saved-paper { padding: 16px 0; border-block: 1px solid var(--line); color: var(--complete); font-size: 14px; }
+.saved-paper dl { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 24px; color: var(--muted); font-size: 12px; }
+.saved-paper dl div { display: flex; justify-content: space-between; gap: 10px; }
+.saved-paper dd { margin: 0; color: var(--ink); }
+.run-action { margin: 26px 0 32px; }
+.run-action .primary-action { width: auto; min-width: 190px; min-height: 44px; margin: 0; font-size: 14px; }
+.run-result { padding: 24px 0; border-block: 1px solid var(--line); }
+.run-result progress { width: 100%; height: 6px; accent-color: var(--accent); }
+.run-result p, .progress-copy { color: var(--muted); font-size: 13px; }
+.progress-copy { display: flex; justify-content: space-between; margin-top: 7px; }
+.run-details, .advanced { padding: 20px 0; border-bottom: 1px solid var(--line); }
+.run-details > summary, .advanced > summary { color: var(--muted); font-size: 14px; }
+.details-grid { display: grid; grid-template-columns: 330px minmax(0, 1fr); gap: 26px; margin-top: 24px; }
+.details-grid .docket { padding: 18px; max-height: none; border: 1px solid var(--line); }
+.details-grid .stream-heading h2 { font-size: 14px; }
+.details-grid .message-stream { min-height: 100px; max-height: 450px; }
+.advanced-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 20px 0 28px; color: var(--muted); font-size: 12px; }
+.venue-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.strategy-panel { padding-top: 22px; border-top: 1px solid var(--line); margin-bottom: 28px; }
+.mode-copy { color: var(--muted); font-size: 13px; margin: 0 0 20px; }
+.strategy-actions { display: flex; align-items: center; gap: 12px; margin-top: 12px; color: var(--muted); font-size: 12px; }
+.strategy-actions span { margin-right: auto; }
+.discussion { margin-top: 30px; padding-top: 20px; border-top: 1px solid var(--line); }
+.discussion h3 { margin: 0 0 18px; color: var(--ink); font: 500 20px Georgia, "Songti SC", serif; }
+.discussion-messages { display: grid; gap: 16px; max-height: 420px; overflow: auto; margin-bottom: 16px; }
+.discussion-messages > div { padding-left: 14px; border-left: 2px solid var(--accent); }
+.discussion-messages .discussion-user { border-left-color: var(--line); }
+.discussion-messages strong { font-size: 12px; color: var(--muted); }
+.discussion-messages p { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.65; margin: 6px 0; }
+.discussion > label { margin-block: 16px 12px; }
+.notice, .form-error { font-size: 13px; line-height: 1.6; }
+.cycle-blocker dt, .cycle-blocker dd { font-size: 12px; }
+@media (max-width: 900px) {
+  .workspace { padding: 28px 24px 44px; }
+  .details-grid { grid-template-columns: 300px minmax(0, 1fr); gap: 18px; }
+}
+@media (max-width: 680px) {
+  .workspace { padding: 24px 18px 36px; }
+  .topbar { display: flex; gap: 12px; }
+  .topbar h1 { font-size: 23px; }
+  .connection-fields, .setup-fields, .details-grid, .venue-panels, .saved-paper dl { grid-template-columns: 1fr; }
+  .workspace-tabs { gap: 22px; }
+  .workspace-tabs button { font-size: 14px; }
+  .strategy-actions { flex-wrap: wrap; }
+  .strategy-actions span { width: 100%; }
 }

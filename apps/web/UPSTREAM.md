@@ -17,10 +17,16 @@ The following upstream surfaces were intentionally deleted from this import:
 - file browsing, file mutation, upload/download, and tree views
 - Git/source-control views
 - plugin loading, plugin views, and self-update controls
-- model/provider configuration and API-key editing
+- persistent or browser-managed model credentials
 - goal auto-loop and background-process controls
 - MCP/DSH/general-purpose tool routing
 - server, deployment, Docker, systemd, and launchd machinery
 
-This app does not store browser credentials or conversation history. It talks
+Tyche adds a narrowly scoped model-connection form that is not present in the
+imported safe subset. Its provider and model choices are fixed, its API key is
+sent only to the loopback control plane, and the connection lives only for the
+current authenticated control-plane session. It is cleared on logout, session
+expiry, or server restart and cannot configure testnet or production trading.
+
+This app does not persist browser credentials or conversation history. It talks
 only to the Tyche loopback control-plane projection API.

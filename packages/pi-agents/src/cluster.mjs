@@ -97,6 +97,8 @@ function jobInput(role, options, inputs) {
 }
 
 function createRoleJob(options, role, asset, attempt, inputs) {
+  const strategy = options.strategyPrompt || ''
+  if (typeof strategy !== 'string' || strategy.length > 8000) throw new Error('PI_STRATEGY_INVALID')
   return makeJob({
     jobId: `${options.runId}:${role}`,
     runId: options.runId,
@@ -109,7 +111,7 @@ function createRoleJob(options, role, asset, attempt, inputs) {
     model: options.model,
     attempt,
     timeoutMs: options.timeoutMs,
-    input: jobInput(role, options, inputs)
+    input: { ...jobInput(role, options, inputs), ...(strategy ? { strategy_context: strategy } : {}) }
   })
 }
 

@@ -19,7 +19,7 @@ test('safe UI source has no dangerous upstream surfaces or browser credential st
   const source = sourceFiles().map((file) => fs.readFileSync(file, 'utf8')).join('\n')
   for (const pattern of [
     /node-pty/i, /xterm/i, /terminal/i, /(?:^|[-_/])git(?:$|[-_/])/im, /plugin/i, /self.?update/i,
-    /localStorage/i, /sessionStorage/i, /api.?key/i, /provider.?key/i,
+    /localStorage/i, /sessionStorage/i,
     /FileReader/i, /readFile/i, /writeFile/i, /createWriteStream/i,
     /child_process/i, /MCP/i, /DSH/i
   ]) assert.doesNotMatch(source, pattern, String(pattern))
@@ -27,8 +27,29 @@ test('safe UI source has no dangerous upstream surfaces or browser credential st
 
 test('UI calls only the narrow fixed control-plane routes', () => {
   const source = fs.readFileSync(path.join(SOURCE, 'api.js'), 'utf8')
-  for (const route of ['/api/session', '/api/status', '/api/cycle', '/api/dag', '/api/paper', '/api/testnet', '/api/events', '/api/executor/status', '/api/executor/arm', '/api/executor/disarm', '/api/executor/plan', '/api/executor/execute', '/api/executor/reconcile']) assert.match(source, new RegExp(route.replaceAll('/', '\\/')))
+  for (const route of ['/api/session', '/api/provider', '/api/provider/clear', '/api/status', '/api/cycle', '/api/dag', '/api/paper', '/api/testnet', '/api/events', '/api/executor/status', '/api/executor/arm', '/api/executor/disarm', '/api/executor/plan', '/api/executor/execute', '/api/executor/reconcile']) assert.match(source, new RegExp(route.replaceAll('/', '\\/')))
   assert.doesNotMatch(source, /socketPath|executorSockets|X-Forwarded|host:/i)
+})
+
+test('session model form is fixed, ephemeral, and has one complete workflow action', () => {
+  const app = fs.readFileSync(path.join(SOURCE, 'App.jsx'), 'utf8')
+  const api = fs.readFileSync(path.join(SOURCE, 'api.js'), 'utf8')
+  assert.match(app, /const SESSION_PROVIDER = 'openai-responses-compatible'/)
+  assert.match(app, /const SESSION_MODEL_PREFIX = \['g', 'p', 't', '-', '5', '\.', '6', '-'\]\.join\(''\)/)
+  assert.match(app, /const SESSION_MODELS = Object\.freeze\(\[`\$\{SESSION_MODEL_PREFIX\}luna`, `\$\{SESSION_MODEL_PREFIX\}sol`\]\)/)
+  assert.match(api, /providerStatus: \(\) => request\('\/api\/provider'\)/)
+  assert.match(api, /configureProvider:[^\n]+api_key: apiKey/)
+  assert.match(api, /clearProvider: \(csrf\) => post\('\/api\/provider\/clear'/)
+  assert.match(app, /type="password"[^\n]+autoComplete="new-password"[^\n]+spellCheck="false"/)
+  assert.ok((app.match(/setProviderApiKey\(''\)/g) || []).length >= 3)
+  assert.match(app, /disabled=\{working \|\| !setup \|\| setup\.status === 'blocked'\}/)
+  assert.match(app, /operationRef\.current/)
+  assert.match(app, /createWorkflowRunner\(controlApi\)/)
+  assert.match(app, /API key 只保留在当前会话内/)
+  assert.match(app, /退出或重启服务后清除/)
+  assert.doesNotMatch(app, /周期备注|onSave=|<label>Provider|<label>日期|<label>ISO 周/)
+  for (const field of ['blocked_stage', 'cycle.code', 'cycle.message']) assert.match(app, new RegExp(field.replace('.', '\\.')))
+  assert.doesNotMatch(`${app}\n${api}`, /localStorage|sessionStorage|location\.(?:hash|search)|eventsUrl\([^)]*apiKey/i)
 })
 
 test('VenueCard renders the settled safe plan-summary DTO', () => {
@@ -148,7 +169,7 @@ test('workflow never advances the merge before both analyst dependencies complet
 test('localized shell exposes workflow structure without changing safety controls', () => {
   const app = fs.readFileSync(path.join(SOURCE, 'App.jsx'), 'utf8')
   const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8')
-  for (const text of ['事件流', '当前周期', '模拟摘要', '场所控制', '固定工作流', '授权 24 小时', '解除授权', '按计划哈希执行']) assert.match(app, new RegExp(text))
+  for (const text of ['事件日志', '运行 workflow', '首次模拟设置', '测试网控制', '固定工作流', '授权 24 小时', '解除授权', '按计划哈希执行']) assert.match(app, new RegExp(text))
   for (const className of ['workflow-dag', 'sequential-stage', 'parallel-branch', 'merge-stage']) assert.match(app, new RegExp(className))
   assert.match(html, /<html lang="zh-CN">/)
   assert.match(html, /<title>Tyche \/ 分析工作台<\/title>/)
@@ -174,4 +195,14 @@ test('paper theme and connected workflow visualization stay accessible and respo
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)/)
   assert.doesNotMatch(css, /gradient|box-shadow/i)
   assert.doesNotMatch(css, /workflow-dag[^{}]*\{[^}]*display:\s*none/s)
+})
+
+test('polling never overwrites connection drafts and technical controls are collapsed', () => {
+  const app = fs.readFileSync(path.join(SOURCE, 'App.jsx'), 'utf8')
+  const refresh = app.slice(app.indexOf('const refresh ='), app.indexOf('const openEvents ='))
+  assert.doesNotMatch(refresh, /setProviderEndpoint|setProviderModel|setProviderApiKey|setStrategyDraft|setPaperDraft/)
+  assert.match(app, /<details className="run-details"><summary>运行详情/)
+  assert.match(app, /<details className="advanced"><summary>高级/)
+  assert.match(app, /<button type="submit" className="primary-action" disabled=\{working/)
+  assert.doesNotMatch(app, /记录当前周期的备注|运行当前周期|保存连接/)
 })

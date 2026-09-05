@@ -36,9 +36,7 @@ control plane after the production bundle is built:
 npm run web:build
 npm run control:check
 npm run control:test
-npm start --workspace @tyche/control-plane -- --port 8788 \
-  --gate-socket /absolute/path/gate.sock \
-  --binance-socket /absolute/path/binance.sock
+node scripts/tyche-control-plane.mjs --port 8788
 ```
 
 The service binds only to `127.0.0.1`, prints one one-time bootstrap token, and
@@ -50,6 +48,34 @@ behind the fixed executor sockets, exact arm phrases, and exact plan-hash
 confirmation. See [apps/web/UPSTREAM.md](apps/web/UPSTREAM.md) for the fixed
 `xing-shuyin/pi-web-ui` reference commit and the intentionally deleted surface
 area.
+
+After signing in with the one-time token, fill in the model API endpoint and
+API key. On the first Paper run, enter the eleven explicit simulation-capital,
+leverage, risk-limit and fill-constraint values on the page, then select
+**运行 workflow**. The page validates input, saves the session connection,
+creates or reuses the locked/dry-run Paper setup, and starts one complete
+analysis → deterministic plan → Paper cycle. Date and ISO week use the current
+UTC day at launch. No capital or risk defaults are supplied; bps inputs preserve
+decimal precision (1 bps = 0.01%). Repeat runs reuse the account and connection.
+
+The default manual workflow uses the ignored `config/tyche.local.json`, creating
+it from the committed locked template when needed. An explicitly selected
+custom startup configuration stays selected and is never rewritten by the page;
+missing limits in that custom file require correction there. Existing Paper
+accounts, configured limits and configuration digests are checked and never
+reset or silently replaced. The standalone `@tyche/control-plane` package CLI
+is only a projection shell; use the script above for the complete workflow.
+
+**自动交易 / 策略** lets you paste a semantic BTC/ETH strategy or discuss it with
+the main Agent through the session model. Discussion has no tools or account
+access and does not apply changes. Select **应用策略** to snapshot the strategy
+for the next unstarted analysis; all six weekly/daily roles retain their fixed
+contracts. Existing same-cycle receipts still reuse their results, so applying
+a prompt never forces a second simulated fill. Strategies and discussion are
+session-memory only and disappear on logout, expiry or service restart. This
+page runs one Paper cycle per click; it does not enable a scheduler or testnet
+execution. Event logs, the fixed DAG and testnet controls are collapsed into
+run details and advanced settings.
 
 The runnable local cluster keeps the scheduler/control plane and the optional
 testnet executor in separate processes. The cluster service owns no exchange

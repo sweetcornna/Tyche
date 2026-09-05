@@ -211,6 +211,8 @@ export function summarizeCycle(result) {
     outcome: safeText(result?.outcome || cycle?.outcome || 'BLOCKED', 80),
     phase: safeText(result?.phase || cycle?.phase || 'BLOCKED', 80),
     ...(result?.blocked_stage ? { blocked_stage: safeText(result.blocked_stage, 80) } : {}),
+    ...(result?.code ? { code: safeText(result.code, 100) } : {}),
+    ...(result?.message ? { message: safeText(result.message, 320) } : {}),
     cycle_hash: safeDigest(cycle?.cycle_hash ?? result?.cycle_hash),
     plan_hash: safeDigest(product?.plan_hash ?? result?.plan_hash),
     reused: cycle?.reused === true || result?.reused === true,
