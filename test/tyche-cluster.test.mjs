@@ -163,6 +163,7 @@ test('session provider validates without inference and powers only a primary man
   let child
   try {
     child = await startControlPlaneChild({
+      bootstrapToken: 'bootstrap-child-fixture',
       port: 0,
       env: { PATH: '/safe/bin', LANG: 'C', FINANCE_API_KEY: 'must-not-cross' },
       configPath: path.join(process.cwd(), 'config', 'tyche.json'),
@@ -308,12 +309,13 @@ test('bootstrap ready token is captured once for parent stderr and never enters 
       model: 'fixture',
       mode: 'shadow',
       port: 0,
+      bootstrapToken: token,
       configPath: path.join(process.cwd(), 'config', 'tyche.json'),
       controlPlaneFactory: (options) => {
         childOptions = options
         return {
           async start() {
-            options.onBootstrapToken(token)
+            options.onBootstrapToken(options.bootstrapToken)
             return { host: LOOPBACK_HOST, port: 9920 }
           },
           async stop() {},
@@ -328,6 +330,7 @@ test('bootstrap ready token is captured once for parent stderr and never enters 
   assert.equal(Object.hasOwn(childService, 'workerEnv'), false)
   assert.equal(Object.hasOwn(childService, 'bootstrapToken'), false)
   assert.equal(childOptions.staticRoot, STATIC_ROOT)
+  assert.equal(childOptions.bootstrapToken, token)
   await childService.plane.stop()
 
   const state = memoryStateStore()

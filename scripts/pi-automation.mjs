@@ -7,7 +7,9 @@ import {
   fixtureWorker,
   runCluster as runPiCluster,
   validateResult,
-  validateSemanticOutput
+  validateSemanticOutput,
+  SESSION_PROVIDER_ID,
+  validateSessionProtocol
 } from '../packages/pi-agents/src/index.mjs'
 import {
   createAutomationApplicator,
@@ -133,6 +135,7 @@ function validatePiAnalysisOptions(options) {
   } else {
     result.timeoutMs = 30000
   }
+  if (result.provider === SESSION_PROVIDER_ID) result.protocol = validateSessionProtocol(options.protocol)
   return { ...options, ...result }
 }
 
@@ -280,6 +283,7 @@ function piProvenance(options, records, errors = []) {
     schema: PI_PROVENANCE_SCHEMA,
     adapter: '@tyche/pi-agents',
     provider: options.provider,
+    ...(options.protocol ? { protocol: options.protocol } : {}),
     model: options.model,
     date: options.date,
     iso_week: options.isoWeek,
@@ -296,11 +300,14 @@ async function runTierCluster(options, tier, evidence) {
     date: options.date,
     isoWeek: options.isoWeek,
     provider: options.provider,
+    ...(options.protocol ? { protocol: options.protocol } : {}),
     model: options.model,
     timeoutMs: options.timeoutMs,
     strategyPrompt: options.strategyPrompt || '',
     roleModels: options.roleModels,
     roleEfforts: options.roleEfforts,
+    modelPool: options.modelPool,
+    modelMode: options.modelMode,
     evidence
   }
   for (const key of ['providerEnv', 'workerEnv', 'baseEnv', 'workerPath', 'execPath', 'cwd']) {
@@ -334,6 +341,7 @@ function blockedReceipt(options, settlement, details, provenance = null) {
     date: options.date,
     iso_week: options.isoWeek,
     provider: options.provider,
+    ...(options.protocol ? { protocol: options.protocol } : {}),
     model: options.model,
     mode: options.mode,
     outcome: 'BLOCKED',
@@ -355,6 +363,7 @@ function shadowReceipt(options, settlement, weeklyRecord, dailyRecord, provenanc
     date: options.date,
     iso_week: options.isoWeek,
     provider: options.provider,
+    ...(options.protocol ? { protocol: options.protocol } : {}),
     model: options.model,
     mode: 'shadow',
     outcome: 'SHADOW_VALIDATED',
@@ -609,6 +618,7 @@ async function runPiAutomationUnlocked(baseOptions) {
       date: options.date,
       iso_week: options.isoWeek,
       provider: options.provider,
+      ...(options.protocol ? { protocol: options.protocol } : {}),
       model: options.model,
       mode: 'primary',
       outcome: cycle.outcome,
@@ -685,6 +695,7 @@ export async function runPiWeeklyRefresh(rawOptions = {}) {
       date: options.date,
       iso_week: options.isoWeek,
       provider: options.provider,
+      ...(options.protocol ? { protocol: options.protocol } : {}),
       model: options.model,
       mode: options.mode,
       outcome: 'BLOCKED',
@@ -722,6 +733,7 @@ export async function runPiWeeklyRefresh(rawOptions = {}) {
       date: options.date,
       iso_week: options.isoWeek,
       provider: options.provider,
+      ...(options.protocol ? { protocol: options.protocol } : {}),
       model: options.model,
       mode: options.mode,
       outcome: 'BLOCKED',
@@ -752,6 +764,7 @@ export async function runPiWeeklyRefresh(rawOptions = {}) {
     date: options.date,
     iso_week: options.isoWeek,
     provider: options.provider,
+    ...(options.protocol ? { protocol: options.protocol } : {}),
     model: options.model,
     mode: options.mode,
     outcome: options.mode === 'shadow' ? 'SHADOW_VALIDATED' : 'WEEKLY_REFRESHED',
@@ -781,6 +794,7 @@ export async function runPiWeeklyRefresh(rawOptions = {}) {
       date: options.date,
       iso_week: options.isoWeek,
       provider: options.provider,
+      ...(options.protocol ? { protocol: options.protocol } : {}),
       model: options.model,
       mode: options.mode,
       outcome: 'BLOCKED',

@@ -1,4 +1,5 @@
 import dns from 'node:dns/promises'
+import { normalizeConnectionEndpoint } from './connection-endpoint.mjs'
 import net from 'node:net'
 import {
   createModels,
@@ -7,8 +8,11 @@ import {
   envApiKeyAuth
 } from '@earendil-works/pi-ai'
 import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy'
+import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy'
+import { anthropicMessagesApi } from '@earendil-works/pi-ai/api/anthropic-messages.lazy'
 import { builtinModels } from '@earendil-works/pi-ai/providers/all'
-import { ROLES, EFFORTS, DEFAULT_ROLE_EFFORTS } from './protocol.mjs'
+import { validateModelPool } from './model-pool.mjs'
+import { ROLES, EFFORTS, DEFAULT_ROLE_EFFORTS, DEFAULT_SESSION_PROTOCOL, validateSessionProtocol } from './protocol.mjs'
 
 export const SESSION_PROVIDER_ID = 'openai-responses-compatible'
 export const SESSION_API_KEY_ENV = 'TYCHE_PI_SESSION_API_KEY'
@@ -17,8 +21,14 @@ export const SESSION_MODEL_IDS = Object.freeze(['gpt-6-astra', 'gpt-5.6-luna', '
 export const SESSION_OUTPUT_BUDGET = 16384
 export const MAX_SESSION_ENDPOINT_BYTES = 2048
 
+export const DEFAULT_SESSION_POOL = Object.freeze([Object.freeze({ id: SESSION_MODEL_IDS[0], efforts: EFFORTS })])
 const SESSION_MODEL_SET = new Set(SESSION_MODEL_IDS)
 const REDACTED = '[session-secret-redacted]'
+
+export function sessionProtocolModels() {
+  return builtinModels().getModels('anthropic').filter((model) => model.api === 'anthropic-messages' && model.compat?.forceAdaptiveThinking === true)
+    .map((model) => ({ id: model.id, protocol: 'anthropic-messages', efforts: EFFORTS.filter((effort) => { try { assertModelEffort(model, effort); return true } catch { return false } }) }))
+}
 
 function fail(code) {
   const error = new Error(code)
@@ -26,14 +36,15 @@ function fail(code) {
   throw error
 }
 
-export function validateSessionRoleModels(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.entries(value).some(([role, model]) => !ROLES.includes(role) || typeof model !== 'string' || !SESSION_MODEL_SET.has(model))) fail('PI_SESSION_ROLE_MODELS_INVALID')
+export function validateSessionRoleModels(value, pool) {
+  const allowed = pool ? new Set(validateSessionPool(pool).map(({ id }) => id)) : SESSION_MODEL_SET
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.entries(value).some(([role, model]) => !ROLES.includes(role) || typeof model !== 'string' || !allowed.has(model))) fail('PI_SESSION_ROLE_MODELS_INVALID')
   return Object.freeze(Object.fromEntries(ROLES.filter((role) => Object.hasOwn(value, role)).map((role) => [role, value[role]])))
 }
 
-export function effectiveSessionRoleModels(defaultModel, overrides = {}) {
-  if (!SESSION_MODEL_SET.has(defaultModel)) fail('PI_SESSION_MODEL_NOT_ALLOWED')
-  const configured = validateSessionRoleModels(overrides)
+export function effectiveSessionRoleModels(defaultModel, overrides = {}, pool) {
+  if (!(pool ? validateSessionPool(pool).some(({ id }) => id === defaultModel) : SESSION_MODEL_SET.has(defaultModel))) fail('PI_SESSION_MODEL_NOT_ALLOWED')
+  const configured = validateSessionRoleModels(overrides, pool)
   return Object.freeze(Object.fromEntries(ROLES.map((role) => [role, configured[role] || defaultModel])))
 }
 
@@ -46,13 +57,29 @@ export function effectiveSessionRoleEfforts(overrides = {}) {
   return Object.freeze({ ...DEFAULT_ROLE_EFFORTS, ...validateSessionRoleEfforts(overrides) })
 }
 
-export function assertSessionModelEffort(modelId, effort) {
-  const model = cloneSessionModel(modelId, '', builtinModels())
+export function assertSessionModelEffort(modelId, effort, pool, protocol = DEFAULT_SESSION_PROTOCOL) {
+  const declaration = pool ? validateSessionPool(pool).find(({ id }) => id === modelId) : null
+  if (pool && !declaration?.efforts.includes(effort)) fail('PI_SESSION_MODEL_EFFORT_UNSUPPORTED')
+  const model = protocolModel(modelId, '', builtinModels(), declaration, validateSessionProtocol(protocol))
   assertModelEffort(model, effort)
 }
 
 export function assertModelEffort(model, effort) {
   if (!EFFORTS.includes(effort) || !getSupportedThinkingLevels(model).includes(effort) || (model.thinkingLevelMap?.[effort] ?? effort) !== effort) fail('PI_SESSION_MODEL_EFFORT_UNSUPPORTED')
+}
+
+export function validateSessionPool(value) {
+  const pool = validateModelPool(value)
+  for (const entry of pool) if (SESSION_MODEL_SET.has(entry.id)) for (const effort of entry.efforts) assertModelEffort(cloneSessionModel(entry.id, '', builtinModels()), effort)
+  return pool
+}
+
+export function sessionPoolMetadata(pool, protocol = DEFAULT_SESSION_PROTOCOL) {
+  return validateSessionPool(pool).map((entry) => {
+    const anthropic = protocol === 'anthropic-messages' ? builtinModels().getModel('anthropic', entry.id) : null
+    const known = anthropic || (SESSION_MODEL_SET.has(entry.id) && entry.id !== SESSION_MODEL_IDS[0] ? builtinModels().getModel('openai', entry.id) : null)
+    return { ...entry, source: entry.id === SESSION_MODEL_IDS[0] ? 'host_catalog' : known ? 'pinned_sdk' : 'user_declared', gateway_verified: false, context_window: entry.id === SESSION_MODEL_IDS[0] ? 272000 : known?.contextWindow ?? null }
+  })
 }
 
 function ipv4Number(address) {
@@ -275,8 +302,15 @@ function deepFreeze(value) {
   return Object.freeze(value)
 }
 
-function cloneSessionModel(id, endpoint, sourceModels) {
-  if (!SESSION_MODEL_SET.has(id)) fail('PI_SESSION_MODEL_NOT_ALLOWED')
+function cloneSessionModel(id, endpoint, sourceModels, declaration) {
+  if (!SESSION_MODEL_SET.has(id)) {
+    if (!declaration || declaration.id !== id) fail('PI_SESSION_MODEL_NOT_ALLOWED')
+    return deepFreeze({ id, name: id, api: 'openai-responses', provider: SESSION_PROVIDER_ID, baseUrl: endpoint, reasoning: true,
+      thinkingLevelMap: Object.fromEntries(['off', 'minimal', 'low', ...EFFORTS, 'max'].map((effort) => [effort, declaration.efforts.includes(effort) ? effort : null])),
+      // Zero is the SDK's unknown-context sentinel, not a model capacity.
+      // Text-only is this application's input restriction; cost is unpriced.
+      input: ['text'], contextWindow: 0, maxTokens: SESSION_OUTPUT_BUDGET, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } })
+  }
   if (id === SESSION_MODEL_IDS[0]) return deepFreeze({
     id, name: 'Astra (Tyche session)', api: 'openai-responses', provider: SESSION_PROVIDER_ID, baseUrl: endpoint,
     reasoning: true,
@@ -297,41 +331,74 @@ function cloneSessionModel(id, endpoint, sourceModels) {
   return deepFreeze(model)
 }
 
+function protocolModel(id, endpoint, sourceModels, declaration, protocol) {
+  if (protocol === 'anthropic-messages') {
+    const source = sourceModels.getModel('anthropic', id)
+    if (!source || source.api !== protocol || source.compat?.forceAdaptiveThinking !== true) fail('PI_SESSION_PROTOCOL_MODEL_UNSUPPORTED')
+    for (const effort of declaration?.efforts || []) assertModelEffort(source, effort)
+    const model = structuredClone(source)
+    model.provider = SESSION_PROVIDER_ID
+    model.baseUrl = endpoint
+    model.name = `${source.name} (Tyche session)`
+    // Only native effort values are accepted; no budget translation or fallback model.
+    model.thinkingLevelMap = { ...model.thinkingLevelMap, medium: 'medium', high: 'high' }
+    delete model.compat.allowedFallbackModels
+    for (const effort of declaration?.efforts || []) assertModelEffort(model, effort)
+    return deepFreeze(model)
+  }
+  const model = cloneSessionModel(id, endpoint, sourceModels, declaration)
+  if (protocol === 'openai-responses') return model
+  // The user selected the OpenAI wire format; endpoint names cannot switch it.
+  return deepFreeze({ ...structuredClone(model), api: protocol, compat: { supportsReasoningEffort: true, thinkingFormat: 'openai', maxTokensField: 'max_completion_tokens' } })
+}
+
+function assertProtocolEndpoint(endpoint, protocol) {
+  const pathname = new URL(endpoint).pathname.replace(/\/+$/u, '')
+  if (/(?:\/responses|\/chat\/completions|\/messages)$/u.test(pathname) || (protocol === 'anthropic-messages' && /\/v1$/u.test(pathname))) fail('PI_SESSION_ENDPOINT_OPERATION_FORBIDDEN')
+}
+
 export async function createSessionProviderRuntime({
   endpoint,
   apiKey,
   modelId,
+  modelPool,
+  protocol = DEFAULT_SESSION_PROTOCOL,
   lookup = dns.lookup,
   fetchImpl = globalThis.fetch
 } = {}) {
+  protocol = validateSessionProtocol(protocol)
   if (typeof apiKey !== 'string' || !apiKey.trim()) fail('PI_SESSION_API_KEY_REQUIRED')
-  if (!SESSION_MODEL_SET.has(modelId)) fail('PI_SESSION_MODEL_NOT_ALLOWED')
-  const normalizedEndpoint = await validateSessionEndpoint(endpoint, { lookup })
+  if (protocol === 'anthropic-messages' && apiKey.includes('sk-ant-oat')) fail('PI_SESSION_OAUTH_UNSUPPORTED')
+  const pool = modelPool ? validateSessionPool(modelPool) : validateSessionPool(SESSION_MODEL_IDS.map((id) => ({ id, efforts: EFFORTS.filter((effort) => { try { assertSessionModelEffort(id, effort); return true } catch { return false } }) })))
+  if (containsSessionSecret({ pool, protocol }, { apiKey, endpoint })) fail('PI_SESSION_SECRET_IN_MODEL_POOL')
+  if (!pool.some(({ id }) => id === modelId)) fail('PI_SESSION_MODEL_NOT_ALLOWED')
+  const normalizedEndpoint = await validateSessionEndpoint(normalizeConnectionEndpoint(endpoint, protocol), { lookup })
+  assertProtocolEndpoint(normalizedEndpoint, protocol)
   const restrictedFetch = createRestrictedSessionFetch({ endpoint: normalizedEndpoint, lookup, fetchImpl })
   const sourceModels = builtinModels()
-  const modelsForProvider = SESSION_MODEL_IDS.map((id) => cloneSessionModel(id, normalizedEndpoint, sourceModels))
+  const modelsForProvider = pool.map((entry) => protocolModel(entry.id, normalizedEndpoint, sourceModels, entry, protocol))
   const trustedModels = new Map(modelsForProvider.map((model) => [model.id, model]))
-  const responses = openAIResponsesApi()
+  const selectedApi = protocol === 'openai-responses' ? openAIResponsesApi() : protocol === 'openai-completions' ? openAICompletionsApi() : anthropicMessagesApi()
   const trustedModel = (candidate) => {
     const model = trustedModels.get(candidate?.id)
-    if (!model || candidate?.provider !== SESSION_PROVIDER_ID || candidate?.api !== 'openai-responses') {
+    if (!model || candidate?.provider !== SESSION_PROVIDER_ID || candidate?.api !== protocol) {
       fail('PI_SESSION_MODEL_NOT_ALLOWED')
     }
     return model
   }
   const api = {
     stream(model, context, options) {
-      assertSessionModelEffort(model?.id, options?.reasoningEffort)
-      return responses.stream(trustedModel(model), context, { ...options, maxTokens: outputBudget(options), fetch: restrictedFetch })
+      assertSessionModelEffort(model?.id, protocol === 'anthropic-messages' ? options?.effort : options?.reasoningEffort, pool, protocol)
+      return selectedApi.stream(trustedModel(model), context, { ...options, maxTokens: outputBudget(options), fetch: restrictedFetch })
     },
     streamSimple(model, context, options) {
-      assertSessionModelEffort(model?.id, options?.reasoning)
-      return responses.streamSimple(trustedModel(model), context, { ...options, maxTokens: outputBudget(options), fetch: restrictedFetch })
+      assertSessionModelEffort(model?.id, options?.reasoning, pool, protocol)
+      return selectedApi.streamSimple(trustedModel(model), context, { ...options, maxTokens: outputBudget(options), fetch: restrictedFetch })
     }
   }
   const provider = createProvider({
     id: SESSION_PROVIDER_ID,
-    name: 'Tyche OpenAI Responses compatible session',
+    name: 'Tyche session API connection',
     baseUrl: normalizedEndpoint,
     auth: { apiKey: envApiKeyAuth('Tyche Pi session API key', [SESSION_API_KEY_ENV]) },
     models: modelsForProvider,
@@ -351,10 +418,11 @@ export async function createSessionProviderRuntime({
   const model = models.getModel(SESSION_PROVIDER_ID, modelId)
   if (!model) fail('PI_SESSION_MODEL_NOT_ALLOWED')
   return Object.freeze({
+    protocol,
     provider,
     models,
     model,
-    pricing: modelId === SESSION_MODEL_IDS[0] ? 'unavailable' : 'catalog',
+    pricing: modelId === SESSION_MODEL_IDS[0] || !SESSION_MODEL_SET.has(modelId) ? 'unavailable' : 'catalog',
     streamFn: models.streamSimple.bind(models)
   })
 }

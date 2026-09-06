@@ -7,8 +7,21 @@ async function request(path, options = {}) {
     headers: { ...(options.body ? JSON_HEADERS : {}), ...(options.headers || {}) }
   })
   const body = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(body.message || `控制平面返回状态 ${response.status}`)
+  if (!response.ok) {
+    const error = new Error(body.message || `控制平面返回状态 ${response.status}`)
+    error.status = response.status
+    error.code = body.code
+    throw error
+  }
   return body
+}
+
+export function isSessionFailure(error) {
+  return (error?.status === 401 && error.code === 'CONTROL_SESSION_REQUIRED') || (error?.status === 403 && error.code === 'CONTROL_CSRF_REJECTED')
+}
+
+function get(path, csrf) {
+  return request(path, { headers: csrf ? { 'X-CSRF-Token': csrf } : {} })
 }
 
 function post(path, body, csrf) {
@@ -21,24 +34,26 @@ function post(path, body, csrf) {
 
 export const controlApi = Object.freeze({
   session: (bootstrapToken) => post('/api/session', { bootstrap_token: bootstrapToken }),
+  resumeSession: () => request('/api/session', { headers: { 'X-Tyche-Session': 'resume' }, cache: 'no-store' }),
   logout: (csrf) => post('/api/logout', {}, csrf),
-  providerStatus: () => request('/api/provider'),
-  configureProvider: ({ provider, model, endpoint, apiKey }, csrf) => post('/api/provider', { provider, model, endpoint, api_key: apiKey }, csrf),
+  providerStatus: (csrf) => get('/api/provider', csrf),
+  configureProvider: ({ provider, protocol, model, endpoint, apiKey }, csrf) => post('/api/provider', { provider, protocol, model, endpoint, api_key: apiKey }, csrf),
+  discoverProvider: ({ provider, protocol, endpoint, apiKey }, csrf) => post('/api/provider/discover', { provider, protocol, endpoint, api_key: apiKey }, csrf),
   clearProvider: (csrf) => post('/api/provider/clear', {}, csrf),
-  status: () => request('/api/status'),
-  cycle: () => request('/api/cycle'),
-  dag: () => request('/api/dag'),
-  paper: () => request('/api/paper'),
-  paperSetup: () => request('/api/paper/setup'),
+  status: (csrf) => get('/api/status', csrf),
+  cycle: (csrf) => get('/api/cycle', csrf),
+  dag: (csrf) => get('/api/dag', csrf),
+  paper: (csrf) => get('/api/paper', csrf),
+  paperSetup: (csrf) => get('/api/paper/setup', csrf),
   setupPaper: (input, csrf) => post('/api/paper/setup', input, csrf),
-  strategy: () => request('/api/strategy'),
-  models: () => request('/api/models'),
+  strategy: (csrf) => get('/api/strategy', csrf),
+  models: (csrf) => get('/api/models', csrf),
   applyModels: (configuration, csrf) => post('/api/models', configuration, csrf),
   applyStrategy: (prompt, csrf) => post('/api/strategy', { prompt }, csrf),
-  discussStrategy: (message, csrf) => post('/api/strategy/discuss', { message }, csrf),
-  testnet: () => request('/api/testnet'),
+  discussStrategy: (message, csrf, allocate = false) => post('/api/strategy/discuss', { message, ...(allocate ? { allocate: true } : {}) }, csrf),
+  testnet: (csrf) => get('/api/testnet', csrf),
   runCycle: (input, csrf) => post('/api/cycle', input, csrf),
-  executorStatus: (venue) => request(`/api/executor/status?venue=${encodeURIComponent(venue)}`),
+  executorStatus: (venue, csrf) => get(`/api/executor/status?venue=${encodeURIComponent(venue)}`, csrf),
   arm: (venue, confirmation, csrf) => post('/api/executor/arm', { venue, confirmation }, csrf),
   disarm: (venue, csrf) => post('/api/executor/disarm', { venue }, csrf),
   plan: (venue, date, isoWeek, csrf) => post('/api/executor/plan', { venue, date, iso_week: isoWeek }, csrf),

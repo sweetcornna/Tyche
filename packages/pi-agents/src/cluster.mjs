@@ -13,10 +13,12 @@ import {
   makeResult,
   validateJob,
   validateResult,
-  validateSemanticOutput
+  validateSemanticOutput,
+  validateSessionProtocol
 } from './protocol.mjs'
+import { modelPoolDigest } from './model-pool.mjs'
 import { runWorkerProcess } from './worker-client.mjs'
-import { validateSessionRoleModels, effectiveSessionRoleEfforts, assertSessionModelEffort, SESSION_PROVIDER_ID } from './session-provider.mjs'
+import { validateSessionRoleModels, validateSessionPool, sessionPoolMetadata, effectiveSessionRoleEfforts, assertSessionModelEffort, SESSION_PROVIDER_ID } from './session-provider.mjs'
 
 const ANALYST_ROLES = Object.freeze(['btc-analyst', 'eth-analyst'])
 const PREFLIGHT_KEYS = new Set(['status', 'evidence_refs', 'blockers'])
@@ -41,10 +43,12 @@ function validateClusterOptions(options) {
   if (options.runJob !== undefined && typeof options.runJob !== 'function') throw new Error('PI_RUNNER_REQUIRED')
   const runId = options.runId || randomUUID()
   requiredString(runId, 'runId', 256)
-  const roleModels = validateSessionRoleModels(options.roleModels ?? {})
+  const protocol = options.provider === SESSION_PROVIDER_ID ? validateSessionProtocol(options.protocol) : options.protocol
+  const modelPool = options.modelPool === undefined ? undefined : validateSessionPool(options.modelPool)
+  const roleModels = validateSessionRoleModels(options.roleModels ?? {}, modelPool)
   const roleEfforts = effectiveSessionRoleEfforts(options.roleEfforts)
-  if (options.provider === SESSION_PROVIDER_ID) for (const role of ROLES) assertSessionModelEffort(roleModels[role] || options.model, roleEfforts[role])
-  return { ...options, roleModels, roleEfforts, tier: options.tier || options.mode, timeoutMs, runId }
+  if (options.provider === SESSION_PROVIDER_ID) for (const role of ROLES) assertSessionModelEffort(roleModels[role] || options.model, roleEfforts[role], modelPool, protocol)
+  return { ...options, protocol, modelPool, roleModels, roleEfforts, tier: options.tier || options.mode, timeoutMs, runId }
 }
 
 function emitEvent(options, role, asset, attempt, status) {
@@ -112,8 +116,11 @@ function createRoleJob(options, role, asset, attempt, inputs) {
     date: options.date,
     isoWeek: options.isoWeek,
     provider: options.provider,
+    ...(options.protocol ? { protocol: options.protocol } : {}),
     model: options.roleModels[role] || options.model,
     effort: options.roleEfforts[role],
+    modelPool: options.modelPool,
+    modelMode: options.modelMode,
     attempt,
     timeoutMs: options.timeoutMs,
     input: { ...jobInput(role, options, inputs), ...(strategy ? { strategy_context: strategy } : {}) }
@@ -234,8 +241,10 @@ function provenance(options, results) {
     default_model: options.model,
     role_models: Object.fromEntries(ROLES.map((role) => [role, options.roleModels[role] || options.model])),
     role_efforts: { ...options.roleEfforts },
+    ...(options.modelPool ? { model_pool: sessionPoolMetadata(options.modelPool), model_pool_digest: modelPoolDigest(options.modelPool), model_mode: options.modelMode } : {}),
     roles: [...ROLES],
-    attempts: results.map((result) => ({ role: result.role, model: result.model, effort: result.effort, attempt: result.attempt, status: result.status }))
+    ...(options.protocol ? { protocol: options.protocol } : {}),
+    attempts: results.map((result) => ({ role: result.role, model: result.model, effort: result.effort, ...(result.protocol ? { protocol: result.protocol } : {}), ...(result.modelPoolDigest ? { model_pool_digest: result.modelPoolDigest } : {}), attempt: result.attempt, status: result.status }))
   }
 }
 

@@ -140,6 +140,8 @@ test('runtime dependencies remain explicit and imports stay within their package
         '@earendil-works/pi-agent-core',
         '@earendil-works/pi-ai',
         '@earendil-works/pi-ai/api/openai-responses.lazy',
+        '@earendil-works/pi-ai/api/openai-completions.lazy',
+        '@earendil-works/pi-ai/api/anthropic-messages.lazy',
         '@earendil-works/pi-ai/providers/all',
         '@earendil-works/pi-ai/providers/faux'
       ].includes(match[1])

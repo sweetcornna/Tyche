@@ -79,3 +79,58 @@ test('discussion sends effective model choices and returns only supported role-m
     await assert.rejects(discussSessionStrategy({ message: 'Change models.', roleModels }, { ...settings, fetchImpl: async () => sse({ reply: 'safe', suggested_role_models: value }) }), { code: 'PI_STRATEGY_MODELS_INVALID' })
   }
 })
+
+test('conversational setup sends only the bounded safe context and preserves configure scope through the real SDK', async () => {
+  let sent
+  const output = { intent: 'configure', apply_fields: ['paper_settings', 'suggested_prompt'], reply: '按已知虚拟资金安排模拟。', assumptions: ['仅为模拟起点。'], paper_settings: { configured_leverage: '2' } }
+  const setupContext = { ready: false, status: 'required', values: {}, missing: ['initial_usdt', 'configured_leverage'] }
+  const settingsDraft = { paper_settings: { initial_usdt: '1000.123456789012345678' }, suggested_prompt: 'BTC/ETH dated trends.' }
+  const input = { message: '前面的设置保留，其余由你安排。', setupContext, settingsDraft, preferences: '不确定；虚拟资金练习。', theme: 'night', history: [{ role: 'assistant', content: 'x'.repeat(8000) }] }
+  const result = await discussSessionStrategy(input, { ...connection, lookup: publicLookup, fetchImpl: async (_, init) => { sent = JSON.parse(init.body); return sse(output) } })
+  assert.deepEqual(result, output)
+  assert.ok(!sent.tools || sent.tools.length === 0)
+  assert.match(JSON.stringify(sent.input), /1000\.123456789012345678/)
+  assert.match(JSON.stringify(sent.input), /不确定；虚拟资金练习/)
+  assert.match(JSON.stringify(sent), /apply_fields/)
+  assert.match(JSON.stringify(sent), /No hardcoded defaults/)
+  let calls = 0
+  for (const change of [{ setupContext: { ...setupContext, ledger: {} } }, { settingsDraft: { endpoint: 'forbidden' } }, { preferences: 'p'.repeat(2001) }]) await assert.rejects(discussSessionStrategy({ ...input, ...change }, connection, { runtimeFactory: async () => { calls++; return {} } }))
+  assert.equal(calls, 0)
+})
+
+test('conversation configuration rejects unknown fields, unsupported settings and unsafe assumptions before returning', async () => {
+  const invalid = [
+    { intent: 'configure', apply_fields: ['theme'], theme: 'other' },
+    { intent: 'configure', apply_fields: ['paper_settings'], paper_settings: { configured_leverage: '1.00000000000000001' } },
+    { intent: 'configure', apply_fields: ['paper_settings'], paper_settings: { max_spread_bps: '10000.00000000000001' } },
+    { intent: 'configure', apply_fields: ['theme'], theme: 'night', execute: true },
+    { intent: 'configure' },
+    { intent: 'clarify', assumptions: [connection.apiKey] },
+    { intent: 'clarify', questions: ['one', 'two', 'three'] }
+  ]
+  for (const candidate of invalid) await assert.rejects(discussSessionStrategy({ message: 'configure' }, { ...connection, lookup: publicLookup, fetchImpl: async () => sse({ reply: 'candidate', ...candidate }) }), { code: 'PI_STRATEGY_DISCUSSION_FAILED' })
+})
+
+test('real discussion validates pool-only updates and explicitly selected pool drafts without changing the request model', async () => {
+  const pool = [{ id: 'draft-custom', efforts: ['medium', 'high', 'xhigh'] }]
+  const roles = ['orchestrator', 'preflight', 'btc-analyst', 'eth-analyst', 'synthesizer', 'reviewer']
+  const modelSettings = { pool, mode: 'auto', bootstrap: { model: 'draft-custom', effort: 'high' } }
+  const draft = { model_settings: modelSettings, suggested_role_models: Object.fromEntries(roles.map((role) => [role, 'draft-custom'])), suggested_role_efforts: Object.fromEntries(roles.map((role) => [role, 'high'])) }
+  const activePool = [{ id: connection.modelId, efforts: ['medium', 'high', 'xhigh'] }]
+  const scenarios = [
+    { settingsDraft: {}, output: { intent: 'configure', apply_fields: ['model_settings'], reply: '只更新模型池，等待分配。', model_settings: modelSettings } },
+    { settingsDraft: draft, output: { intent: 'configure', apply_fields: ['model_settings', 'suggested_role_models', 'suggested_role_efforts'], reply: '明确复用新池与六角色草稿。' } },
+    { settingsDraft: draft, output: { intent: 'configure', apply_fields: ['model_settings', 'suggested_role_models', 'suggested_role_efforts'], reply: '复用新池，本轮显式给出角色映射。', suggested_role_models: draft.suggested_role_models } },
+    { settingsDraft: draft, output: { intent: 'configure', apply_fields: ['suggested_role_models', 'suggested_role_efforts'], reply: '只调整当前池的 reviewer。', suggested_role_models: { reviewer: connection.modelId }, suggested_role_efforts: { reviewer: 'xhigh' } } },
+    { settingsDraft: draft, output: { intent: 'configure', apply_fields: ['theme', 'suggested_prompt'], reply: '不应用旧模型池。', theme: 'night', suggested_prompt: 'BTC/ETH dated evidence.' } }
+  ]
+  for (const { settingsDraft, output } of scenarios) {
+    let sent
+    const before = structuredClone(settingsDraft)
+    const result = await discussSessionStrategy({ message: '按明确范围配置。', settingsDraft, modelPool: activePool }, { ...connection, lookup: publicLookup, fetchImpl: async (_, init) => { sent = JSON.parse(init.body); return sse(output) } })
+    assert.deepEqual(result, output); assert.deepEqual(settingsDraft, before)
+    assert.equal(sent.model, connection.modelId); assert.equal(sent.reasoning.effort, 'high')
+    assert.ok(!sent.tools || sent.tools.length === 0)
+  }
+  await assert.rejects(discussSessionStrategy({ message: '未选择旧模型池。', settingsDraft: draft, modelPool: activePool }, { ...connection, lookup: publicLookup, fetchImpl: async () => sse({ intent: 'configure', apply_fields: ['suggested_role_models', 'suggested_role_efforts'], reply: '不能在当前池应用旧 custom 角色。' }) }), { code: 'PI_STRATEGY_MODELS_INVALID' })
+})

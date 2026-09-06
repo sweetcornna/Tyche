@@ -11,6 +11,9 @@ export {
   ASSETS,
   EFFORTS,
   DEFAULT_ROLE_EFFORTS,
+  SESSION_PROTOCOLS,
+  DEFAULT_SESSION_PROTOCOL,
+  validateSessionProtocol,
   TIERS,
   PiProtocolError,
   assertResultMatchesJob,
@@ -33,6 +36,10 @@ export {
   SESSION_API_KEY_ENV,
   SESSION_ENDPOINT_ENV,
   SESSION_MODEL_IDS,
+  DEFAULT_SESSION_POOL,
+  validateSessionPool,
+  sessionPoolMetadata,
+  sessionProtocolModels,
   SESSION_OUTPUT_BUDGET,
   validateSessionRoleEfforts,
   effectiveSessionRoleEfforts,
@@ -47,3 +54,5 @@ export {
   redactSessionSecrets,
   containsSessionSecret
 } from './session-provider.mjs'
+
+export { validateModelPool, modelPoolDigest } from './model-pool.mjs'
