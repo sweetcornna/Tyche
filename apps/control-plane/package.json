@@ -11,7 +11,7 @@
     "tyche-control-plane": "./src/cli.mjs"
   },
   "scripts": {
-    "check": "node --check src/control-plane.mjs && node --check src/cli.mjs",
+    "check": "node --check src/control-plane.mjs && node --check src/cli.mjs && node --check src/paper-scene.mjs && node --check ../../scripts/control-paper-scene.mjs && node --check src/conversations.mjs",
     "test": "node --test test/*.test.mjs",
     "start": "node src/cli.mjs"
   },

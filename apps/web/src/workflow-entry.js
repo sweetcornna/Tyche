@@ -1,5 +1,5 @@
 import { normalizeConnectionEndpoint } from '../../../packages/pi-agents/src/connection-endpoint.mjs'
-export { normalizeConnectionEndpoint } from '../../../packages/pi-agents/src/connection-endpoint.mjs'
+export { normalizeConnectionEndpoint, inferConnectionProtocol } from '../../../packages/pi-agents/src/connection-endpoint.mjs'
 
 export const PAPER_FIELDS = Object.freeze([
   { key: 'initial_usdt', label: '初始模拟资金', unit: 'USDT', group: '模拟资金' },

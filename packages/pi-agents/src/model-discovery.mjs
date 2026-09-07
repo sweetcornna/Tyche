@@ -46,7 +46,7 @@ export async function discoverSessionModels({ endpoint, protocol, apiKey, lookup
     if (controller.signal.aborted) fail('PI_MODEL_CATALOG_TIMEOUT')
     const request = createRestrictedSessionFetch({ endpoint: normalized, lookup, fetchImpl })
     const response = await request(`${normalized}${protocol === 'anthropic-messages' ? '/v1/models' : '/models'}`, { method: 'GET', headers: protocol === 'anthropic-messages' ? { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', accept: 'application/json' } : { authorization: `Bearer ${apiKey}`, accept: 'application/json' }, signal: controller.signal })
-    if (!response.ok) { await response.body?.cancel().catch(() => {}); fail(response.status === 401 || response.status === 403 ? 'PI_MODEL_CATALOG_AUTH_FAILED' : response.status === 404 ? 'PI_MODEL_CATALOG_UNAVAILABLE' : 'PI_MODEL_CATALOG_REQUEST_FAILED') }
+    if (!response.ok) { await response.body?.cancel().catch(() => {}); fail(response.status === 401 || response.status === 403 ? 'PI_MODEL_CATALOG_AUTH_FAILED' : response.status === 429 ? 'PI_MODEL_CATALOG_RATE_LIMITED' : response.status === 404 || response.status === 405 ? 'PI_MODEL_CATALOG_UNAVAILABLE' : 'PI_MODEL_CATALOG_REQUEST_FAILED') }
     if (!/^application\/(?:[a-z0-9.-]+\+)?json(?:\s*;|$)/iu.test(response.headers.get('content-type') || '')) { await response.body?.cancel().catch(() => {}); fail('PI_MODEL_CATALOG_SCHEMA_INVALID') }
     const length = response.headers.get('content-length')
     if (length !== null && (!/^\d+$/u.test(length) || Number(length) > MAX_BYTES)) { await response.body?.cancel().catch(() => {}); fail('PI_MODEL_CATALOG_TOO_LARGE') }

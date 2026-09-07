@@ -55,6 +55,18 @@ both, serializes initialization, rejects symbolic links and conflicting existing
 state, and never enables venue submission. Its DTO exposes settings and readiness,
 not raw account or ledger data. Custom startup files are never rewritten.
 
+The authenticated read-only `GET /api/paper/scene` route has a separate explicit
+allowlist DTO for local Paper visualization. It validates the hash-chained fixed
+active Paper file, exposes up to two position summaries, twenty active orders and
+fifty bounded display events, and retains decimal amounts as strings. It rejects
+all query parameters and never accepts a path or venue. The server omits account
+identity, raw ledger objects, proof material and source IDs, and performs exact
+session-secret redaction after projection. The general projection filter remains
+unchanged. The scene endpoint neither writes files nor fetches market data, and
+its data is not added to model prompts. Stale/missing valuation is explicitly
+represented rather than being converted to zero. GLB/PNG/WebP assets are served
+under the existing static path, symlink, same-origin and CSP checks.
+
 Session model credentials remain in memory. Main discussion uses the same
 restricted provider transport with no tools. The only added model context is a
 safe Paper settings DTO, current strategy/model/effort/theme, and a bounded
@@ -106,10 +118,22 @@ OpenAI base URLs exclude the operation suffix; Anthropic base URLs also exclude 
 trailing `/v1`. The shared normalizer checks original URL text before WHATWG URL parsing and
 removes only the explicitly selected protocol’s standard operation suffix. Bare
 hosts gain HTTPS; an OpenAI root gains `/v1`; explicit gateway prefixes stay intact.
-A changed connection clears the browser’s typed key; canonical equivalents can
-reuse a saved key. Native SDKs generate paths and authentication
+Connection fields are submitted explicitly; editing an address does not discard an
+unsaved typed key. Saved keys remain server-side and cannot be reused for a different
+endpoint or protocol without explicitly supplying that connection’s key. Canonical
+equivalents can reuse a saved key. Native SDKs generate paths and authentication
 headers; all three retain the same HTTPS/public-DNS or exact HTTP-loopback,
 origin/path-prefix and redirect restrictions.
+
+When system DNS returns only synthetic `198.18.0.0/15` answers for a hostname,
+Tyche independently resolves A and AAAA through certificate-verified DNS-over-HTTPS
+at the fixed `https://1.1.1.1/dns-query` endpoint. This request carries only the
+hostname, never API credentials. Private, mixed, literal benchmark, malformed or
+unverified addresses stay rejected. Results are bounded and cached for 30 seconds.
+The request socket is pinned to the validated addresses while the original Host
+and TLS server name remain intact; it does not perform a second system DNS lookup.
+Redirects still cannot receive credentials. DNS, TLS, connection, authentication
+and rate-limit failures use separate fixed diagnostics.
 
 Anthropic accepts only native adaptive models from the pinned SDK directory and
 efforts expressible unchanged. Unknown aliases, GPT identities, budget-based
@@ -178,3 +202,18 @@ opaque confirmation ID, endpoint and credential binding never enter model prompt
 Catalog expiry removes listing evidence while preserving declarations for the
 confirmed connection; different credentials, endpoints or protocols cannot inherit
 them. Pending-connection declarations cannot authorize inference on the old connection.
+
+### Desktop conversation history
+
+The full control-plane CLI retains bounded messages in the fixed ignored file
+`data/control/conversations.json`, mode 0600. API requests cannot supply a file
+path or account selector. Reads validate schema, size, permissions and symlink
+ancestors; updates use revision checks, a file lock and atomic replacement.
+History endpoints require the existing session and CSRF protections. Only
+whitelisted metadata and validated messages are returned. Credential patterns
+and active connection secrets cannot be persisted as conversation content.
+An unsaved validated reply remains in the active server session with an explicit
+retry-save state; settings already committed are never represented as rolled back.
+History survives a fresh login, but credentials and configuration drafts retain
+their original session lifetime. Cancellation aborts the SDK and rejects late
+results before settings or history writes. Progress events are session-scoped.

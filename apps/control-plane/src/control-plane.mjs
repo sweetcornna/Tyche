@@ -4,6 +4,8 @@ import net from 'node:net'
 import path from 'node:path'
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { URL } from 'node:url'
+import { createConversationStore, containsCredentialPattern } from './conversations.mjs'
+import { paperSceneDto } from './paper-scene.mjs'
 import { WebSocketServer, WebSocket } from 'ws'
 import { containsSessionSecret, SESSION_MODEL_IDS, DEFAULT_SESSION_POOL, validateSessionPool, sessionPoolMetadata, sessionProtocolModels, validateSessionRoleModels, effectiveSessionRoleModels, validateSessionRoleEfforts, effectiveSessionRoleEfforts, assertSessionModelEffort } from '../../../packages/pi-agents/src/session-provider.mjs'
 import { normalizeConnectionEndpoint } from '../../../packages/pi-agents/src/connection-endpoint.mjs'
@@ -40,6 +42,9 @@ const STATIC_MIME = Object.freeze({
   '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml',
+  '.glb': 'model/gltf-binary',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
   '.ico': 'image/x-icon'
 })
 
@@ -79,6 +84,10 @@ const PROVIDER_VALIDATION_MESSAGES = Object.freeze({
   PI_SESSION_ENDPOINT_HOST_FORBIDDEN: 'API 基础地址的主机不受支持。本机服务请使用明确的回环 IP 地址。',
   PI_SESSION_ENDPOINT_HTTP_FORBIDDEN: '远程模型服务必须使用 HTTPS；HTTP 仅允许明确的本机回环 IP 地址。',
   PI_SESSION_ENDPOINT_PROTOCOL_FORBIDDEN: 'API 基础地址协议不受支持，请使用 HTTPS；本机回环服务可使用 HTTP。',
+  PI_SESSION_ENDPOINT_PROXY_DNS_FAILED: '检测到本机代理的虚拟 DNS，但公网解析未完成。请检查代理网络后重试；尚未发送 API Key。',
+  PI_SESSION_NETWORK_FAILED: '无法连接模型服务，请检查网络或代理后重试。',
+  PI_SESSION_TLS_FAILED: '模型服务的 HTTPS 证书验证失败，请检查服务地址或代理证书。',
+  PI_MODEL_CATALOG_RATE_LIMITED: '服务商暂时限流，请稍后重试。',
   PI_SESSION_ENDPOINT_DNS_FAILED: '无法解析模型服务域名，请检查 API 基础地址及运行 Tyche 的本机 DNS 设置。',
   PI_SESSION_ENDPOINT_NOT_PUBLIC: '模型服务地址未通过公网地址校验。远程服务须使用仅解析到公网地址的 HTTPS 地址；本机服务可使用明确的 HTTP 回环地址。',
   PI_SESSION_MODEL_NOT_ALLOWED: '所选模型不在当前模型池中，请检查模型配置。',
@@ -337,6 +346,7 @@ export function createControlPlane(options = {}) {
   if (!Number.isInteger(requestedSweepMs) || requestedSweepMs < 10 || requestedSweepMs > 60_000) fail('CONTROL_SESSION_SWEEP_INVALID', 'Session sweep interval must be between 10 and 60000 milliseconds')
   const staticRoot = options.staticRoot === undefined ? null : validStaticRoot(options.staticRoot)
   const adapter = isObject(options.adapters) ? options.adapters : {}
+  const conversations = options.conversationStore || createConversationStore({ now })
   const configuredSockets = options.executorSockets || {}
   if (!isObject(configuredSockets)) fail('CONTROL_SOCKET_CONFIG_INVALID', 'Executor sockets must be server configuration')
   for (const key of Object.keys(configuredSockets)) {
@@ -510,6 +520,7 @@ export function createControlPlane(options = {}) {
   function deleteSession(sessionId, reason) {
     const session = sessions.get(sessionId)
     if (!session) return false
+    session.discussionJob?.controller.abort()
     clearProvider(session, reason)
     session.strategy = ''
     session.discussion = []
@@ -517,7 +528,7 @@ export function createControlPlane(options = {}) {
     session.roleEfforts = {}
     session.settingsDraft = {}
     session.preferences = ''
-    session.theme = 'light'
+    session.theme = 'night'
     session.settingsResult = null
     delete session.modelPool
     delete session.modelMode
@@ -583,11 +594,11 @@ export function createControlPlane(options = {}) {
       const session = requireSession(request, request.method !== 'GET')
       const body = request.method === 'POST' ? await readJsonBody(request) : null
       const result = await dispatchHttp(url, request.method || 'GET', body, session)
-      const explicitDto = ['/api/provider', '/api/provider/clear', '/api/provider/discover', '/api/paper/setup', '/api/strategy', '/api/strategy/discuss', '/api/models'].includes(url.pathname)
+      const explicitDto = ['/api/provider', '/api/provider/clear', '/api/provider/discover', '/api/paper/setup', '/api/paper/scene', '/api/strategy', '/api/strategy/discuss', '/api/strategy/cancel', '/api/conversations', '/api/chat/model', '/api/ui', '/api/models'].includes(url.pathname)
       const headers = url.pathname === '/api/logout' && request.method === 'POST'
         ? { 'Set-Cookie': `${sessionCookieName()}=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0${request.socket.encrypted ? '; Secure' : ''}` }
         : {}
-      sendJson(response, 200, explicitDto ? result : safeOutput(result), headers, { sensitive: explicitDto })
+      sendJson(response, 200, explicitDto ? (url.pathname === '/api/paper/scene' ? redactExact(result, activeOutputSecrets()) : result) : safeOutput(result), headers, { sensitive: explicitDto })
     } catch (error) {
       const failure = safeError(error)
       sendJson(response, error instanceof ControlPlaneError ? error.status : 500, safeOutput({ ok: false, code: failure.code, message: failure.message }))
@@ -741,7 +752,7 @@ export function createControlPlane(options = {}) {
     session.discoveryRequests = (session.discoveryRequests || []).filter((at) => current - at < 60_000)
     if (session.discoveryRequests.length >= 12) { candidate.apiKey.fill(0); fail('CONTROL_MODEL_CATALOG_RATE_LIMIT', '检测过于频繁，请稍后重试。', 429) }
     session.discoveryRequests.push(current)
-    if (containsSessionSecret([candidate.protocol, session.strategy || '', session.discussion || [], poolFor(session), session.declaredModelPool || [], session.settingsDraft || {}, session.preferences || '', session.roleModels || {}, session.roleEfforts || {}, session.allocationReasons || {}, session.settingsResult || {}], { apiKey: candidate.apiKey.toString('utf8'), endpoint: candidate.endpoint })) { candidate.apiKey.fill(0); fail('CONTROL_STRATEGY_SECRET', '连接凭据与会话内容冲突；未保存连接。', 400) }
+    if (containsSessionSecret([candidate.protocol, historyCall(() => conversations.allText()), session.strategy || '', session.discussion || [], poolFor(session), session.declaredModelPool || [], session.settingsDraft || {}, session.preferences || '', session.roleModels || {}, session.roleEfforts || {}, session.allocationReasons || {}, session.settingsResult || {}], { apiKey: candidate.apiKey.toString('utf8'), endpoint: candidate.endpoint })) { candidate.apiKey.fill(0); fail('CONTROL_STRATEGY_SECRET', '连接凭据与会话内容冲突；未保存连接。', 400) }
     let committed = false
     session.providerBusy = true
     try {
@@ -892,16 +903,34 @@ export function createControlPlane(options = {}) {
   function boundedStrategy(value, session, { empty = false } = {}) {
     if (typeof value !== 'string' || (!empty && !value.trim()) || value.length > STRATEGY_LIMIT || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value)) fail('CONTROL_STRATEGY_INVALID', '策略文本须为 1–8000 字符。', 400)
     const secrets = activeOutputSecrets()
-    if (secrets.some((secret) => value.includes(secret))) fail('CONTROL_STRATEGY_SECRET', '策略和讨论不能包含连接凭据。', 400)
+    if (containsCredentialPattern(value) || secrets.some((secret) => value.includes(secret))) fail('CONTROL_STRATEGY_SECRET', '策略和讨论不能包含连接凭据。', 400)
     return value
   }
 
+  function historyCall(fn) {
+    try { return fn() } catch (error) { const code = ['CONTROL_HISTORY_INVALID', 'CONTROL_HISTORY_LIMIT', 'CONTROL_HISTORY_NOT_FOUND', 'CONTROL_HISTORY_CONFLICT'].includes(error?.code) ? error.code : 'CONTROL_HISTORY_UNAVAILABLE'; fail(code, ({ CONTROL_HISTORY_INVALID: '本地对话历史损坏，原文件已保留。', CONTROL_HISTORY_LIMIT: '对话历史已达到容量限制。', CONTROL_HISTORY_NOT_FOUND: '对话不存在。', CONTROL_HISTORY_CONFLICT: '对话已在另一处更新，请刷新后重试。' })[code] || '对话历史暂时无法保存，请重试。', 409) }
+  }
+  function activeConversation(session) {
+    if (session.unsavedHistory) return session.unsavedHistory.conversation
+    if (!session.conversationId) session.conversationId = (conversations.persistent && historyCall(() => conversations.list()).filter((row) => !row.archived).sort((a, b) => b.updated_at - a.updated_at)[0]?.id) || historyCall(() => conversations.create()).id
+    return historyCall(() => conversations.get(session.conversationId))
+  }
   function strategyDto(session) {
-    return { prompt: session.strategy || '', scope: 'session', theme: session.theme || 'light', draft: structuredClone(session.settingsDraft || {}), preferences: session.preferences || '', settings_result: session.settingsResult || null, discussion: (session.discussion || []).map(({ role, content }) => ({ role, content })) }
+    const conversation = activeConversation(session)
+    return { prompt: session.strategy || '', scope: 'session', theme: session.theme || 'night', draft: structuredClone(session.settingsDraft || {}), preferences: session.preferences || '', settings_result: session.settingsResult || null, discussion: conversation.messages, conversation: { id: conversation.id, title: conversation.title, revision: conversation.revision, model: conversation.model || null, effort: conversation.effort || null }, conversations: session.unsavedHistory?.items || historyCall(() => conversations.list()), history_warning: session.unsavedHistory ? '回复已生成，本地历史尚未保存。请重试保存，避免退出后丢失。' : null }
+  }
+  function discussionProgress(session, phase) {
+    const job = session.discussionJob
+    if (!job) return
+    const packet = JSON.stringify({ type: 'discussion_progress', data: { request_id: job.id, conversation_id: job.conversationId, phase } })
+    for (const client of clients) if (clientSessions.get(client) === session.id && client.readyState === WebSocket.OPEN) client.send(packet)
   }
 
   async function discussStrategy(session, body) {
-    exactBody(body, ['message', 'allocate'], ['message'])
+    exactBody(body, ['message', 'allocate', 'request_id'], ['message'])
+    if (body.request_id !== undefined && (typeof body.request_id !== 'string' || !/^[a-f0-9-]{36}$/.test(body.request_id))) fail('CONTROL_BODY_FIELD_INVALID', '请求标识无效。', 400)
+    if (body.request_id && session.cancelledDiscussions?.has(body.request_id)) fail('CONTROL_STRATEGY_CANCELLED', '已停止生成。', 409)
+    if (session.unsavedHistory) fail('CONTROL_HISTORY_UNSAVED', '请先保存上一条回复。', 409)
     if (body.allocate !== undefined && body.allocate !== true) fail('CONTROL_BODY_FIELD_INVALID', 'allocate 只能为 true。', 400)
     if (body.allocate && session.modelMode === 'manual') fail('CONTROL_MODEL_MANUAL', '手动模式保留你的选择；请先切换自动模式。', 409)
     const message = boundedStrategy(body.message, session)
@@ -915,26 +944,38 @@ export function createControlPlane(options = {}) {
     const source = session.providerConfig
     requireDeclaredCustomPool(session, poolFor(session), source)
     if (containsSessionSecret({ message, prompt: session.strategy || '', history: session.discussion || [], roleEfforts: session.roleEfforts || {}, settingsDraft: session.settingsDraft || {}, preferences: session.preferences || '', modelPool: poolFor(session), bootstrap: bootstrapFor(session), allocationReasons: session.allocationReasons || {} }, { apiKey: source.apiKey.toString('utf8'), endpoint: source.endpoint })) fail('CONTROL_STRATEGY_SECRET', '策略和讨论不能包含连接凭据。', 400)
+    const conversation = activeConversation(session)
+    const historyItems = historyCall(() => conversations.list())
+    if (conversation.archived) fail('CONTROL_HISTORY_CONFLICT', '请先恢复归档的对话。', 409)
+    const controller = new AbortController()
+    session.discussionJob = { id: body.request_id || randomUUID(), conversationId: conversation.id, controller }
     const key = Buffer.from(source.apiKey)
     const effectiveModels = roleSelections(session)
     const effectiveEfforts = effectiveSessionRoleEfforts(session.roleEfforts)
-    const chat = modelsDto(session).chat
-    const runtime = Object.freeze({ provider: source.provider, protocol: source.protocol, model: chat.model, effort: chat.effort, endpoint: source.endpoint, apiKey: key, modelPool: poolFor(session) })
-    const history = (session.discussion || []).slice(-8).map(({ role, content }) => ({ role, content }))
+    const chat = conversation.model ? { model: conversation.model, effort: conversation.effort } : modelsDto(session).chat
+    try { assertSessionModelEffort(chat.model, chat.effort, poolFor(session), protocolFor(session)) } catch { key.fill(0); delete session.discussionJob; fail('CONTROL_MODEL_EFFORT_UNSUPPORTED', '请在输入框选择当前连接可用的模型与推理强度。', 400) }
+    const runtime = Object.freeze({ provider: source.provider, protocol: source.protocol, model: chat.model, effort: chat.effort, endpoint: source.endpoint, apiKey: key, modelPool: poolFor(session), signal: controller.signal })
+    const history = conversation.messages.slice(-8).map(({ role, content }) => ({ role, content }))
     session.providerBusy = true
     let expectedSource = source
     try {
-      const ensureActive = () => { if (sessions.get(session.id) !== session || !Number.isFinite(Number(now())) || Number(now()) >= session.expiresAt || session.providerConfig !== expectedSource) fail('CONTROL_SESSION_REQUIRED', '会话已失效，请重新登录。', 401) }
+      const ensureActive = () => { if (sessions.get(session.id) !== session || Number(now()) >= session.expiresAt) fail('CONTROL_SESSION_REQUIRED', '会话已失效，请重新登录。', 401); if (controller.signal.aborted) fail('CONTROL_STRATEGY_CANCELLED', '已停止生成。', 409); if (historyCall(() => conversations.get(conversation.id)).revision !== conversation.revision) fail('CONTROL_HISTORY_CONFLICT', '对话已更新，请重试。', 409); if (sessions.get(session.id) !== session || !Number.isFinite(Number(now())) || Number(now()) >= session.expiresAt || session.providerConfig !== expectedSource) fail('CONTROL_SESSION_REQUIRED', '会话已失效，请重新登录。', 401) }
       const setupContext = typeof adapter.paperSetupStatus === 'function' ? await paperSetupCall('paperSetupStatus') : { ready: false, status: 'blocked', values: {}, missing: [], message: '模拟设置暂不可用。' }
       ensureActive()
+      discussionProgress(session, 'generating')
       let result
-      try { result = await adapter.discussStrategy({ message, prompt: session.strategy || '', history, roleModels: effectiveModels, roleEfforts: effectiveEfforts, setupContext, settingsDraft: structuredClone(session.settingsDraft || {}), preferences: session.preferences || '', theme: session.theme || 'light', modelPool: poolFor(session), modelMode: session.modelMode || 'auto', allocationRequested: body.allocate === true, allocationState: allocationState(session), modelCatalog: catalogDto(session, true), modelDeclarations: declarationPoolFor(session) }, runtime) } catch (error) {
+      const cancelled = new Promise((_, reject) => controller.signal.addEventListener('abort', () => reject(new ControlPlaneError('CONTROL_STRATEGY_CANCELLED', '已停止生成。', 409)), { once: true }))
+      try { result = await Promise.race([adapter.discussStrategy({ message, prompt: session.strategy || '', history, roleModels: effectiveModels, roleEfforts: effectiveEfforts, setupContext, settingsDraft: structuredClone(session.settingsDraft || {}), preferences: session.preferences || '', theme: session.theme || 'night', modelPool: poolFor(session), modelMode: session.modelMode || 'auto', allocationRequested: body.allocate === true, allocationState: allocationState(session), modelCatalog: catalogDto(session, true), modelDeclarations: declarationPoolFor(session) }, runtime), cancelled]) } catch (error) {
+        if (sessions.get(session.id) !== session || Number(now()) >= session.expiresAt) fail('CONTROL_SESSION_REQUIRED', '会话已失效，请重新登录。', 401)
+        if (controller.signal.aborted) fail('CONTROL_STRATEGY_CANCELLED', '已停止生成。', 409)
         if (error?.code === 'PI_STRATEGY_MODELS_INVALID') fail('CONTROL_ROLE_MODELS_INVALID', '模型建议含不支持的角色或模型，请使用设置中列出的模型。', 502)
         fail('CONTROL_STRATEGY_FAILED', '策略讨论未完成，请检查模型连接后重试。', 502)
       }
       if (sessions.get(session.id) !== session || Number(now()) >= session.expiresAt) fail('CONTROL_SESSION_REQUIRED', '会话已失效，请重新登录。', 401)
+      ensureActive()
+      discussionProgress(session, 'validating')
       // Exact DTO and secret checks run before any chat state is retained.
-      if (containsSessionSecret(result, { apiKey: key.toString('utf8'), endpoint: source.endpoint })) fail('CONTROL_STRATEGY_SECRET', '模型返回了连接凭据，结果已丢弃。', 502)
+      if (containsCredentialPattern(JSON.stringify(result)) || containsSessionSecret(result, { apiKey: key.toString('utf8'), endpoint: source.endpoint })) fail('CONTROL_STRATEGY_SECRET', '模型返回了连接凭据，结果已丢弃。', 502)
       const selectedModelSettings = result?.model_settings ?? (result?.intent === 'configure' && result.apply_fields?.includes('model_settings') ? session.settingsDraft?.model_settings : undefined)
       const responsePool = selectedModelSettings?.pool || poolFor(session)
       try { validateConversationOutput(result, responsePool) } catch { fail('CONTROL_SETTINGS_INVALID', '模型返回的设置格式或数值无效；未应用修改，请重新描述目标。', 502) }
@@ -989,7 +1030,7 @@ export function createControlPlane(options = {}) {
         const incomplete = hasPaper && setupContext.status !== 'blocked' && PAPER_SETUP_FIELDS.some((field) => !Object.hasOwn(paperValues, field))
         const configurationChanged = Boolean(modelCandidate && (modelCandidate.changedPool || modelCandidate.mode !== (session.modelMode || 'auto') || JSON.stringify(modelCandidate.bootstrap) !== JSON.stringify(bootstrapFor(session)))) || Object.keys(effectiveModels).some((role) => candidateModels[role] !== effectiveModels[role] || candidateEfforts[role] !== effectiveEfforts[role])
           || (draft.suggested_prompt !== undefined && draft.suggested_prompt !== (session.strategy || ''))
-          || (draft.theme !== undefined && draft.theme !== (session.theme || 'light'))
+          || (draft.theme !== undefined && draft.theme !== (session.theme || 'night'))
           || (hasPaper && (!setupContext.ready || Object.entries(paperValues).some(([field, value]) => !Object.hasOwn(setupContext.values, field) || comparePaperDecimal(value, setupContext.values[field]) !== 0)))
         const commit = () => {
           ensureActive()
@@ -998,7 +1039,7 @@ export function createControlPlane(options = {}) {
             session.strategy = draft.suggested_prompt ?? session.strategy ?? ''
             session.roleModels = models
             session.roleEfforts = efforts
-            session.theme = draft.theme || session.theme || 'light'
+            session.theme = draft.theme || session.theme || 'night'
           }
           if (roleWrite && result.allocation_reasons) { session.allocationPending = false; session.allocationSource = 'agent'; session.allocationReasons = { ...result.allocation_reasons } }
           else if (roleWrite && configurationChanged) { session.allocationSource = 'conversation'; session.allocationReasons = {} }
@@ -1047,13 +1088,22 @@ export function createControlPlane(options = {}) {
       if (application.status === 'failed') { questions.length = 0; questions.push('现有模拟账户不能覆盖。要保留现有限制继续讨论，还是先处理上述问题？') }
       const assumptions = result.assumptions || []
       if (application.status === 'applied' && !nextSetup.ready) application.message += ' Paper 尚未就绪，可继续描述模拟目标。'
-      const suffix = ['\n', ...assumptions.map((text) => `模拟假设：${text}`), application.message, ...questions].join('\n\n')
+      const suffix = ['\n', ...assumptions.map((text) => `模拟假设：${text}`), ...(intent === 'explain' ? [] : [application.message]), ...questions].join('\n\n').trimEnd()
       const content = reply.slice(0, STRATEGY_LIMIT - suffix.length) + suffix
       session.settingsResult = { ...application, assumptions }
-      session.discussion = [...history, { role: 'user', content: message }, { role: 'assistant', content }]
+      const turns = [{ role: 'user', content: message }, { role: 'assistant', content }]
+      try { session.discussion = historyCall(() => conversations.append(conversation.id, conversation.revision, turns)).messages }
+      catch {
+        // Settings may already be committed. Keep the validated reply and expose
+        // a separate retryable history failure instead of claiming rollback.
+        const pending = { ...conversation, messages: [...conversation.messages, ...turns.map((turn) => ({ id: randomUUID(), ...turn }))].slice(-100) }
+        session.unsavedHistory = { conversation: pending, items: historyItems, turns }
+        session.discussion = pending.messages
+      }
+      discussionProgress(session, 'complete')
       return { ...result, reply, suggested_prompt: suggested, questions, assumptions, application, settings: { ...strategyDto(session), models: modelsDto(session), paper: nextSetup } }
 
-    } finally { key.fill(0); if (sessions.get(session.id) === session) session.providerBusy = false }
+    } finally { key.fill(0); if (sessions.get(session.id) === session) { session.providerBusy = false; delete session.discussionJob } }
   }
 
   function boundedProjection(value, maxItems = 32, maxString = 256) {
@@ -1133,7 +1183,54 @@ export function createControlPlane(options = {}) {
 
   async function dispatchHttp(url, method, body, session) {
     const route = `${method} ${url.pathname}`
-    if (['/api/paper/setup', '/api/strategy', '/api/strategy/discuss', '/api/models'].includes(url.pathname) && url.search) fail('CONTROL_QUERY_UNKNOWN', 'This route does not accept a query', 400)
+    if (['/api/paper/setup', '/api/strategy', '/api/strategy/discuss', '/api/strategy/cancel', '/api/conversations', '/api/chat/model', '/api/ui', '/api/models'].includes(url.pathname) && url.search) fail('CONTROL_QUERY_UNKNOWN', 'This route does not accept a query', 400)
+    if (route === 'POST /api/strategy/cancel') {
+      exactBody(body, ['request_id'], ['request_id'])
+      if (typeof body.request_id !== 'string' || !/^[a-f0-9-]{36}$/.test(body.request_id)) fail('CONTROL_BODY_FIELD_INVALID', '请求标识无效。', 400)
+      session.cancelledDiscussions ||= new Set()
+      if (session.cancelledDiscussions.size >= 64) session.cancelledDiscussions.delete(session.cancelledDiscussions.values().next().value)
+      session.cancelledDiscussions.add(body.request_id)
+      const stopped = Boolean(session.discussionJob && session.discussionJob.id === body.request_id)
+      if (stopped) session.discussionJob.controller.abort()
+      return { stopped }
+    }
+    if (route === 'GET /api/conversations') return { items: historyCall(() => conversations.list()), active_id: session.conversationId || null }
+    if (route === 'POST /api/conversations') {
+      exactBody(body, ['action', 'id', 'title', 'pinned', 'archived', 'query'], ['action'])
+      if (body.action === 'search') { exactBody(body, ['action', 'query'], ['query']); if (typeof body.query !== 'string' || body.query.length > 200) fail('CONTROL_BODY_FIELD_INVALID', '搜索内容过长。', 400); return { items: historyCall(() => conversations.search(body.query)) } }
+      if (session.providerBusy) fail('CONTROL_PROVIDER_BUSY', '请先停止当前请求。', 409)
+      if (body.action === 'save') {
+        exactBody(body, ['action'])
+        if (session.unsavedHistory) { const pending = session.unsavedHistory; session.discussion = historyCall(() => conversations.append(pending.conversation.id, pending.conversation.revision, pending.turns)).messages; delete session.unsavedHistory }
+        return strategyDto(session)
+      }
+      if (session.unsavedHistory) fail('CONTROL_HISTORY_UNSAVED', '请先保存上一条回复。', 409)
+      if (body.action === 'create') { exactBody(body, ['action']); session.conversationId = historyCall(() => conversations.create()).id }
+      else if (body.action === 'select') { exactBody(body, ['action', 'id'], ['id']); session.conversationId = historyCall(() => conversations.get(body.id)).id }
+      else if (body.action === 'update') {
+        exactBody(body, ['action', 'id', 'title', 'pinned', 'archived'], ['id'])
+        const { action, id, ...patch } = body
+        if (patch.title !== undefined) boundedStrategy(patch.title, session)
+        historyCall(() => conversations.update(id, patch))
+      } else fail('CONTROL_BODY_FIELD_INVALID', '对话操作无效。', 400)
+      session.discussion = activeConversation(session).messages
+      return strategyDto(session)
+    }
+    if (route === 'POST /api/chat/model') {
+      exactBody(body, ['model', 'effort'], ['model', 'effort'])
+      if (session.providerBusy) fail('CONTROL_PROVIDER_BUSY', '请先停止当前请求。', 409)
+      if (session.unsavedHistory) fail('CONTROL_HISTORY_UNSAVED', '请先保存上一条回复。', 409)
+      try { assertSessionModelEffort(body.model, body.effort, poolFor(session), protocolFor(session)) } catch { fail('CONTROL_MODEL_EFFORT_UNSUPPORTED', '模型或推理强度不可用。', 400) }
+      historyCall(() => conversations.update(activeConversation(session).id, body))
+      return strategyDto(session)
+    }
+    if (route === 'POST /api/ui') {
+      exactBody(body, ['theme'], ['theme'])
+      if (!['light', 'night'].includes(body.theme)) fail('CONTROL_BODY_FIELD_INVALID', '主题无效。', 400)
+      if (session.providerBusy) fail('CONTROL_PROVIDER_BUSY', '请等待当前请求结束。', 409)
+      session.theme = body.theme
+      return { theme: session.theme }
+    }
     if (route === 'GET /api/models') return modelsDto(session)
     if (route === 'POST /api/models') {
       if (session.providerBusy) fail('CONTROL_PROVIDER_BUSY', '模型正在运行，请等待完成后再保存配置。', 409)
@@ -1209,6 +1306,11 @@ export function createControlPlane(options = {}) {
     if (route === 'GET /api/paper') {
       if (url.search) fail('CONTROL_QUERY_UNKNOWN', 'This route does not accept a query', 400)
       return adapterCall('paper')
+    }
+    if (route === 'GET /api/paper/scene') {
+      if (url.search) fail('CONTROL_QUERY_UNKNOWN', 'This route does not accept a query', 400)
+      try { return paperSceneDto(typeof adapter.paperScene === 'function' ? await adapter.paperScene() : null) }
+      catch { return paperSceneDto(null) }
     }
     if (route === 'GET /api/testnet') {
       if (url.search) fail('CONTROL_QUERY_UNKNOWN', 'This route does not accept a query', 400)
