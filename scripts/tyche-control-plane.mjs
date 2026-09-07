@@ -25,6 +25,8 @@ import {
 } from './tyche-cluster.mjs'
 import { rejectPiMutationCredentials, runPiAutomation } from './pi-automation.mjs'
 import { createPaperSetupAdapter } from './control-paper-setup.mjs'
+import { createConversationStore } from '../apps/control-plane/src/conversations.mjs'
+import { createPaperSceneAdapter } from './control-paper-scene.mjs'
 
 const FLAGS = new Set(['--port', '--provider', '--model', '--mode', '--config', '--testnet-venue'])
 const VENUES = new Set(['gate', 'binance'])
@@ -205,6 +207,7 @@ export async function startControlPlaneChild(rawOptions = {}) {
     host: LOOPBACK_HOST,
     port: options.port,
     discovery: { lookup: rawOptions.lookup, fetchImpl: rawOptions.fetchImpl },
+    conversationStore: createConversationStore(rawOptions.persistentHistory ? { file: path.resolve(CONFIG_ROOT, '../data/control/conversations.json') } : {}),
     ...(Object.hasOwn(rawOptions, 'bootstrapToken') ? { bootstrapToken: rawOptions.bootstrapToken } : {}),
     ...(Object.hasOwn(rawOptions, 'reusableBootstrapToken') ? { reusableBootstrapToken: rawOptions.reusableBootstrapToken } : {}),
     ...localBootstrapOptions,
@@ -218,11 +221,12 @@ export async function startControlPlaneChild(rawOptions = {}) {
       cycle: () => stateReader().recent_cycle || { status: 'empty' },
       dag: () => stateReader().dag,
       paper: () => stateReader().paper,
+      paperScene: createPaperSceneAdapter(),
       paperSetupStatus: paperSetup.status,
       setupPaper: paperSetup.setup,
       discussStrategy: async (input, runtime) => {
         const connection = { endpoint: runtime.endpoint, apiKey: runtime.apiKey.toString('utf8'), protocol: runtime.protocol, modelId: runtime.model, modelPool: runtime.modelPool, effort: runtime.effort, ...(rawOptions.lookup ? { lookup: rawOptions.lookup } : {}), ...(rawOptions.fetchImpl ? { fetchImpl: rawOptions.fetchImpl } : {}) }
-        try { return await discussSessionStrategy(input, connection, { runtimeFactory: providerRuntimeFactory }) } finally { connection.apiKey = ''; connection.endpoint = '' }
+        try { return await discussSessionStrategy(input, connection, { runtimeFactory: providerRuntimeFactory, signal: runtime.signal }) } finally { connection.apiKey = ''; connection.endpoint = '' }
       },
       validateProviderConfig: async (runtime) => {
         if (!runtime || runtime.provider !== SESSION_PROVIDER_ID || !(runtime.modelPool || SESSION_MODEL_IDS.map((id) => ({ id }))).some(({ id }) => id === runtime.model) || !Buffer.isBuffer(runtime.apiKey)) {
@@ -337,7 +341,7 @@ export async function startControlPlaneChild(rawOptions = {}) {
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   try {
     const args = parseControlPlaneArgs(process.argv)
-    await startControlPlaneChild(args)
+    await startControlPlaneChild({ ...args, persistentHistory: true })
   } catch (error) {
     process.stderr.write(`${error.code || 'CONTROL_CHILD_START_FAILED'}: ${String(error.message || error)}\n`)
     process.exitCode = 1

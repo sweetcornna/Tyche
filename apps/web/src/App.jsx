@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Icon } from './Icon.jsx'
+import { DesktopSidebar, IconButton, ResizeHandle, DetailPanel, Dialog, SearchDialog, Composer, ConversationView, useNarrowLayout } from './DesktopUI.jsx'
 import { ModelSettings } from './ModelSettings.jsx'
+import { SceneDock, SceneVisual } from './SceneDock.jsx'
+import { usePaperScene } from './usePaperScene.js'
+import { createComposerState, composeMessage, draftError } from './composer-state.js'
 import { controlApi, eventsUrl, isSessionFailure } from './api.js'
 import { WORKFLOW_NODES, deriveWorkflowState, normalizeWorkflowStatus } from './workflow.js'
-import { PAPER_FIELDS, CONNECTION_PROTOCOLS, createWorkflowRunner, saveConnection, discoveryRequest, normalizeConnectionEndpoint } from './workflow-entry.js'
+import { PAPER_FIELDS, CONNECTION_PROTOCOLS, createWorkflowRunner, saveConnection, discoveryRequest, normalizeConnectionEndpoint, inferConnectionProtocol } from './workflow-entry.js'
 
 export { WORKFLOW_NODES, deriveWorkflowState, normalizeWorkflowStatus } from './workflow.js'
 
@@ -48,8 +53,8 @@ function Tone({ value, label }) {
   return <span className={`tone tone-${statusTone(value)}`}><i />{label || statusLabel(value)}</span>
 }
 
-function SectionLabel({ children, hint }) {
-  return <div className="section-label"><span>{children}</span>{hint && <small>{hint}</small>}</div>
+function SectionLabel({ children }) {
+  return <div className="section-label"><span>{children}</span></div>
 }
 
 function Docket({ selected, workflow, onSelect }) {
@@ -57,7 +62,7 @@ function Docket({ selected, workflow, onSelect }) {
     const node = workflow.byRole[role]
     return <button key={role} type="button" className={`lane workflow-node ${selected === role ? 'selected' : ''} ${node.current ? 'current' : ''}`} data-role={role} data-status={node.status} aria-current={node.current ? 'step' : undefined} onClick={() => onSelect(role)}>
       <span className="lane-index">{String(index + 1).padStart(2, '0')}</span>
-      <span className="lane-name"><strong>{node.name}</strong><small>{node.role}</small></span>
+      <span className="lane-name"><strong>{node.name}</strong></span>
       <Tone value={node.status} label={node.statusLabel} />
     </button>
   }
@@ -65,7 +70,7 @@ function Docket({ selected, workflow, onSelect }) {
     <aside className="docket">
 
       <nav className="workflow-dag" aria-label="固定工作流导航">
-        <div className="workflow-summary"><SectionLabel hint="固定拓扑">工作流 DAG</SectionLabel><strong>{workflow.completedCount}/{workflow.totalCount} · {workflow.percent}%</strong><progress aria-label="工作流完成进度" max={workflow.totalCount} value={workflow.completedCount} /></div>
+        <div className="workflow-summary"><SectionLabel>工作流</SectionLabel><strong>{workflow.completedCount}/{workflow.totalCount} · {workflow.percent}%</strong><progress aria-label="工作流完成进度" max={workflow.totalCount} value={workflow.completedCount} /></div>
         <div className="workflow-stage sequential-stage">
           {nodeButton('orchestrator', 0)}
           {nodeButton('preflight', 1)}
@@ -84,7 +89,7 @@ function Docket({ selected, workflow, onSelect }) {
         <div className="workflow-stage sequential-stage final-stage">
           {nodeButton('reviewer', 5)}
         </div>
-        <div className="workflow-current"><span>当前阶段</span><strong>{workflow.currentStage}</strong><small>当前 Agent：{workflow.currentAgents.length ? workflow.currentAgents.map((role) => `${workflow.byRole[role].name}（${role}）`).join('、') : '暂无'}</small></div>
+        <div className="workflow-current"><span>当前阶段</span><strong>{workflow.currentStage}</strong></div>
       </nav>
 
     </aside>
@@ -93,65 +98,52 @@ function Docket({ selected, workflow, onSelect }) {
 
 function MessageStream({ messages }) {
   return <div className="message-stream" aria-live="polite">
-    {messages.length === 0 && <div className="empty-stream"><span className="empty-glyph">◌</span><p>事件流暂无消息</p><small>运行一个周期后，此处会显示受限的 agent 事件。</small></div>}
+    {messages.length === 0 && <div className="empty-stream">暂无事件</div>}
     {messages.map((message) => <div className={`message message-${message.kind}`} key={message.id}>
-      <div className="message-meta"><span>{message.label}</span><time>{formatTime(message.at)}</time></div>
+      <div className="message-meta"><span>{WORKFLOW_NODES.find((node) => node.role === message.label)?.name || message.label}</span><time>{formatTime(message.at)}</time></div>
       <p>{message.text}</p>
       {message.detail && <code>{message.detail}</code>}
     </div>)}
   </div>
 }
 
-function ProviderPanel({ provider, protocol, endpoint, apiKey, setProtocol, setEndpoint, setApiKey, onConnectionBlur, onDiscover, catalog, busy }) {
+function ProviderPanel({ provider, protocol, endpoint, apiKey, setProtocol, setEndpoint, setApiKey, onConnectionBlur, onDiscover, catalog, busy, error }) {
   const configured = provider?.configured === true
-  const selected = CONNECTION_PROTOCOLS.find(({ id }) => id === protocol) || CONNECTION_PROTOCOLS[0]
   return <section className="connection-section">
-    <div className="section-heading"><h2>模型连接</h2><Tone value={configured ? 'ready' : 'waiting'} label={configured ? '当前会话已连接' : '待填写'} /></div>
-    <label>API 协议<select value={protocol} disabled={busy} onChange={(event) => setProtocol(event.target.value)}>{CONNECTION_PROTOCOLS.map(({ id, label }) => <option key={id} value={id}>{label}</option>)}</select></label>
-    <p className="field-note">{selected.hint}</p>
+    <div className="section-heading"><h2>连接</h2><Tone value={configured ? 'ready' : 'waiting'} label={configured ? '已连接' : '未连接'} /></div>
     <div className="connection-fields">
-      <label>API endpoint<input type="text" value={endpoint} onBlur={onConnectionBlur} onChange={(event) => setEndpoint(event.target.value)} placeholder={selected.example} spellCheck="false" disabled={busy} /></label>
-      <label>API key<input type="password" value={apiKey} onBlur={onConnectionBlur} onChange={(event) => setApiKey(event.target.value)} autoComplete="new-password" spellCheck="false" disabled={busy} placeholder={configured ? '已保存；留空继续使用' : '填写模型 API key'} /></label>
+      <label>协议<select value={protocol} disabled={busy} onChange={(event) => setProtocol(event.target.value)}>{CONNECTION_PROTOCOLS.map(({ id, label }) => <option key={id} value={id}>{label}</option>)}</select></label>
+      <label>服务地址<input type="text" placeholder="https://api.example.com" value={endpoint} onBlur={onConnectionBlur} onChange={(event) => setEndpoint(event.target.value)} spellCheck="false" disabled={busy} /></label>
+      <label>API Key<input type="password" value={apiKey} onBlur={onConnectionBlur} onChange={(event) => setApiKey(event.target.value.trim())} autoComplete="new-password" spellCheck="false" disabled={busy} placeholder={configured ? '••••••••' : ''} /></label>
     </div>
-
-    <button type="button" className="quiet-action" onClick={onDiscover} disabled={busy}>重新检测模型</button>
-    <p className="field-note">{endpoint && `实际基础地址：${endpoint}`} 填完连接字段并离开输入框时检测；也可直接发送消息。目录不可用时可手动配置模型池后继续。</p>
+    <div className="connection-actions"><button type="button" className="primary-action" onClick={onDiscover} disabled={busy || !endpoint.trim() || (!configured && !apiKey.trim())}>{busy ? '连接中…' : configured ? '重新检测' : '连接'}<Icon name="arrow" /></button>{configured && <span className="connection-model">{provider.model}</span>}</div>
+    {error && <p className="form-error connection-error" role="alert">{error}</p>}
     {catalog && <CatalogSummary catalog={catalog} />}
-    <p className="field-note">API key 只保留在当前会话内，退出或重启服务后清除。模型需由你的 API 服务支持。</p>
   </section>
 }
 
 function CatalogSummary({ catalog }) {
-  return <section className="saved-models"><h3>服务商模型目录 · {catalog.entries.length} 项</h3><p className="field-note">{catalog.message}</p><p className="field-note">{catalog.selection_rule} 可用候选 {catalog.eligible_count} 项，未选入 {catalog.omitted_eligible_count} 项。目录有效至 {formatTime(catalog.expires_at)}。</p><details><summary>查看模型及 effort 来源</summary><dl>{catalog.entries.map((entry) => <div key={entry.id}><dt>{entry.id}</dt><dd>服务商已列出 · {entry.efforts.length ? entry.efforts.join(' / ') : 'effort 未知或当前协议不可用'} · {({ host_catalog: '本机能力目录', pinned_sdk: '固定 SDK 能力', user_declared: '用户明确声明', unknown: '未知能力' })[entry.capability_source]}</dd></div>)}</dl></details></section>
+  return <details className="saved-models"><summary>模型目录 · {catalog.entries.length}</summary><dl>{catalog.entries.map((entry) => <div key={entry.id}><dt>{entry.id}</dt><dd>{entry.efforts.length ? entry.efforts.join(' / ') : '—'}</dd></div>)}</dl></details>
 }
 
 function PaperSetup({ setup, draft }) {
-  if (!setup) return <p className="field-note">正在检查模拟设置…</p>
+  if (!setup) return <span role="status">加载中</span>
   const values = { ...draft?.paper_settings, ...setup.values }
   return <section className="saved-paper"><div className="section-heading"><h2>模拟设置</h2><Tone value={setup.status} label={setup.ready ? '已就绪' : setup.status === 'blocked' ? '需处理' : '待补充'} /></div>
     {setup.message && <p className="form-error">{setup.message}</p>}
-    {!setup.ready && <p className="field-note">告诉主 Agent 你的目标；不确定时可请它安排模拟起点。草稿不会创建账户。</p>}
-    <dl>{PAPER_FIELDS.map(({ key, label, unit }) => <div key={key}><dt>{label}</dt><dd>{values[key] ? `${values[key]} ${unit}${Object.hasOwn(setup.values, key) ? '' : ' · 草稿'}` : '待讨论'}</dd></div>)}</dl>
+    <dl>{PAPER_FIELDS.map(({ key, label, unit }) => <div key={key}><dt>{label}</dt><dd>{values[key] ? `${values[key]} ${unit}${Object.hasOwn(setup.values, key) ? '' : ' · 草稿'}` : '—'}</dd></div>)}</dl>
   </section>
 }
 
-function RunResult({ cycle, workflow, phase, busy }) {
+function RunResult({ cycle, workflow, phase, busy, compact, onDetails }) {
   const blocked = cycle?.ok === false || ['blocked', 'failed', 'error'].some((value) => [cycle?.outcome, cycle?.phase, cycle?.status].some((field) => String(field || '').toLowerCase() === value))
   const hasResult = Boolean(cycle?.outcome)
+  if (compact) return <button className={`run-status-strip ${blocked ? 'is-blocked' : ''}`} onClick={onDetails} aria-label="查看运行结果"><Icon name={busy ? 'workflow' : blocked ? 'close' : 'check'} /><span>Paper · {busy ? workflow.currentStage : blocked ? '运行受阻' : workflow.currentStage}</span><span className="run-mini-track" aria-hidden="true">{workflow.nodes.map((node) => <i key={node.role} data-status={node.status} />)}</span><span>{workflow.completedCount}/{workflow.totalCount}</span><Icon name="chevron" /></button>
   return <section className="run-result" aria-live="polite"><div className="section-heading"><h2>{busy ? phase : blocked ? '运行已阻断' : hasResult ? '运行结果' : '运行进度'}</h2><Tone value={blocked ? 'blocked' : cycle?.outcome || 'waiting'} /></div>
     <progress aria-label="工作流完成进度" max={workflow.totalCount} value={workflow.completedCount} /><div className="progress-copy"><span>{workflow.currentStage}</span><span>{workflow.completedCount}/{workflow.totalCount}</span></div>
-    <p>当前 Agent：{workflow.currentAgents.length ? workflow.currentAgents.map((role) => workflow.byRole[role].name).join('、') : '暂无'}</p>
-    {hasResult && <p>{cycle.reused ? '已复用同周期结果；新策略将在下一有效周期使用。' : statusLabel(cycle.outcome)}{cycle.date ? ' · ' + cycle.date + ' UTC' : ''}</p>}
+    {cycle.reused && <span className="run-reused">已复用</span>}
     {blocked && <div className="cycle-blocker" role="alert"><dl><div><dt>阶段</dt><dd>{compactValue(cycle.blocked_stage)}</dd></div><div><dt>代码</dt><dd>{compactValue(cycle.code)}</dd></div><div><dt>说明</dt><dd>{compactValue(cycle.message)}</dd></div></dl></div>}
   </section>
-}
-
-function AgentSidebar({ workflow, models, selected, onSelect, onChat, onSettings }) {
-  return <aside className="agent-sidebar"><div className="brand-lockup"><span className="brand-mark">τ</span><strong>Tyche</strong></div>
-    <nav className="workspace-nav" aria-label="工作台导航"><button type="button" className="nav-current" onClick={onChat}>主 Agent</button><button type="button" onClick={onSettings}>运行设置</button></nav>
-    <div className="sidebar-label">工作流 Agent</div><nav className="agent-list" aria-label="固定六个 Agent">{WORKFLOW_NODES.map(({ role, name }) => <button type="button" key={role} className={selected === role ? 'selected' : ''} onClick={() => onSelect(role)} data-role={role} data-status={workflow.byRole[role].status}><span className="agent-row"><strong>{name}</strong><Tone value={workflow.byRole[role].status} label={workflow.byRole[role].statusLabel} /></span><span className="agent-model">{models.effective_models[role]} · {models.effective_efforts[role]}</span></button>)}</nav>
-    <div className="sidebar-foot"><span>BTC / ETH</span><span>Paper · 单次运行</span></div>
-  </aside>
 }
 
 function compactValue(value) {
@@ -162,7 +154,11 @@ function compactValue(value) {
 
 function Login({ onLogin, onResume, busy, canResume, error }) {
   const [token, setToken] = useState('')
-  return <main className="login-shell"><div className="login-card"><span className="brand-mark large">τ</span><h1>登录 Tyche</h1><p className="login-copy">请输入本机配置的固定 token，或本地服务打印的临时 bootstrap token。本页面不会存储该凭据。</p><form onSubmit={(event) => { event.preventDefault(); onLogin(token) }}><label>bootstrap token<input autoFocus value={token} onChange={(event) => setToken(event.target.value)} type="password" spellCheck="false" disabled={busy} /></label><button type="submit" className="primary-action" disabled={busy || !token.trim()}>{busy ? '正在确认会话…' : '进入工作台'}</button></form>{canResume && <button type="button" className="quiet-action" onClick={onResume} disabled={busy}>恢复当前会话</button>}{error && <p className="form-error" role="alert">{error}</p>}</div></main>
+  return <main className="login-shell theme-night">
+    <header className="login-brand"><div className="brand-lockup"><span className="brand-mark">τ</span><strong>Tyche</strong></div></header>
+    <section className="login-showcase" aria-hidden="true"><div className="login-scene"><SceneVisual decorative /></div></section>
+    <section className="login-card"><h1>登录</h1><form onSubmit={(event) => { event.preventDefault(); onLogin(token) }}><label>工作台口令<input autoFocus value={token} onChange={(event) => setToken(event.target.value)} type="password" spellCheck="false" disabled={busy} /></label><button type="submit" className="primary-action" disabled={busy || !token.trim()}>{busy ? '登录中' : '进入'}<Icon name="arrow" /></button></form>{canResume && <button type="button" className="quiet-action" onClick={onResume} disabled={busy}>恢复会话</button>}{error && <p className="form-error" role="alert">{error}</p>}</section>
+  </main>
 }
 
 export function App() {
@@ -174,13 +170,44 @@ export function App() {
   const [selected, setSelected] = useState('orchestrator')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
-  const [theme, setTheme] = useState('light')
+  const [theme, setTheme] = useState('night')
   const [status, setStatus] = useState({ service: 'connecting' })
   const [provider, setProvider] = useState(EMPTY_PROVIDER)
   const [connectionDraft, setConnectionDraft] = useState({ protocol: CONNECTION_PROTOCOLS[0].id, endpoint: '', apiKey: '', model: DEFAULT_MODEL, dirty: false })
   const { protocol: providerProtocol, endpoint: providerEndpoint, apiKey: providerApiKey, model: providerModel } = connectionDraft
   const [providerBusy, setProviderBusy] = useState(false)
+  const [connectionError, setConnectionError] = useState('')
   const [panel, setPanel] = useState(null)
+  const [conversations, setConversations] = useState([])
+  const [conversation, setConversation] = useState(null)
+  const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 900)
+  const [sidebarWidth, setSidebarWidth] = useState(275)
+  const [detailWidth, setDetailWidth] = useState(420)
+  const [archivedView, setArchivedView] = useState(false)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchResults, setSearchResults] = useState({ query: '', items: [], status: 'loading' })
+  const [renameTarget, setRenameTarget] = useState(null)
+  const [renameTitle, setRenameTitle] = useState('')
+  const [renameError, setRenameError] = useState('')
+  const [conversationBusy, setConversationBusy] = useState(false)
+  const [sceneMode, setSceneMode] = useState('workflow')
+  const [pendingMessage, setPendingMessage] = useState(null)
+  const [messageError, setMessageError] = useState(null)
+  const [historyWarning, setHistoryWarning] = useState(null)
+  const [motion, setMotion] = useState(true)
+  const searchRevision = useRef(0)
+  const composerState = useRef(createComposerState())
+  const [draftTick, setDraftTick] = useState(0)
+  const conversationRef = useRef(conversation)
+  conversationRef.current = conversation
+  const narrow = useNarrowLayout()
+  const updateDraft = (patch, id = conversationRef.current?.id) => { composerState.current.update(id, patch); setDraftTick((v) => v + 1) }
+  const currentDraft = composerState.current.draft(conversation?.id)
+  const composerEpoch = composerState.current.epoch
+  const discussionMessage = currentDraft.text
+  const setDiscussionMessage = (next) => { const old = composerState.current.draft(conversationRef.current?.id); updateDraft({ text: typeof next === 'function' ? next(old.text) : next }) }
+  useEffect(() => { if (narrow) setSidebarOpen(false) }, [narrow])
+  useEffect(() => { const update = () => setDraftTick((v) => v + 1); document.addEventListener('visibilitychange', update); return () => document.removeEventListener('visibilitychange', update) }, [])
   const [modelConfig, setModelConfig] = useState(EMPTY_MODELS)
   const [settingsResult, setSettingsResult] = useState(null)
   const [settingsDraft, setSettingsDraft] = useState({})
@@ -189,7 +216,6 @@ export function App() {
   const [phase, setPhase] = useState('')
   const [appliedStrategy, setAppliedStrategy] = useState('')
   const [discussion, setDiscussion] = useState([])
-  const [discussionMessage, setDiscussionMessage] = useState('')
   const [cycle, setCycle] = useState({ status: 'idle' })
   const [dag, setDag] = useState(EMPTY_DAG)
   const [paper, setPaper] = useState({ status: 'paper-only' })
@@ -212,13 +238,10 @@ export function App() {
     connectionDraftRef.current = next
     setConnectionDraft(next)
   }, [])
-  const connectionIdentity = (draft) => {
-    try { return `${draft.protocol}:${normalizeConnectionEndpoint(draft.endpoint, draft.protocol)}` } catch { return null }
-  }
   const editConnection = (changes) => {
     const before = connectionDraftRef.current
     const next = { ...before, ...changes }
-    if (next.protocol !== before.protocol || ('endpoint' in changes && before.endpoint !== next.endpoint && (!connectionIdentity(before) || connectionIdentity(before) !== connectionIdentity(next)))) next.apiKey = ''
+    setConnectionError('')
     connectionRevisionRef.current++; discoveryAttemptRef.current = null
     updateConnectionDraft({ ...next, dirty: true })
     setModelConfig((current) => ({ ...current, catalog: null }))
@@ -229,8 +252,8 @@ export function App() {
   const setProviderModel = (model) => updateConnectionDraft({ model })
 
   const clearAppliedSession = useCallback(() => {
-    setProvider(EMPTY_PROVIDER); setAppliedStrategy(''); setDiscussion([]); setModelConfig(EMPTY_MODELS)
-    setSettingsResult(null); setSettingsDraft({}); setPreferences(''); setTheme('light'); setSetup(null)
+    setConversations([]); setConversation(null); setHistoryWarning(null); setPendingMessage(null); setMessageError(null); composerState.current.pauseAll(); setConversationBusy(false); setProvider(EMPTY_PROVIDER); setAppliedStrategy(''); setDiscussion([]); setModelConfig(EMPTY_MODELS)
+    setConnectionError(''); setSettingsResult(null); setSettingsDraft({}); setPreferences(''); setTheme('night'); setSetup(null)
     discoveryAttemptRef.current = null; connectionRevisionRef.current++
     setStatus({ service: 'connecting' }); setCycle({ status: 'idle' }); setDag(EMPTY_DAG); setPaper({ status: 'paper-only' }); setTestnet(EMPTY_TESTNET)
     setRoleEvents({}); setMessages([]); setPhase(''); configurationRevisionRef.current++
@@ -243,12 +266,17 @@ export function App() {
     operationRef.current = false; cycleRunningRef.current = false
     wsRef.current?.close(); setCsrf(null); setSessionExpiry(null); setBusy(false); setProviderBusy(false)
     clearAppliedSession()
-    setCanResume(true)
+    setCanResume(error.code === 'CONTROL_CSRF_REJECTED')
     setLoginError(error.code === 'CONTROL_CSRF_REJECTED'
-      ? '会话已在其他标签页更新。未提交的连接与消息仍保留；请恢复会话，确认后重新发送。'
-      : '会话已退出或过期。未提交的连接与消息仍保留；请重新登录后确认再发送。')
+      ? '会话已更新'
+      : '会话已过期')
     return true
   }, [clearAppliedSession])
+
+  const onSceneSessionFailure = useCallback((error, expectedCsrf) => {
+    if (authRef.current.csrf === expectedCsrf) handleSessionFailure(error, authRef.current)
+  }, [handleSessionFailure])
+  const paperView = usePaperScene(authBusy ? null : csrf, busy, onSceneSessionFailure)
 
   const requireCurrentSession = (expected) => {
     if (authRef.current !== expected || !expected.csrf) throw new Error('会话已变化，请确认后重新操作。')
@@ -265,7 +293,7 @@ export function App() {
     const [nextStatus, nextProvider, nextCycle, nextDag, nextPaper, nextTestnet, nextSetup, nextModels, nextSettings] = await Promise.all([controlApi.status(expected.csrf), controlApi.providerStatus(expected.csrf), controlApi.cycle(expected.csrf), controlApi.dag(expected.csrf), controlApi.paper(expected.csrf), controlApi.testnet(expected.csrf), controlApi.paperSetup(expected.csrf), controlApi.models(expected.csrf), controlApi.strategy(expected.csrf)])
     if (authRef.current !== expected) return false
     if (!operationRef.current && revision === configurationRevisionRef.current) {
-      setProvider(nextProvider?.configured ? nextProvider : EMPTY_PROVIDER); setSetup(nextSetup); setModelConfig(connectionDraftRef.current.dirty && !(discoveryAttemptRef.current?.complete && discoveryAttemptRef.current?.revision === connectionRevisionRef.current && discoveryAttemptRef.current?.expected === expected) ? { ...nextModels, catalog: null } : nextModels); setAppliedStrategy(nextSettings.prompt); setDiscussion(nextSettings.discussion); setTheme(nextSettings.theme); setSettingsDraft(nextSettings.draft); setSettingsResult(nextSettings.settings_result); setPreferences(nextSettings.preferences)
+      setProvider(nextProvider?.configured ? nextProvider : EMPTY_PROVIDER); setSetup(nextSetup); setModelConfig(connectionDraftRef.current.dirty && !(discoveryAttemptRef.current?.complete && discoveryAttemptRef.current?.revision === connectionRevisionRef.current && discoveryAttemptRef.current?.expected === expected) ? { ...nextModels, catalog: null } : nextModels); setAppliedStrategy(nextSettings.prompt); setDiscussion(nextSettings.discussion); setConversation(nextSettings.conversation); setConversations(nextSettings.conversations || []); setHistoryWarning(nextSettings.history_warning); setTheme(nextSettings.theme); setSettingsDraft(nextSettings.draft); setSettingsResult(nextSettings.settings_result); setPreferences(nextSettings.preferences)
       updateConnectionDraft({ model: nextModels.default_model, ...(!connectionDraftRef.current.dirty ? { protocol: nextProvider?.protocol || CONNECTION_PROTOCOLS[0].id, endpoint: nextProvider?.configured ? nextProvider.endpoint : '', apiKey: '', dirty: false } : {}) })
     }
     setStatus(nextStatus); setPaper(nextPaper)
@@ -285,6 +313,7 @@ export function App() {
       try {
         const packet = JSON.parse(event.data)
         if (packet.type === 'connected') return
+        if (packet.type === 'discussion_progress') { setPendingMessage((current) => current?.requestId === packet.data?.request_id && current.phase !== 'stopping' ? { ...current, phase: packet.data.phase } : current); return }
         const data = packet.data || {}
         if (packet.type === 'dag_role' && ROLES.includes(data.role)) {
           setRoleEvents((current) => data.role === 'orchestrator' && normalizeWorkflowStatus(data.status) === 'running'
@@ -327,7 +356,7 @@ export function App() {
       setCsrf(response.csrf_token); setSessionExpiry(response.expires_at)
       if (!await refresh(accepted) || authRef.current !== accepted) return
       setCanResume(false)
-      setNotice(initial ? '' : '会话已就绪。请确认当前设置与保留的连接草稿，再自行发送；此前操作不会自动重试。')
+      setNotice('')
       if (connectionDraftRef.current.dirty) setPanel('settings')
       pushMessage('会话', '当前标签页已通过验证', 'system')
     } catch (error) {
@@ -362,12 +391,11 @@ export function App() {
         setProvider(response.provider)
         updateConnectionDraft({ protocol: response.provider.protocol, endpoint: response.provider.endpoint, model: response.models.default_model, apiKey: '', dirty: false })
       }
-      setNotice(response.catalog.message)
+      setNotice('')
       return response.connection_saved ? response.provider : provider
     } catch (error) {
       if (handleSessionFailure(error, expected)) throw error
       requireCurrentSession(expected)
-      if (connectionRevisionRef.current === revision) setNotice(`目录检测失败：${error.message} 可在模型面板手动配置后发送，或重新检测。`)
       throw error
     }
   }
@@ -377,18 +405,23 @@ export function App() {
     if (!force) { try { discoveryRequest(provider, connectionDraftRef.current) } catch { return } }
     const expected = authRef.current; const operation = { expected }
     operationRef.current = operation; configurationRevisionRef.current++
-    try { setProviderBusy(true); await detectConnection(expected, force) } catch (error) { if (!handleSessionFailure(error, expected) && authRef.current === expected) setNotice(`目录检测未完成：${error.message} 可手动配置后继续。`) }
+    try { setProviderBusy(true); setConnectionError(''); await detectConnection(expected, force) } catch (error) { if (!handleSessionFailure(error, expected) && authRef.current === expected) setConnectionError(error.message) }
     finally { if (operationRef.current === operation) { operationRef.current = false; setProviderBusy(false) } }
   }
 
   const onConnectionBlur = () => {
-    try { updateConnectionDraft({ endpoint: normalizeConnectionEndpoint(connectionDraftRef.current.endpoint.trim(), connectionDraftRef.current.protocol) }) } catch { return }
-    discoverConnection()
+    const draft = connectionDraftRef.current
+    const protocol = inferConnectionProtocol(draft.endpoint, draft.protocol)
+    try {
+      const endpoint = normalizeConnectionEndpoint(draft.endpoint.trim(), protocol)
+      if (protocol !== draft.protocol) editConnection({ protocol, endpoint })
+      else updateConnectionDraft({ endpoint })
+    } catch { /* Keep incomplete input editable until the user connects. */ }
   }
 
   const runCycle = async () => {
     if (operationRef.current || !authRef.current.csrf) return
-    if (modelConfig.allocation_state !== 'ready') { setPanel('models'); setNotice('请先让主 Agent 分配，或修正手动角色选择。'); return }
+    if (modelConfig.allocation_state !== 'ready') { setPanel('models'); setNotice('模型待分配'); return }
     if (!setup?.ready) { await discuss('我想运行一次 Paper workflow。请根据已知信息主动问必要的问题；先帮我完成模拟设置。'); return }
     const expected = authRef.current
     const operation = { expected }
@@ -411,12 +444,13 @@ export function App() {
     setModelConfig((current) => ({ ...current, default_model: response.model, effective_models: Object.fromEntries(ROLES.map((role) => [role, current.role_models[role] || response.model])) }))
   }
 
-  const discuss = async (message = discussionMessage, allocate = false) => {
+  const discuss = async (message = discussionMessage, allocate = false, sentDraft = null) => {
     if (operationRef.current || !authRef.current.csrf) return
     const expected = authRef.current
-    const operation = { expected }
+    const operation = { expected, requestId: crypto.randomUUID(), conversationId: conversationRef.current?.id }
     operationRef.current = operation
     configurationRevisionRef.current++
+    setPendingMessage({ message, requestId: operation.requestId, startedAt: Date.now(), phase: 'connecting' }); setMessageError(null)
     try {
       setProviderBusy(true); setNotice('')
       let detected = provider
@@ -426,14 +460,48 @@ export function App() {
       const connection = await saveConnection(controlApi, expected.csrf, detected, { ...connectionDraftRef.current })
       requireCurrentSession(expected)
       acceptProvider(connection)
-      const response = await controlApi.discussStrategy(message, expected.csrf, allocate)
+      if (operation.cancelled) throw Object.assign(new Error('已停止生成'), { code: 'CONTROL_STRATEGY_CANCELLED' })
+      const response = await controlApi.discussStrategy(message, expected.csrf, allocate, operation.requestId)
       requireCurrentSession(expected)
       const saved = response.settings
       setNotice('')
       updateConnectionDraft({ endpoint: connection.endpoint, protocol: connection.protocol, apiKey: '', dirty: false })
-      setDiscussion(saved.discussion); setAppliedStrategy(saved.prompt); setModelConfig(saved.models); setProviderModel(saved.models.default_model); setProvider((current) => current.configured ? { ...current, model: saved.models.default_model } : current); setSetup(saved.paper); setTheme(saved.theme); setSettingsDraft(saved.draft); setSettingsResult(saved.settings_result); setPreferences(saved.preferences); setDiscussionMessage('')
-    } catch (error) { if (handleSessionFailure(error, expected)) return; if (!provider.configured) setPanel('settings'); setNotice(`讨论失败：${error.message}`) } finally { if (operationRef.current === operation) { setProviderBusy(false); operationRef.current = false } }
+      setDiscussion(saved.discussion); setConversation(saved.conversation); setConversations(saved.conversations || []); setHistoryWarning(saved.history_warning); setAppliedStrategy(saved.prompt); setModelConfig(saved.models); setProviderModel(saved.models.default_model); setProvider((current) => current.configured ? { ...current, model: saved.models.default_model } : current); setSetup(saved.paper); setTheme(saved.theme); setSettingsDraft(saved.draft); setSettingsResult(saved.settings_result); setPreferences(saved.preferences); if (saved.history_warning) composerState.current.pause(operation.conversationId)
+    } catch (error) {
+      if (isSessionFailure(error) && sentDraft && authRef.current === expected) composerState.current.restoreIfEmpty(operation.conversationId, sentDraft)
+      if (handleSessionFailure(error, expected)) return
+      composerState.current.pause(operation.conversationId)
+      setMessageError({ message: error.code === 'CONTROL_STRATEGY_CANCELLED' ? '已停止生成' : error.message, retry: message })
+      if (sentDraft) composerState.current.restoreIfEmpty(operation.conversationId, sentDraft)
+      setDraftTick((v) => v + 1)
+      if (!provider.configured && error.code !== 'CONTROL_STRATEGY_CANCELLED') setPanel('settings')
+    } finally { if (operationRef.current === operation) { setProviderBusy(false); setPendingMessage(null); operationRef.current = false } }
   }
+
+  const sendComposer = () => {
+    const id = conversationRef.current?.id, draft = composerState.current.draft(id), message = composeMessage(draft), error = draftError(draft)
+    if (!message || !authRef.current.csrf || busy || conversationBusy || historyWarning) return
+    if (error) { setNotice(error); return }
+    if (operationRef.current?.requestId || composerState.current.items(id).length) {
+      try { composerState.current.enqueue(id, draft); composerState.current.take(id); setDraftTick((v) => v + 1) } catch (error) { setNotice(error.message) }
+      return
+    }
+    if (operationRef.current) return
+    composerState.current.resume(id); composerState.current.take(id); setDraftTick((v) => v + 1); discuss(message, false, draft)
+  }
+  const addAttachments = (rows, id, epoch) => {
+    if (epoch !== composerState.current.epoch) return '文件读取已取消。'
+    const draft = composerState.current.draft(id), next = { ...draft, attachments: [...draft.attachments, ...rows] }, error = draftError(next)
+    if (error) return error
+    updateDraft(next, id); return ''
+  }
+  useEffect(() => {
+    if (!csrf || providerBusy || busy || conversationBusy || operationRef.current || historyWarning || document.hidden) return
+    const id = conversation?.id
+    if (!id || conversations.find((row) => row.id === id)?.archived) return
+    const next = composerState.current.next(id)
+    if (next) { setDraftTick((v) => v + 1); discuss(next.message, false, next.draft) }
+  }, [draftTick, csrf, conversation?.id, providerBusy, busy, conversationBusy, historyWarning])
 
   const saveModels = async (input) => {
     if (operationRef.current || !authRef.current.csrf) return null
@@ -476,7 +544,7 @@ export function App() {
     const previous = authRef.current
     const attempt = { csrf: null }
     authRef.current = attempt; authenticationRef.current = attempt
-    setAuthBusy(true); setCsrf(null); setSessionExpiry(null); wsRef.current?.close(); clearAppliedSession()
+    setAuthBusy(true); setCsrf(null); setSessionExpiry(null); wsRef.current?.close(); composerState.current.clear(); clearAppliedSession()
     try {
       await controlApi.logout(previous.csrf)
       if (authRef.current !== attempt) return
@@ -484,40 +552,114 @@ export function App() {
     } catch (error) {
       if (authRef.current !== attempt) return
       setCanResume(error.code !== 'CONTROL_SESSION_REQUIRED')
-      setLoginError(`退出未确认：${error.message}。请恢复当前会话或重新登录；未提交输入仍保留。`)
+      setLoginError(`退出未确认：${error.message}`)
     } finally {
       if (authenticationRef.current === attempt) { authenticationRef.current = null; setAuthBusy(false) }
     }
   }
 
+  const acceptConversation = (saved) => { setDiscussion(saved.discussion); setConversation(saved.conversation); setConversations(saved.conversations || []); setHistoryWarning(saved.history_warning); setSettingsResult(null); setMessageError(null) }
+  const changeConversation = async (action, input = {}) => {
+    if (operationRef.current || !authRef.current.csrf) return
+    const expected = authRef.current
+    const operation = { expected }; operationRef.current = operation; configurationRevisionRef.current++; setConversationBusy(true); setRenameError(''); setNotice('')
+    try {
+      const saved = await controlApi.changeConversation({ action, ...input }, expected.csrf)
+      requireCurrentSession(expected); acceptConversation(saved)
+      if (window.innerWidth <= 900) setSidebarOpen(false)
+      if (action === 'create') { setArchivedView(false); setPanel(null) }
+      requestAnimationFrame(() => document.getElementById('discussion-input')?.focus())
+      return true
+    } catch (error) { if (!handleSessionFailure(error, expected)) { setNotice(error.message); setRenameError(error.message) }; return false } finally { if (operationRef.current === operation) { operationRef.current = false; setConversationBusy(false) } }
+  }
+  const stopDiscussion = async () => {
+    const operation = operationRef.current
+    if (!operation?.requestId) return
+    operation.cancelled = true
+    composerState.current.pause(operation.conversationId); setDraftTick((v) => v + 1)
+    setPendingMessage((p) => p && { ...p, phase: 'stopping' })
+    try { await controlApi.cancelDiscussion(operation.requestId, operation.expected.csrf) } catch (error) { if (!handleSessionFailure(error, operation.expected)) setNotice(error.message) }
+  }
+  const setChatModel = async (model, effort) => {
+    if (operationRef.current) return
+    const expected = authRef.current, operation = { expected }; operationRef.current = operation; configurationRevisionRef.current++; setConversationBusy(true)
+    try { const saved = await controlApi.selectChatModel(model, effort, expected.csrf); requireCurrentSession(expected); acceptConversation(saved) } catch (error) { if (!handleSessionFailure(error, expected)) setNotice(error.message) } finally { if (operationRef.current === operation) { operationRef.current = false; setConversationBusy(false) } }
+  }
+  const setAppearance = async (nextTheme) => {
+    if (operationRef.current) return
+    const expected = authRef.current, operation = { expected }
+    operationRef.current = operation; configurationRevisionRef.current++; setConversationBusy(true)
+    try { const saved = await controlApi.changeTheme(nextTheme, expected.csrf); requireCurrentSession(expected); setTheme(saved.theme) } catch (error) { if (!handleSessionFailure(error, expected)) setNotice(error.message) } finally { if (operationRef.current === operation) { operationRef.current = false; setConversationBusy(false) } }
+  }
+  const searchConversations = async (query) => {
+    const revision = ++searchRevision.current, expected = authRef.current
+    if (!expected.csrf) return
+    setSearchResults({ query, items: [], status: 'loading' })
+    try {
+      const result = await controlApi.changeConversation({ action: 'search', query }, expected.csrf)
+      if (revision === searchRevision.current && expected === authRef.current) setSearchResults({ query, items: result.items, status: 'ready' })
+    } catch (error) { if (!handleSessionFailure(error, expected) && revision === searchRevision.current) setSearchResults({ query, items: [], status: 'error', error: error.message }) }
+  }
+  const closeSearch = () => { searchRevision.current++; setSearchOpen(false) }
+  const openScene = (mode) => { setSceneMode(mode); setPanel('scene'); if (narrow) setSidebarOpen(false) }
+  const openSettings = (tab) => { setPanel(tab); if (narrow) setSidebarOpen(false) }
+  const closeSidebar = () => { setSidebarOpen(false); requestAnimationFrame(() => document.querySelector('.desktop-topbar [aria-label="展开侧栏"]')?.focus()) }
+  const closeDetails = () => { const label = panel === 'scene' ? '打开 3D 场景' : '运行详情'; setPanel(null); requestAnimationFrame(() => document.querySelector(`.desktop-topbar [aria-label="${label}"]`)?.focus()) }
+  const toggleSidebar = () => { if (narrow && !sidebarOpen) setPanel(null); setSidebarOpen((v) => !v) }
+  const openRename = (row) => { setRenameTarget(row); setRenameTitle(row?.title || '新对话'); setRenameError('') }
+  const putInComposer = (text) => { setDiscussionMessage(text.slice(0, 8000)); requestAnimationFrame(() => document.getElementById('discussion-input')?.focus()) }
+  const retryMessage = (index) => { const text = index === -1 ? messageError?.retry : discussion.slice(0, index).findLast((m) => m.role === 'user')?.content; if (text) { if (composeMessage(composerState.current.draft(conversation?.id)) === text) { composerState.current.take(conversation?.id); setDraftTick((v) => v + 1) }; discuss(text) } }
+  useEffect(() => {
+    if (!csrf) return
+    const keys = (e) => {
+      if (e.isComposing || e.defaultPrevented) return
+      if (document.querySelector('dialog[open]')) return
+      const command = e.metaKey || e.ctrlKey
+      if (command && e.key.toLowerCase() === 'k') { e.preventDefault(); setSearchOpen((v) => !v) }
+      if (command && e.key.toLowerCase() === 'n') { e.preventDefault(); changeConversation('create') }
+      if (command && e.key.toLowerCase() === 'b') { e.preventDefault(); toggleSidebar() }
+      if (command && e.key === ',') { e.preventDefault(); setPanel('appearance') }
+      if (e.key === 'Escape' && !document.querySelector('dialog[open]')) { if (narrow && sidebarOpen) closeSidebar(); else if (panel) closeDetails(); else if (pendingMessage) stopDiscussion() }
+    }
+    window.addEventListener('keydown', keys)
+    return () => window.removeEventListener('keydown', keys)
+  }, [csrf, conversation?.id, discussionMessage, pendingMessage, narrow, sidebarOpen, panel])
+
   const workflow = useMemo(() => deriveWorkflowState({ dag, status: cycle, events: roleEvents }), [dag, cycle, roleEvents])
   const selectedNode = workflow.byRole[selected]
   if (!csrf || authBusy) return <Login onLogin={(token) => authenticate(token)} onResume={() => authenticate()} busy={authBusy} canResume={canResume} error={loginError} />
 
-  const working = busy || providerBusy
-  const currentModels = modelConfig.effective_models
+  const working = busy || providerBusy || conversationBusy
   const hasRun = busy || cycle?.outcome || cycle?.status === 'failed'
-  return <div className={`app-shell theme-${theme} ${panel ? 'panel-open' : ''}`}>
-    <AgentSidebar workflow={workflow} models={modelConfig} selected={selected} onSelect={(role) => { setSelected(role); setPanel('details') }} onChat={() => setPanel(null)} onSettings={() => setPanel('settings')} />
-    <main className="chat-workspace">
-      <header className="chat-topbar"><div><h1>主 Agent</h1><span className="main-model">{modelConfig.chat.model} · {modelConfig.chat.effort}</span></div><div className="topbar-actions"><button type="button" className="quiet-action" onClick={() => setPanel((current) => current ? null : 'settings')} aria-expanded={Boolean(panel)}>设置与详情</button><button type="button" className="primary-action run-workflow" onClick={runCycle} disabled={working}>{busy ? phase : '运行 workflow'}</button></div></header>
-      {(!provider.configured || !setup?.ready) && <div className="readiness-banner"><span>{!provider.configured ? '填写模型连接后，即可开始讨论。' : '告诉主 Agent 你的想法，它会补问并配置模拟起点。'}</span><button type="button" onClick={() => setPanel('settings')}>打开设置</button></div>}
-      {notice && <div className="notice" role="alert">{notice}</div>}
-      {hasRun && <RunResult cycle={cycle} workflow={workflow} phase={phase} busy={busy} />}
-      <section className="chat-scroll" aria-label="主 Agent 对话"><div className="conversation">
-        {discussion.length === 0 && <div className="chat-empty"><h2>从主 Agent 开始</h2><p>你希望用 BTC / ETH 模拟验证什么想法？更偏好谨慎尝试，还是观察趋势机会？</p><p>先在设置中填写 API 域名和 Key，再告诉我你的目标。不确定时直接说“由你安排模拟起点”，我会说明假设并完成设置。</p></div>}
-        <div className="discussion-messages" aria-live="polite">{discussion.map((item, index) => <article key={index} className={'discussion-' + item.role}><span className="message-author">{item.role === 'user' ? '你' : '主 Agent'}</span><p>{item.content}</p></article>)}</div>
-        {providerBusy && <div className="chat-pending" role="status">正在处理…</div>}
-        {settingsResult && <section className="suggestion-card" role="status"><h3>{({ applied: '设置已应用', pending: '待补充信息', failed: '设置未应用', unchanged: '配置未变' })[settingsResult.status]}</h3><p>{settingsResult.message}</p>{settingsResult.assumptions?.length > 0 && <p className="field-note">{settingsResult.assumptions.map((text) => `模拟假设：${text}`).join('；')}</p>}</section>}
-      </div></section>
-      <div className="composer-area"><form className="chat-composer" onSubmit={(event) => { event.preventDefault(); discuss() }}><label className="sr-only" htmlFor="discussion-input">发送给主 Agent</label><textarea id="discussion-input" value={discussionMessage} onChange={(event) => setDiscussionMessage(event.target.value)} maxLength={8000} rows={3} disabled={working} placeholder="告诉我你的目标、调整想法，或说“由你安排模拟起点”…" onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) { event.preventDefault(); if (!event.repeat && !working && discussionMessage.trim()) discuss() } }} /><div className="composer-controls"><span>主 Agent · {modelConfig.chat.model}</span><button type="submit" className="send-action" disabled={working || !discussionMessage.trim()}>发送</button></div></form><p className="composer-note">Enter 发送 · Shift + Enter 换行 · 会话内保存 · Paper 单次运行</p></div>
+  const active = conversations.find((row) => row.id === conversation?.id)
+  const isEmpty = discussion.length === 0 && !pendingMessage
+  const sidePanel = ['scene', 'details'].includes(panel)
+  const settingsOpen = Boolean(panel && !sidePanel)
+  const overlay = narrow && (sidebarOpen || sidePanel)
+  const settingsTabs = [['appearance', '常规', 'settings'], ['settings', '连接', 'box'], ['models', '模型', 'workflow'], ['paper', '模拟', 'positions'], ['shortcuts', '快捷键', 'file']]
+  return <div className={`desktop-shell theme-${theme} ${sidebarOpen ? '' : 'sidebar-collapsed'} ${sidePanel ? 'detail-open' : ''} ${motion ? '' : 'motion-off'}`} style={{ '--sidebar-width': `${sidebarWidth}px`, '--detail-width': `${detailWidth}px` }}>
+    <DesktopSidebar narrow={narrow} collapsed={!sidebarOpen} rows={conversations} current={conversation?.id} archived={archivedView} onArchived={setArchivedView} onNew={() => changeConversation('create')} onSearch={() => setSearchOpen(true)} onSelect={(id) => changeConversation('select', { id })} onUpdate={(id, patch) => changeConversation('update', { id, ...patch })} onRename={openRename} onSettings={openSettings} onScene={openScene} connected={provider.configured} busy={working} onClose={closeSidebar} />
+    {sidebarOpen && <ResizeHandle side="left" value={sidebarWidth} onChange={setSidebarWidth} min={220} max={360} />}
+    {overlay && <button className="panel-scrim" aria-label={sidebarOpen ? '关闭侧栏遮罩' : '关闭详情遮罩'} onClick={sidebarOpen ? closeSidebar : closeDetails} />}
+    <main inert={overlay ? '' : undefined} aria-hidden={overlay} className={`desktop-main ${isEmpty ? 'empty-thread' : ''}`}>
+      <header className="desktop-topbar"><div className="thread-title-group"><IconButton icon="sidebar" label={sidebarOpen ? '收起侧栏' : '展开侧栏'} onClick={toggleSidebar} /><button className="thread-title" title={conversation?.title || '新对话'} onClick={() => openRename(active)}><span>{conversation?.title || '新对话'}</span><Icon name="chevron" /></button></div><div className="topbar-actions"><IconButton icon="box" label="打开 3D 场景" onClick={() => setPanel((p) => p === 'scene' ? null : 'scene')} aria-pressed={panel === 'scene'} /><IconButton icon="workflow" label="运行详情" onClick={() => setPanel((p) => p === 'details' ? null : 'details')} aria-pressed={panel === 'details'} /><button type="button" className="run-button" onClick={runCycle} disabled={working}><Icon name="play" />{busy ? '运行中' : '运行'}</button></div></header>
+      {notice && !settingsOpen && !renameTarget && <div className="desktop-notice" role="status"><span>{notice}</span><IconButton icon="close" label="关闭提示" onClick={() => setNotice('')} /></div>}
+      {hasRun && <RunResult compact onDetails={() => setPanel('details')} cycle={cycle} workflow={workflow} phase={phase} busy={busy} />}
+      {isEmpty ? <div className="thread-welcome"><div className="welcome-mark" aria-hidden="true">τ</div><h1>开始对话</h1><div className="welcome-actions"><button onClick={() => putInComposer('分析 BTC 与 ETH 的策略。')}><Icon name="chat" />讨论策略</button><button onClick={() => setPanel('paper')}><Icon name="positions" />模拟设置</button><button onClick={() => openScene('workflow')}><Icon name="workflow" />查看工作流</button></div></div> : <ConversationView conversationId={conversation?.id} messages={discussion} pending={pendingMessage} onQuote={(text) => putInComposer(text.split('\n').map((line) => '> ' + line).join('\n') + '\n\n')} onEdit={putInComposer} onRetry={retryMessage} busy={working} error={messageError} onDismissError={() => setMessageError(null)} />}
+      {historyWarning && <div className="desktop-notice" role="alert">{historyWarning}<button onClick={() => changeConversation('save')}>重试保存</button></div>}
+      {isEmpty && messageError && <div className="desktop-notice" role="alert">{messageError.message}<button onClick={() => retryMessage(-1)}>重试</button></div>}
+      <Composer key={conversation?.id || 'draft'} draft={currentDraft} onChange={updateDraft} onAddAttachments={(rows) => addAttachments(rows, conversation?.id, composerEpoch)} onSend={sendComposer} pending={pendingMessage} onStop={stopDiscussion} disabled={busy || conversationBusy || (providerBusy && !pendingMessage) || Boolean(historyWarning)} model={conversation?.model || modelConfig.chat?.model || modelConfig.default_model} effort={conversation?.effort || modelConfig.chat?.effort || 'high'} pool={modelConfig.pool} onModel={setChatModel} connected={provider.configured} onConnect={() => openSettings('settings')} onWorkflow={() => openScene('trading')} archived={active?.archived} onRestore={() => changeConversation('update', { id: conversation.id, archived: false })} queue={composerState.current.items(conversation?.id)} queuePaused={composerState.current.paused(conversation?.id)} onResumeQueue={() => { composerState.current.resume(conversation?.id); setMessageError(null); setDraftTick((v) => v + 1) }} onRemoveQueued={(id) => { composerState.current.remove(conversation?.id, id); setDraftTick((v) => v + 1) }} />
     </main>
-    {panel && <aside className="context-panel" aria-label="设置与运行详情"><header className="panel-header"><h2>工作台</h2><button type="button" className="icon-action" aria-label="关闭设置" onClick={() => setPanel(null)}>×</button></header><nav className="panel-tabs" aria-label="设置分类">{[['settings', '连接与配置'], ['models', '模型分配'], ['details', '运行详情']].map(([value, label]) => <button type="button" key={value} aria-pressed={panel === value} onClick={() => setPanel(value)}>{label}</button>)}</nav><div className="panel-scroll">
-      {panel === 'settings' && <section className="entry-form"><button type="button" className="quiet-action" onClick={() => setPanel('models')}>模型池与分配 · {modelConfig.mode === 'manual' ? '手动' : '自动'}</button><ProviderPanel provider={provider} protocol={providerProtocol} setProtocol={setProviderProtocol} endpoint={providerEndpoint} apiKey={providerApiKey} setEndpoint={setProviderEndpoint} setApiKey={setProviderApiKey} onConnectionBlur={onConnectionBlur} onDiscover={() => discoverConnection(true)} catalog={modelConfig.catalog} busy={working} /><p className="field-note">填写后直接发送消息。日期与周次自动使用当日 UTC。</p><PaperSetup setup={setup} draft={settingsDraft} /><section className="strategy-panel"><h2>当前分析策略</h2><p>{appliedStrategy || '尚未定制，将按固定分析职责运行。'}</p>{preferences && <p className="field-note">已知偏好：{preferences}</p>}</section><details className="saved-models"><summary>当前 Agent 模型与 effort</summary><dl>{WORKFLOW_NODES.map(({ role, name }) => <div key={role}><dt>{name}</dt><dd>{currentModels[role]} · {modelConfig.effective_efforts[role]}</dd></div>)}</dl><p className="field-note">策略与主题通过主 Agent 调整；模型可在「模型分配」中自动或手动配置。策略、模型、偏好仅当前会话有效；已创建的模拟账户会保留。</p></details></section>}
-      {panel === 'models' && <>{modelConfig.catalog && <CatalogSummary catalog={modelConfig.catalog} />}<ModelSettings config={modelConfig} busy={working} onSave={saveModels} onAllocate={() => discuss('请根据我的目标与可用模型池，为六个 Agent 自动分配模型和 effort，并给出各自依据。', true)} /></>}
-      {panel === 'details' && <section className="run-details"><Docket selected={selected} workflow={workflow} onSelect={setSelected} /><div className="stream-heading"><h2>事件日志 · {selectedNode?.name}</h2><Tone value={selectedNode?.status || 'waiting'} /></div><MessageStream messages={messages} /><p className="field-note">模拟状态：{statusLabel(paper?.status || cycle?.outcome)}</p></section>}
-      <details className="advanced"><summary>会话与测试网状态</summary><div className="advanced-actions"><span>会话有效至 {formatTime(sessionExpiry)}</span><Tone value={status?.service || status?.status} /><button type="button" className="quiet-action" onClick={clearProvider} disabled={working || !provider.configured}>清除模型连接</button><button type="button" className="quiet-action" onClick={logout} disabled={working}>退出会话</button></div><h2>独立测试网</h2><p className="field-note">主聊天只配置 Paper 模拟，不会开启测试网执行。独立测试网仍需原有配置、授权和执行确认。</p>{VENUES.map((venueName) => <p key={venueName}>{VENUE_NAMES[venueName]}：<Tone value={testnet[venueName]?.armed ? 'armed' : testnet[venueName]?.status || 'unconfigured'} /></p>)}</details>
-
-    </div></aside>}
+    <DetailPanel open={sidePanel} narrow={narrow}><ResizeHandle side="right" value={detailWidth} onChange={setDetailWidth} min={330} max={620} /><header className="detail-header"><div><button aria-pressed={panel === 'scene'} onClick={() => setPanel('scene')}>场景</button><button aria-pressed={panel === 'details'} onClick={() => setPanel('details')}>运行详情</button></div><IconButton icon="close" label="关闭详情" onClick={closeDetails} /></header><div className="detail-scroll">{panel === 'scene' ? <SceneDock initialMode={sceneMode} motionEnabled={motion} inlineDetails workflow={workflow} selected={selected} onSelectAgent={(role) => { setSelected(role); setPanel('details') }} paperView={paperView} /> : <>{hasRun && <RunResult cycle={cycle} workflow={workflow} phase={phase} busy={busy} />}<Docket selected={selected} workflow={workflow} onSelect={setSelected} /><div className="stream-heading"><h2>事件日志 · {selectedNode?.name}</h2><Tone value={selectedNode?.status || 'waiting'} /></div><MessageStream messages={messages.filter((entry) => !ROLES.includes(entry.label) || entry.label === selected)} /><span className="paper-status">Paper · {statusLabel(paper?.status || cycle?.outcome)}</span></>}</div></DetailPanel>
+    <Dialog open={settingsOpen} onClose={() => setPanel(null)} title="设置" className="settings-dialog"><aside className="settings-navigation"><h2>设置</h2>{settingsTabs.map(([key, label, icon]) => <button key={key} aria-pressed={panel === key} onClick={() => setPanel(key)}><Icon name={icon} />{label}</button>)}</aside><section className="settings-content"><header><h2>{settingsTabs.find(([key]) => key === panel)?.[1]}</h2><IconButton icon="close" label="关闭设置" onClick={() => setPanel(null)} /></header><div className="settings-scroll">
+      {notice && <div className="desktop-notice" role="alert"><span>{notice}</span><IconButton icon="close" label="关闭提示" onClick={() => setNotice('')} /></div>}
+      {panel === 'appearance' && <><div className="preference-row"><span>外观</span><div className="segmented"><button aria-pressed={theme === 'night'} onClick={() => setAppearance('night')} disabled={working}><Icon name="moon" />深色</button><button aria-pressed={theme === 'light'} onClick={() => setAppearance('light')} disabled={working}><Icon name="sun" />浅色</button></div></div><div className="preference-row"><span>界面动效</span><button className="toggle-switch" role="switch" aria-label="界面动效" aria-checked={motion} onClick={() => setMotion((v) => !v)}><i /></button></div><div className="preference-row"><span>会话</span><button className="quiet-action" onClick={logout} disabled={working}>退出</button></div></>}
+      {panel === 'settings' && <div className="entry-form"><ProviderPanel provider={provider} protocol={providerProtocol} setProtocol={setProviderProtocol} endpoint={providerEndpoint} apiKey={providerApiKey} setEndpoint={setProviderEndpoint} setApiKey={setProviderApiKey} onConnectionBlur={onConnectionBlur} onDiscover={() => discoverConnection(true)} error={connectionError} catalog={modelConfig.catalog} busy={working} /><button type="button" className="quiet-action" onClick={clearProvider} disabled={working || !provider.configured}>清除模型连接</button></div>}
+      {panel === 'models' && <ModelSettings config={modelConfig} busy={working} onSave={saveModels} onAllocate={() => discuss('按当前模型池分配六个工作流角色的模型和 effort，并给出依据。', true)} />}
+      {panel === 'paper' && <><PaperSetup setup={setup} draft={settingsDraft} />{!setup?.ready && <button className="primary-action" onClick={() => { setPanel(null); putInComposer('帮我设置 Paper 模拟账户，先确认虚拟资金和风险限制。') }}>在对话中配置</button>}<details className="advanced"><summary>会话与测试网状态</summary><div className="advanced-actions">会话有效至 {formatTime(sessionExpiry)}</div><h2>独立测试网</h2>{VENUES.map((v) => <p key={v}>{VENUE_NAMES[v]}：<Tone value={testnet[v]?.status || 'unconfigured'} /></p>)}</details></>}
+      {panel === 'shortcuts' && <div className="shortcut-list">{[['搜索 / 命令', '⌘ / Ctrl K'], ['新对话', '⌘ / Ctrl N'], ['显示侧栏', '⌘ / Ctrl B'], ['设置', '⌘ / Ctrl ,'], ['发送 / 加入队列', 'Enter'], ['换行', 'Shift Enter'], ['停止 / 关闭面板', 'Esc']].map(([name, key]) => <div key={name}><span>{name}</span><kbd>{key}</kbd></div>)}</div>}
+    </div></section></Dialog>
+    <SearchDialog open={searchOpen} onClose={closeSearch} results={searchResults} onQuery={searchConversations} onSelect={(id) => changeConversation('select', { id })} commands={[{ name: '新对话', icon: 'plus', run: () => changeConversation('create') }, { name: '连接设置', icon: 'settings', run: () => openSettings('settings') }, { name: '工作流', icon: 'workflow', run: () => openScene('workflow') }, { name: '持仓', icon: 'positions', run: () => openScene('trading') }, { name: '切换主题', icon: 'sun', run: () => setAppearance(theme === 'night' ? 'light' : 'night') }]} />
+    <Dialog open={Boolean(renameTarget)} onClose={() => setRenameTarget(null)} title="重命名对话" className="rename-dialog"><h2>重命名对话</h2><form onSubmit={async (e) => { e.preventDefault(); if (await changeConversation('update', { id: renameTarget.id, title: renameTitle.trim() })) setRenameTarget(null) }}><input autoFocus aria-label="对话名称" value={renameTitle} maxLength={80} onChange={(e) => setRenameTitle(e.target.value)} />{renameError && <p className="form-error" role="alert">{renameError}</p>}<div><button type="button" className="quiet-action" onClick={() => setRenameTarget(null)}>取消</button><button className="primary-action" disabled={!renameTitle.trim() || conversationBusy}>{conversationBusy ? '保存中…' : '保存'}</button></div></form></Dialog>
   </div>
 }

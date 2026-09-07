@@ -20,10 +20,22 @@ export function normalizeConnectionEndpoint(value, protocol = 'openai-responses'
   if (url.hostname === 'localhost' || url.hostname.endsWith('.localhost')) fail('PI_SESSION_ENDPOINT_HOST_FORBIDDEN')
   if (url.protocol === 'http:' && !((url.hostname === [127, 0, 0, 1].join('.') && /^127\.0\.0\.1(?::\d+)?$/u.test(authority)) || (url.hostname === '[::1]' && /^\[::1\](?::\d+)?$/iu.test(authority)))) fail('PI_SESSION_ENDPOINT_HTTP_FORBIDDEN')
   let pathname = url.pathname.replace(/\/$/u, '')
+  if (pathname.endsWith('/models')) pathname = pathname.slice(0, -7)
   const suffix = protocol === 'openai-responses' ? '/responses' : protocol === 'openai-completions' ? '/chat/completions' : '/v1/messages'
   if (pathname.endsWith(suffix)) pathname = pathname.slice(0, -suffix.length)
   if (protocol === 'anthropic-messages' && pathname.endsWith('/v1')) pathname = pathname.slice(0, -3)
   if (/(?:\/responses|\/chat\/completions|\/messages)$/u.test(pathname)) fail('PI_SESSION_ENDPOINT_OPERATION_FORBIDDEN')
   if (protocol !== 'anthropic-messages' && !pathname) pathname = '/v1'
   return `${url.origin}${pathname}`
+}
+
+// A pasted operation URL is an explicit protocol hint; bare base URLs keep the
+// user's current protocol instead of guessing from the model name or API key.
+export function inferConnectionProtocol(value, fallback = 'openai-responses') {
+  if (typeof value !== 'string') return fallback
+  const path = value.trim().replace(/\/$/u, '')
+  if (path.endsWith('/chat/completions')) return 'openai-completions'
+  if (path.endsWith('/v1/messages')) return 'anthropic-messages'
+  if (path.endsWith('/responses')) return 'openai-responses'
+  return fallback
 }

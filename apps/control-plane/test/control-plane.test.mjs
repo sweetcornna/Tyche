@@ -9,6 +9,8 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import WebSocket from 'ws'
 import { createPaperSetupAdapter } from '../../../scripts/control-paper-setup.mjs'
+import { projectPaperScene } from '../../../scripts/control-paper-scene.mjs'
+import { sceneFixture } from '../../../test/paper-scene-fixtures.mjs'
 import { startControlPlaneChild } from '../../../scripts/tyche-control-plane.mjs'
 import { loadConfig } from '../../../scripts/config.mjs'
 import { writeJsonAtomic } from '../../../scripts/lib-iolock.mjs'
@@ -1062,6 +1064,12 @@ test('static root is same-origin, hardened, and rejects traversal or symlinks', 
     assert.equal(page.headers['x-frame-options'], 'DENY')
     const asset = await httpRequest(info, '/assets/app.js', { origin: info.origin })
     assert.equal(asset.status, 200)
+    for (const [extension, mime] of [['glb', 'model/gltf-binary'], ['png', 'image/png'], ['webp', 'image/webp']]) {
+      fs.writeFileSync(path.join(directory, 'assets', `scene.${extension}`), Buffer.from([1, 2, 3]))
+      const resource = await httpRequest(info, `/assets/scene.${extension}`, { origin: info.origin })
+      assert.equal(resource.status, 200); assert.equal(resource.headers['content-type'], mime)
+      assert.equal(resource.headers['x-content-type-options'], 'nosniff')
+    }
     const traversal = await httpRequest(info, '/%2e%2e/%2e%2e/etc/passwd', { origin: info.origin })
     assert.equal(traversal.status, 404)
     const symlink = await httpRequest(info, '/assets/link.js', { origin: info.origin })
@@ -1184,8 +1192,9 @@ test('strategy routes reject extra fields, secrets, overlong output, and cross-s
   try {
     const session = await openSession(info)
     const post = (route, body) => httpRequest(info, route, { method: 'POST', body, ...session })
-    assert.equal((await post('/api/strategy', { prompt: `do not send ${PROVIDER_KEY}` })).status, 200)
-    assert.equal((await configureProvider(info, session)).status, 400)
+    assert.equal((await post('/api/strategy', { prompt: `do not send ${PROVIDER_KEY}` })).status, 400)
+    assert.equal((await post('/api/strategy', { prompt: 'do not send future-opaque-credential' })).status, 200)
+    assert.equal((await configureProvider(info, session, { ...PROVIDER_BODY, api_key: 'future-opaque-credential' })).status, 400)
     await post('/api/strategy', { prompt: 'Use models.example.test as analysis context' })
     assert.equal((await configureProvider(info, session)).status, 400)
     assert.equal((await post('/api/cycle', { date: DATE, iso_week: WEEK })).status, 409)
@@ -1491,31 +1500,31 @@ test('invalid conversational candidates never partially apply and existing Paper
   let output
   const f = await conversationService(t, { reply: () => output })
   for (const invalid of [{ configured_leverage: '1.0000000000000000001' }, { risk_per_trade_bps: '10000.000000000000000001' }, { max_order_notional_usdt: '500.000000000000000001' }, { initial_usdt: '0' }, { execute: true }]) {
-    output = { intent: 'configure', apply_fields: ['paper_settings', 'theme'], reply: 'proposal', theme: 'night', paper_settings: { ...CONVERSATION_PAPER, ...invalid } }
+    output = { intent: 'configure', apply_fields: ['paper_settings', 'theme'], reply: 'proposal', theme: 'light', paper_settings: { ...CONVERSATION_PAPER, ...invalid } }
     assert.equal((await f.discuss('安排模拟。')).status, 502)
-    assert.equal((await f.get('/api/strategy')).json.theme, 'light'); assert.equal(fs.existsSync(f.active), false); assert.equal(fs.existsSync(f.local), false)
+    assert.equal((await f.get('/api/strategy')).json.theme, 'night'); assert.equal(fs.existsSync(f.active), false); assert.equal(fs.existsSync(f.local), false)
   }
-  for (const invalid of [{ intent: 'configure', reply: '没有设置' }, { intent: 'configure', reply: '未知范围', apply_fields: ['execute'] }, { intent: 'configure', reply: '未知字段', apply_fields: ['theme'], theme: 'night', credentials: 'bad' }]) { output = invalid; assert.equal((await f.discuss('调整。')).status, 502) }
+  for (const invalid of [{ intent: 'configure', reply: '没有设置' }, { intent: 'configure', reply: '未知范围', apply_fields: ['execute'] }, { intent: 'configure', reply: '未知字段', apply_fields: ['theme'], theme: 'light', credentials: 'bad' }]) { output = invalid; assert.equal((await f.discuss('调整。')).status, 502) }
   f.setup.setup(CONVERSATION_PAPER); const before = fs.readFileSync(f.active, 'utf8')
-  output = { intent: 'configure', apply_fields: ['paper_settings', 'theme', 'suggested_prompt'], reply: 'requested', theme: 'night', suggested_prompt: 'must not apply', paper_settings: { initial_usdt: '2000' } }
+  output = { intent: 'configure', apply_fields: ['paper_settings', 'theme', 'suggested_prompt'], reply: 'requested', theme: 'light', suggested_prompt: 'must not apply', paper_settings: { initial_usdt: '2000' } }
   const conflict = await f.discuss('提高虚拟资金并改主题策略。')
   assert.equal(conflict.json.application.status, 'failed'); assert.equal(conflict.json.application.code, 'CONTROL_PAPER_SETTING_CONFLICT'); assert.equal(conflict.json.questions.length, 1)
-  assert.equal(conflict.json.settings.theme, 'light'); assert.equal(conflict.json.settings.prompt, ''); assert.equal(fs.readFileSync(f.active, 'utf8'), before)
+  assert.equal(conflict.json.settings.theme, 'night'); assert.equal(conflict.json.settings.prompt, ''); assert.equal(fs.readFileSync(f.active, 'utf8'), before)
   const changed = JSON.parse(fs.readFileSync(f.local)); changed.analysis.minimum_rr = 2; writeJsonAtomic(f.local, changed)
-  output = { intent: 'configure', apply_fields: ['theme'], reply: '只调整主题。', theme: 'night' }
-  const independent = await f.discuss('只改深色。')
-  assert.equal(independent.json.application.status, 'applied'); assert.equal(independent.json.settings.theme, 'night'); assert.equal(independent.json.settings.paper.status, 'blocked'); assert.equal(fs.readFileSync(f.active, 'utf8'), before)
+  output = { intent: 'configure', apply_fields: ['theme'], reply: '只调整主题。', theme: 'light' }
+  const independent = await f.discuss('只改浅色。')
+  assert.equal(independent.json.application.status, 'applied'); assert.equal(independent.json.settings.theme, 'light'); assert.equal(independent.json.settings.paper.status, 'blocked'); assert.equal(fs.readFileSync(f.active, 'utf8'), before)
 })
 
 test('Paper IO failure and TTL expiry at the synchronous commit point roll back files and session settings', async (t) => {
   for (const failure of ['io', 'expiry']) {
     let clock = Date.now()
-    const output = { intent: 'configure', apply_fields: ['paper_settings', 'theme', 'suggested_prompt', 'suggested_role_efforts'], reply: 'proposed', theme: 'night', suggested_prompt: 'BTC/ETH dated trends.', suggested_role_efforts: { orchestrator: 'medium' }, paper_settings: CONVERSATION_PAPER }
+    const output = { intent: 'configure', apply_fields: ['paper_settings', 'theme', 'suggested_prompt', 'suggested_role_efforts'], reply: 'proposed', theme: 'light', suggested_prompt: 'BTC/ETH dated trends.', suggested_role_efforts: { orchestrator: 'medium' }, paper_settings: CONVERSATION_PAPER }
     const f = await conversationService(t, { now: () => clock, reply: () => output, writeJson(file, value, options, { active }) { if (file === active && failure === 'io') throw new Error(PROVIDER_KEY); writeJsonAtomic(file, value, options); if (file === active && failure === 'expiry') clock += SESSION_TTL_MS } })
     const response = await f.discuss('由你安排模拟起点。')
     assert.equal(fs.existsSync(f.active), false); assert.equal(fs.existsSync(f.local), false); assert.equal(response.text.includes(PROVIDER_KEY), false)
     if (failure === 'expiry') { assert.equal(response.status, 401); assert.equal((await f.get('/api/strategy')).status, 401) }
-    else { assert.equal(response.json.application.status, 'failed'); assert.equal(response.json.settings.prompt, ''); assert.equal(response.json.settings.theme, 'light'); assert.equal(response.json.settings.models.effective_efforts.orchestrator, 'high') }
+    else { assert.equal(response.json.application.status, 'failed'); assert.equal(response.json.settings.prompt, ''); assert.equal(response.json.settings.theme, 'night'); assert.equal(response.json.settings.models.effective_efforts.orchestrator, 'high') }
   }
 })
 
@@ -1605,7 +1614,7 @@ test('empty role maps never consume drafts and unchanged effective settings are 
     }
   }
   f.setup.setup(CONVERSATION_PAPER); const bytes = fs.readFileSync(f.active, 'utf8'); const previousModels = (await f.get('/api/models')).json
-  output = { intent: 'configure', apply_fields: ['suggested_role_models', 'suggested_role_efforts', 'suggested_prompt', 'theme', 'paper_settings'], reply: '保持当前实际配置。', suggested_role_models: { reviewer: PROVIDER_MODELS[0] }, suggested_role_efforts: { reviewer: 'xhigh' }, suggested_prompt: '', theme: 'light', paper_settings: { initial_usdt: CONVERSATION_PAPER.initial_usdt } }
+  output = { intent: 'configure', apply_fields: ['suggested_role_models', 'suggested_role_efforts', 'suggested_prompt', 'theme', 'paper_settings'], reply: '保持当前实际配置。', suggested_role_models: { reviewer: PROVIDER_MODELS[0] }, suggested_role_efforts: { reviewer: 'xhigh' }, suggested_prompt: '', theme: 'night', paper_settings: { initial_usdt: CONVERSATION_PAPER.initial_usdt } }
   const same = await f.discuss('仍使用当前配置。')
   assert.equal(same.json.application.status, 'unchanged'); assert.deepEqual(same.json.settings.models, previousModels); assert.equal(fs.readFileSync(f.active, 'utf8'), bytes)
   assert.deepEqual(same.json.settings.draft, { suggested_role_models: { 'btc-analyst': PROVIDER_MODELS[2] }, suggested_role_efforts: { 'btc-analyst': 'medium' } })
@@ -1847,4 +1856,25 @@ test('connected protocol validation preserves legal pool transitions, pending/bl
   assert.equal(prepared.json.allocation_state, 'pending')
   assert.equal((await f.get('/api/provider')).json.configured, false)
   assert.deepEqual((await f.get('/api/strategy')).json.draft, independentDraft)
+})
+
+
+test('Paper scene is authenticated, query-free, explicitly projected and secret-redacted', async () => {
+  const f = sceneFixture(); f.fill(f.open()); f.mark()
+  const value = projectPaperScene(f.ledger)
+  const { service, info } = await startService({ adapters: { validateProviderConfig: async () => ({ ok: true }), paperScene: () => ({ ...value, credentials: PROVIDER_KEY, ledger: f.ledger, events: [{ ...value.events[0], id: PROVIDER_KEY }] }) } })
+  try {
+    assert.equal((await httpRequest(info, '/api/paper/scene')).status, 401)
+    const session = await openSession(info)
+    assert.equal((await configureProvider(info, session)).status, 200)
+    const result = await httpRequest(info, '/api/paper/scene', session)
+    assert.equal(result.status, 200); assert.equal(result.json.environment, 'paper')
+    assert.equal(result.json.positions[0].contracts, '5'); assert.equal(result.json.positions[0].unrealized_pnl, '7.5')
+    assert.equal(result.json.events[0].id, '[REDACTED]')
+    assert.doesNotMatch(result.text, /account_id|credentials|ledger|private_key|source_id|event_hash/)
+    assert.ok(!result.text.includes(PROVIDER_KEY))
+    assert.equal((await httpRequest(info, '/api/paper/scene?path=anything', session)).status, 400)
+    assert.equal((await httpRequest(info, '/api/paper/scene', { ...session, method: 'POST', body: {} })).status, 404)
+    assert.equal((await httpRequest(info, '/api/strategy', session)).json.theme, 'night')
+  } finally { await service.stop() }
 })

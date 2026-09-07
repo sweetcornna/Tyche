@@ -31,6 +31,32 @@ npm run selftest
 
 ## Local Pi cluster and analysis cockpit
 
+The cockpit uses a minimal dark interface with an original Blender-built abstract
+scene. Flat, unlit geometric forms replace metal, instrument dials and coin models.
+The login contains only the brand and form; the workspace keeps controls, status
+and data without slogans, onboarding paragraphs or model subtitles. Switch between
+**工作流** and **持仓**, select a role, or expand **详情** for Paper position data.
+Escape closes the expanded panel. Pause and reduced motion use a static poster.
+Light mode remains available through conversation.
+
+`GET /api/paper/scene` is an authenticated, read-only Paper projection. Confirmed
+events update positions; partial fills never count the unfilled remainder. Price,
+equity and unrealized PnL are explicitly dated settlement snapshots, not live
+quotes. Missing marks show **待核算**. A stale or invalid source is identified and
+cannot silently become an empty account. Scene updates poll each second during a
+workflow or active order, and every fifteen seconds while idle; hidden pages stop
+polling and resume from a fresh baseline without replaying old executions.
+
+In **设置 → 连接**, enter **服务地址** and **API Key**, then click **连接**.
+The address accepts a hostname, base URL, or complete standard API URL; operation
+paths identify the protocol. Pasted key boundary whitespace is trimmed. Changing
+fields keeps the unsaved draft, and the key clears only after successful connection.
+Clash/TUN Fake-IP DNS is handled automatically with public-address verification and
+pinned connections. Network errors appear beside the connection fields.
+
+Model sources, the rebuild command, the DTO contract and visual QA instructions
+are documented in [3D 工作台说明](docs/3D_WORKSPACE.md).
+
 The optional safe UI lives in `apps/web` and is served by the loopback-only
 control plane after the production bundle is built:
 
@@ -97,14 +123,19 @@ accounts, configured limits and configuration digests are checked and never
 reset or silently replaced. The standalone `@tyche/control-plane` package CLI
 is only a projection shell; use the script above for the complete workflow.
 
-The conversation workspace has a fixed Agent list on the left, the main chat
-in the center, and connection settings, read-only configuration and run details
-on the right. The main Agent can adjust semantic strategy, six role model/effort
-choices and the light/dark theme through the same conversation. A bounded
-durable session draft preserves earlier answers beyond the eight-message model
-history window. Each configuration response explicitly selects its application
-scope, so an independent theme/model change does not initialize a pending Paper
-draft. Only a complete, validated Paper candidate can create the simulation.
+The desktop workspace centers the conversation, with a collapsible history sidebar,
+search/command palette, model and effort controls, and an optional workflow/Paper
+detail panel. Chats support rename, pin, archive, restore, Markdown, code copying,
+quotes, retry and cancellable requests. The full CLI stores bounded conversation
+history in the ignored `data/control/conversations.json` (0600); API credentials
+remain in server session memory. See [Desktop workspace](docs/DESKTOP_WORKSPACE.md)
+for implemented interactions and validation.
+
+The main conversation can adjust semantic strategy and six role model/effort
+choices. A bounded session draft preserves configuration answers beyond the
+eight-message model context window. Each configuration response selects its
+application scope, so an independent theme/model change does not initialize a
+pending Paper draft. Only a complete, validated candidate creates the simulation.
 
 Every role initially uses Astra. Orchestration (including the main conversation),
 BTC/ETH analysis and synthesis use `high`; preflight uses `medium`, and review
