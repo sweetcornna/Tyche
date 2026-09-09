@@ -20,7 +20,9 @@ import {
   resolveClusterConfigPath
 } from '../scripts/tyche-cluster.mjs'
 import { parseControlPlaneArgs, startControlPlaneChild } from '../scripts/tyche-control-plane.mjs'
+import { createPaperSetupAdapter } from '../scripts/control-paper-setup.mjs'
 
+const STARTUP_CONFIG = path.join(process.cwd(), 'config', 'tyche.json')
 const DATE = '2030-01-07'
 const WEEK = '2030-W02'
 const PLAN_HASH = 'a'.repeat(64)
@@ -166,7 +168,7 @@ test('session provider validates without inference and powers only a primary man
       bootstrapToken: 'bootstrap-child-fixture',
       port: 0,
       env: { PATH: '/safe/bin', LANG: 'C', FINANCE_API_KEY: 'must-not-cross' },
-      configPath: path.join(process.cwd(), 'config', 'tyche.json'),
+      configPath: STARTUP_CONFIG,
       stateReader: () => ({ recent_cycle: null, dag: {}, paper: {} }),
       stateWriter: (patch) => { stateWrites.push(structuredClone(patch)); return patch },
       providerRuntimeFactory: async (input) => {
@@ -236,11 +238,16 @@ test('session provider validates without inference and powers only a primary man
     apiKey: runtimeBuffer
   }))
   assert.equal(cycleSnapshots.length, 1)
+  // The control plane forwards the paper-setup selected configuration, which falls
+  // back to the ignored config/tyche.local.json whenever that file exists. Follow the
+  // same rule here so the assertion holds on a fresh clone and after the documented
+  // `cp config/tyche.json config/tyche.local.json` setup step.
+  const expectedConfigPath = createPaperSetupAdapter({ configPath: STARTUP_CONFIG }).configPath()
   assert.deepEqual(cycleSnapshots[0], {
     provider: SESSION_PROVIDER_ID,
     model: SESSION_MODEL,
     mode: 'primary',
-    configPath: path.join(process.cwd(), 'config', 'tyche.json'),
+    configPath: expectedConfigPath,
     env: {
       PATH: '/safe/bin',
       LANG: 'C',
@@ -310,7 +317,7 @@ test('bootstrap ready token is captured once for parent stderr and never enters 
       mode: 'shadow',
       port: 0,
       bootstrapToken: token,
-      configPath: path.join(process.cwd(), 'config', 'tyche.json'),
+      configPath: STARTUP_CONFIG,
       controlPlaneFactory: (options) => {
         childOptions = options
         return {
