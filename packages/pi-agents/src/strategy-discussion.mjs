@@ -55,10 +55,21 @@ export async function discussSessionStrategy({ message, prompt = '', history = [
       const candidateEfforts = { ...effectiveEfforts, ...draftEfforts, ...efforts }
       if (models || efforts || Object.keys(draftModels || {}).length || Object.keys(draftEfforts || {}).length) {
         const candidates = { ...effectiveModels, ...draftModels, ...models }
-        for (const [role, model] of Object.entries(candidates)) assertSessionModelEffort(model, candidateEfforts[role], candidatePool, connection.protocol)
+        for (const [role, model] of Object.entries(candidates)) {
+          // The merge above includes every saved role, so a rejection is often
+          // about existing configuration rather than this turn's suggestion.
+          // Carry the exact role/model/effort so the caller can name it.
+          try { assertSessionModelEffort(model, candidateEfforts[role], candidatePool, connection.protocol) }
+          catch (error) { error.roleDetail = { role, model, effort: candidateEfforts[role] }; throw error }
+        }
       }
       return { ...output, ...(output.intent === undefined ? { suggested_prompt: output.suggested_prompt || '' } : {}), ...(models === undefined ? {} : { suggested_role_models: models }), ...(efforts === undefined ? {} : { suggested_role_efforts: efforts }) }
     })()
     return await Promise.race([operation, new Promise((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(new Error('PI_STRATEGY_TIMEOUT')) }, Math.min(30_000, Math.max(1, timeoutMs))) })])
-  } catch (error) { fail(['PI_SESSION_ROLE_MODELS_INVALID', 'PI_SESSION_ROLE_EFFORTS_INVALID', 'PI_SESSION_MODEL_EFFORT_UNSUPPORTED'].includes(error?.code) ? 'PI_STRATEGY_MODELS_INVALID' : 'PI_STRATEGY_DISCUSSION_FAILED') } finally { signal?.removeEventListener('abort', abort); clearTimeout(timer); controller.abort() }
+  } catch (error) {
+    const code = ['PI_SESSION_ROLE_MODELS_INVALID', 'PI_SESSION_ROLE_EFFORTS_INVALID', 'PI_SESSION_MODEL_EFFORT_UNSUPPORTED'].includes(error?.code) ? 'PI_STRATEGY_MODELS_INVALID' : 'PI_STRATEGY_DISCUSSION_FAILED'
+    const next = new Error(code); next.code = code
+    if (code === 'PI_STRATEGY_MODELS_INVALID' && error?.roleDetail) next.roleDetail = error.roleDetail
+    throw next
+  } finally { signal?.removeEventListener('abort', abort); clearTimeout(timer); controller.abort() }
 }
