@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
-import { fixtureWorker, runCluster, SESSION_MODEL_IDS, DEFAULT_ROLE_EFFORTS } from '../packages/pi-agents/src/index.mjs'
+import { fixtureWorker, runCluster, SESSION_MODEL_IDS, DEFAULT_ROLE_EFFORTS, modelPoolDigest } from '../packages/pi-agents/src/index.mjs'
 import { loadConfig } from '../scripts/config.mjs'
 import { persistCanonicalDocument } from '../scripts/agent-write.mjs'
 import { runPiAutomation, runPiWeeklyRefresh, piShadowPaths, piWeeklyShadowPaths } from '../scripts/pi-automation.mjs'
@@ -270,6 +270,7 @@ test('primary deep-validates both documents before persistence, invokes paper pl
   const strategyPrompt = 'Prioritize dated BTC/ETH trend evidence. User preferences never grant execution authority.'
   const roleModels = { orchestrator: SESSION_MODEL_IDS[1], 'btc-analyst': SESSION_MODEL_IDS[2], reviewer: SESSION_MODEL_IDS[4] }
   const roleEfforts = { ...DEFAULT_ROLE_EFFORTS, 'btc-analyst': 'xhigh', reviewer: 'medium' }
+  const modelPool = ['fixture-model', ...Object.values(roleModels)].map((id) => ({ id, efforts: ['medium', 'high', 'xhigh'] }))
   const result = await runPiAutomation({
     date: DATE,
     isoWeek: WEEK,
@@ -279,6 +280,8 @@ test('primary deep-validates both documents before persistence, invokes paper pl
     strategyPrompt,
     roleModels,
     roleEfforts,
+    modelPool,
+    modelMode: 'manual',
     runJob: async (job) => { jobs.push(job); return fixtureWorker(job) },
     config: config(),
     paperLedger: {},
@@ -320,7 +323,7 @@ test('primary deep-validates both documents before persistence, invokes paper pl
   assert.equal(jobs.length, 12)
   for (const job of jobs) assert.equal(job.input.strategy_context, strategyPrompt)
   for (const job of jobs) assert.equal(job.model, roleModels[job.role] || 'fixture-model')
-  for (const job of jobs) assert.equal(job.effort, roleEfforts[job.role])
+  for (const job of jobs) { assert.equal(job.effort, roleEfforts[job.role]); assert.deepEqual(job.modelPool, modelPool); assert.equal(job.modelMode, 'manual') }
   for (const tier of ['weekly', 'daily']) assert.deepEqual(jobs.filter((job) => job.tier === tier).map((job) => job.role), ['orchestrator', 'preflight', 'btc-analyst', 'eth-analyst', 'synthesizer', 'reviewer'])
   assert.deepEqual(persisted.map((row) => row.tier), ['weekly', 'daily'])
   assert.equal(result.automation_cycle.products[0].plan_hash, planHash)
@@ -328,6 +331,9 @@ test('primary deep-validates both documents before persistence, invokes paper pl
   for (const run of receipt.pi_provenance.runs) {
     assert.equal(run.provenance.default_model, 'fixture-model')
     assert.deepEqual(run.provenance.role_efforts, roleEfforts)
+    assert.equal(run.provenance.model_mode, 'manual'); assert.equal(run.provenance.model_pool_digest, modelPoolDigest(modelPool))
+    assert.equal(run.provenance.model_pool.find(({ id }) => id === 'fixture-model').context_window, null)
+    assert.ok(run.provenance.attempts.every((attempt) => attempt.model_pool_digest === modelPoolDigest(modelPool)))
     for (const attempt of run.provenance.attempts) assert.equal(attempt.effort, roleEfforts[attempt.role])
     for (const attempt of run.provenance.attempts) assert.equal(attempt.model, roleModels[attempt.role] || 'fixture-model')
     assert.deepEqual(Object.keys(run.provenance.role_models), ['orchestrator', 'preflight', 'btc-analyst', 'eth-analyst', 'synthesizer', 'reviewer'])

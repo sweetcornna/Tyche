@@ -1,7 +1,21 @@
+import { EFFORTS, validateModelPool, modelPoolDigest } from './model-pool.mjs'
+export { EFFORTS } from './model-pool.mjs'
 export const JOB_SCHEMA = 'tyche_pi_job/v1'
 export const RESULT_SCHEMA = 'tyche_pi_result/v1'
 export const CLUSTER_SCHEMA = 'tyche_pi_cluster/v1'
 export const PROVENANCE_SCHEMA = 'tyche_pi_provenance/v1'
+export const SESSION_PROTOCOLS = Object.freeze(['openai-responses', 'openai-completions', 'anthropic-messages'])
+export const DEFAULT_SESSION_PROTOCOL = SESSION_PROTOCOLS[0]
+
+export function validateSessionProtocol(value = DEFAULT_SESSION_PROTOCOL) {
+  if (!SESSION_PROTOCOLS.includes(value)) fail('PI_SESSION_PROTOCOL_UNSUPPORTED', 'Unsupported session API protocol')
+  return value
+}
+
+function sessionProtocol(value) {
+  if (value.provider === 'openai-responses-compatible') return validateSessionProtocol(value.protocol)
+  if (value.protocol !== undefined) fail('PI_SESSION_PROTOCOL_UNSUPPORTED', 'Session API protocol requires a session provider')
+}
 
 export const ROLES = Object.freeze([
   'orchestrator',
@@ -13,7 +27,6 @@ export const ROLES = Object.freeze([
 ])
 
 export const ASSETS = Object.freeze(['BTC', 'ETH'])
-export const EFFORTS = Object.freeze(['medium', 'high', 'xhigh'])
 export const DEFAULT_ROLE_EFFORTS = Object.freeze({ orchestrator: 'high', preflight: 'medium', 'btc-analyst': 'high', 'eth-analyst': 'high', synthesizer: 'high', reviewer: 'xhigh' })
 export const TIERS = Object.freeze(['weekly', 'daily'])
 export const MAX_ATTEMPTS = 2
@@ -23,16 +36,16 @@ export const MAX_PAYLOAD_BYTES = 2 * 1024 * 1024
 
 const JOB_KEYS = new Set([
   'schema', 'jobId', 'runId', 'role', 'asset', 'tier', 'date', 'isoWeek',
-  'provider', 'model', 'effort', 'attempt', 'timeoutMs', 'input'
+  'provider', 'model', 'effort', 'attempt', 'timeoutMs', 'input', 'modelPool', 'modelMode', 'protocol'
 ])
 const RESULT_KEYS = new Set([
   'schema', 'jobId', 'runId', 'role', 'asset', 'tier', 'date', 'isoWeek',
   'provider', 'model', 'effort', 'attempt', 'status', 'startedAt', 'finishedAt',
-  'output', 'error', 'provenance'
+  'output', 'error', 'provenance', 'modelPoolDigest', 'protocol'
 ])
 const ERROR_KEYS = new Set(['code', 'message'])
 const PROVENANCE_KEYS = new Set([
-  'schema', 'adapter', 'piAgentCore', 'piAi', 'provider', 'model', 'effort', 'role', 'attempt'
+  'schema', 'adapter', 'piAgentCore', 'piAi', 'provider', 'model', 'effort', 'role', 'attempt', 'protocol'
 ])
 
 // These are deliberately transport-boundary fields, not generic market terms.
@@ -145,6 +158,7 @@ function requiredTimestamp(value, path) {
 }
 
 function validateCommon(value, path) {
+  sessionProtocol(value)
   if (!EFFORTS.includes(value.effort)) fail('PI_SCHEMA_EFFORT', `${path}.effort must be medium, high or xhigh`, `${path}.effort`)
   requiredString(value.jobId, `${path}.jobId`)
   requiredString(value.runId, `${path}.runId`)
@@ -162,7 +176,11 @@ function validateCommon(value, path) {
 }
 
 export function validateJob(value) {
-  exactKeys(value, [...JOB_KEYS], JOB_KEYS, 'job')
+  exactKeys(value, [...JOB_KEYS].filter((key) => !['modelPool', 'modelMode', 'protocol'].includes(key)), JOB_KEYS, 'job')
+  if (value.modelPool !== undefined) {
+    const pool = validateModelPool(value.modelPool)
+    if (!pool.some((entry) => entry.id === value.model && entry.efforts.includes(value.effort)) || !['auto', 'manual'].includes(value.modelMode)) fail('PI_SCHEMA_MODEL_POOL', 'job model/effort must belong to its frozen pool')
+  } else if (value.modelMode !== undefined) fail('PI_SCHEMA_MODEL_POOL', 'modelMode requires a pool')
   if (value.schema !== JOB_SCHEMA) fail('PI_SCHEMA_NAME', `job.schema must be ${JOB_SCHEMA}`, 'job.schema')
   validateCommon(value, 'job')
   if (!Number.isInteger(value.timeoutMs) || value.timeoutMs < 1 || value.timeoutMs > MAX_TIMEOUT_MS) fail('PI_SCHEMA_TIMEOUT', `job.timeoutMs must be between 1 and ${MAX_TIMEOUT_MS}`, 'job.timeoutMs')
@@ -173,7 +191,8 @@ export function validateJob(value) {
 }
 
 function validateProvenance(value, path) {
-  exactKeys(value, [...PROVENANCE_KEYS], PROVENANCE_KEYS, path)
+  exactKeys(value, [...PROVENANCE_KEYS].filter((key) => key !== 'protocol'), PROVENANCE_KEYS, path)
+  sessionProtocol(value)
   if (value.schema !== PROVENANCE_SCHEMA) fail('PI_SCHEMA_PROVENANCE', `${path}.schema is invalid`, `${path}.schema`)
   requiredString(value.adapter, `${path}.adapter`, 128)
   requiredString(value.piAgentCore, `${path}.piAgentCore`, 32)
@@ -186,14 +205,15 @@ function validateProvenance(value, path) {
 }
 
 export function validateResult(value) {
-  exactKeys(value, [...RESULT_KEYS], RESULT_KEYS, 'result')
+  exactKeys(value, [...RESULT_KEYS].filter((key) => !['modelPoolDigest', 'protocol'].includes(key)), RESULT_KEYS, 'result')
+  if (value.modelPoolDigest !== undefined && (typeof value.modelPoolDigest !== 'string' || !/^[a-f0-9]{64}$/.test(value.modelPoolDigest))) fail('PI_SCHEMA_MODEL_POOL', 'result pool digest is invalid')
   if (value.schema !== RESULT_SCHEMA) fail('PI_SCHEMA_NAME', `result.schema must be ${RESULT_SCHEMA}`, 'result.schema')
   validateCommon(value, 'result')
   if (!['ok', 'error'].includes(value.status)) fail('PI_SCHEMA_STATUS', 'result.status must be ok or error', 'result.status')
   requiredTimestamp(value.startedAt, 'result.startedAt')
   requiredTimestamp(value.finishedAt, 'result.finishedAt')
   validateProvenance(value.provenance, 'result.provenance')
-  if (value.provenance.provider !== value.provider || value.provenance.model !== value.model || value.provenance.effort !== value.effort || value.provenance.role !== value.role || value.provenance.attempt !== value.attempt) {
+  if (value.provenance.provider !== value.provider || value.provenance.model !== value.model || value.provenance.effort !== value.effort || value.provenance.role !== value.role || value.provenance.attempt !== value.attempt || value.provenance.protocol !== value.protocol) {
     fail('PI_SCHEMA_PROVENANCE_MISMATCH', 'result provenance does not match result identity', 'result.provenance')
   }
   if (value.status === 'ok') {
@@ -223,6 +243,8 @@ export function assertResultMatchesJob(result, job) {
   for (const field of fields) {
     if (result[field] !== job[field]) fail('PI_RESULT_IDENTITY_MISMATCH', `result.${field} does not match job.${field}`, `result.${field}`)
   }
+  if (sessionProtocol(result) !== sessionProtocol(job)) fail('PI_RESULT_IDENTITY_MISMATCH', 'result protocol does not match job')
+  if (result.modelPoolDigest !== (job.modelPool ? modelPoolDigest(job.modelPool) : undefined)) fail('PI_RESULT_IDENTITY_MISMATCH', 'result pool digest does not match job')
   return result
 }
 
@@ -236,10 +258,12 @@ function redactedErrorMessage(error) {
 }
 
 export function makeResult(job, fields = {}) {
+  const protocol = sessionProtocol(job)
   const startedAt = fields.startedAt || new Date().toISOString()
   const finishedAt = fields.finishedAt || new Date().toISOString()
   const result = {
     schema: RESULT_SCHEMA,
+    ...(job.modelPool ? { modelPoolDigest: modelPoolDigest(job.modelPool) } : {}),
     jobId: job.jobId,
     runId: job.runId,
     role: job.role,
@@ -248,6 +272,7 @@ export function makeResult(job, fields = {}) {
     date: job.date,
     isoWeek: job.isoWeek,
     provider: job.provider,
+    ...(protocol ? { protocol } : {}),
     model: job.model,
     effort: job.effort,
     attempt: job.attempt,
@@ -265,6 +290,7 @@ export function makeResult(job, fields = {}) {
       piAgentCore: '0.84.4',
       piAi: '0.84.4',
       provider: job.provider,
+      ...(protocol ? { protocol } : {}),
       model: job.model,
       effort: job.effort,
       role: job.role,
@@ -275,8 +301,10 @@ export function makeResult(job, fields = {}) {
 }
 
 export function makeJob(fields) {
+  const protocol = sessionProtocol(fields)
   const job = {
     schema: JOB_SCHEMA,
+    ...(fields.modelPool ? { modelPool: validateModelPool(fields.modelPool), modelMode: fields.modelMode } : {}),
     jobId: fields.jobId,
     runId: fields.runId,
     role: fields.role,
@@ -285,6 +313,7 @@ export function makeJob(fields) {
     date: fields.date,
     isoWeek: fields.isoWeek,
     provider: fields.provider,
+    ...(protocol ? { protocol } : {}),
     model: fields.model,
     effort: fields.effort === undefined ? DEFAULT_ROLE_EFFORTS[fields.role] : fields.effort,
     attempt: fields.attempt ?? 0,

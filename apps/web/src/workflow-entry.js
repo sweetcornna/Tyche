@@ -1,3 +1,6 @@
+import { normalizeConnectionEndpoint } from '../../../packages/pi-agents/src/connection-endpoint.mjs'
+export { normalizeConnectionEndpoint, inferConnectionProtocol } from '../../../packages/pi-agents/src/connection-endpoint.mjs'
+
 export const PAPER_FIELDS = Object.freeze([
   { key: 'initial_usdt', label: '初始模拟资金', unit: 'USDT', group: '模拟资金' },
   { key: 'configured_leverage', label: '杠杆倍数', unit: '1–3 倍', group: '模拟资金' },
@@ -12,6 +15,12 @@ export const PAPER_FIELDS = Object.freeze([
   { key: 'trigger_slippage_bps', label: '止损触发滑点', unit: 'bps', group: '成交与止损约束' }
 ])
 
+export const CONNECTION_PROTOCOLS = Object.freeze([
+  { id: 'openai-responses', label: 'OpenAI Responses', example: 'https://example.com/v1', hint: '可填域名、基础地址或 /responses 完整地址；会自动补全并显示实际地址。' },
+  { id: 'openai-completions', label: 'OpenAI Chat Completions', example: 'https://example.com/v1', hint: '可填域名、基础地址或 /chat/completions 完整地址；会自动补全并显示实际地址。' },
+  { id: 'anthropic-messages', label: 'Anthropic Messages', example: 'https://example.com', hint: '可填域名、网关前缀或 /v1/messages 完整地址；自动检测目录，只使用本机支持的 Claude 原生 effort。' }
+])
+
 export function currentCycleWindow(now = new Date()) {
   const date = now.toISOString().slice(0, 10)
   const thursday = new Date(`${date}T00:00:00.000Z`)
@@ -21,32 +30,16 @@ export function currentCycleWindow(now = new Date()) {
   return { date, isoWeek: `${year}-W${String(week).padStart(2, '0')}` }
 }
 
-export function validatePaperDraft(setup, draft) {
-  if (!setup || setup.status === 'blocked') throw new Error(setup?.message || '请等待模拟设置检查完成。')
-  if (setup.ready) return {}
-  const values = { ...setup.values }
-  const input = {}
-  for (const { key, label, unit } of PAPER_FIELDS) {
-    const text = String(values[key] ?? draft[key] ?? '').trim()
-    if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(text) || text.length > 80 || !Number.isFinite(Number(text)) || Number(text) <= 0) throw new Error(`请填写${label}，使用正十进制数。`)
-    if (unit === 'bps' && Number(text) > 10000) throw new Error(`${label}不能超过 10000 bps（100%）。`)
-    if (key === 'configured_leverage' && (!Number.isInteger(Number(text)) || Number(text) > 3)) throw new Error('杠杆倍数必须为 1、2 或 3。')
-    if (!Object.hasOwn(values, key)) input[key] = text
-    values[key] = text
-  }
-  if (Number(values.max_order_notional_usdt) > Number(values.daily_new_notional_cap_usdt) || Number(values.max_order_notional_usdt) > Number(values.max_managed_notional_usdt)) throw new Error('单笔名义金额不能超过每日新增限额或总持仓限额。')
-  return input
-}
-
 export function providerRequest(provider, connection) {
-  const endpoint = connection.endpoint.trim()
-  let url
-  try { url = new URL(endpoint) } catch { throw new Error('请填写有效的 API endpoint。') }
-  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('API endpoint 须为不含凭据和查询参数的 HTTP(S) 地址。')
-  if (!provider.configured && !connection.apiKey.trim()) throw new Error('请填写 API key。')
+  const protocol = connection.protocol ?? CONNECTION_PROTOCOLS[0].id
+  if (!CONNECTION_PROTOCOLS.some(({ id }) => id === protocol)) throw new Error('请选择支持的 API 协议。')
+  let endpoint
+  try { endpoint = normalizeConnectionEndpoint(connection.endpoint.trim(), protocol) } catch { throw new Error('请填写有效的 API 基础地址：域名或 HTTP(S) 地址，不含凭据、查询、编码、点段或其他协议操作路径。') }
+  const sameEndpoint = provider.configured && normalizeConnectionEndpoint(provider.endpoint, provider.protocol ?? CONNECTION_PROTOCOLS[0].id) === endpoint && (provider.protocol ?? CONNECTION_PROTOCOLS[0].id) === protocol
+  if (!sameEndpoint && !connection.apiKey.trim()) throw new Error(provider.configured ? '更换 API 地址或协议时，请填写与该连接对应的 API key。' : '请填写 API key。')
   if (connection.apiKey && (connection.apiKey !== connection.apiKey.trim() || /[\u0000-\u001f\u007f]/.test(connection.apiKey))) throw new Error('API key 不能包含空白边界或控制字符。')
-  if (provider.configured && new URL(provider.endpoint).href === url.href && provider.model === connection.model && !connection.apiKey) return null
-  return { provider: 'openai-responses-compatible', model: connection.model, endpoint, ...(connection.apiKey ? { apiKey: connection.apiKey } : {}) }
+  if (sameEndpoint && provider.model === connection.model && !connection.apiKey) return null
+  return { provider: 'openai-responses-compatible', protocol, model: connection.model, endpoint, ...(connection.apiKey ? { apiKey: connection.apiKey } : {}) }
 }
 
 export async function saveConnection(api, csrf, provider, connection) {
@@ -56,22 +49,28 @@ export async function saveConnection(api, csrf, provider, connection) {
 
 export function createWorkflowRunner(api) {
   let running = false
-  return async ({ csrf, provider, connection, setup, draft, onPhase, onProvider, onSetup, now = () => new Date() }) => {
+  return async ({ csrf, provider, connection, setup, onPhase, onProvider, onSetup, now = () => new Date() }) => {
     if (running) return null
     running = true
     try {
-      const input = validatePaperDraft(setup, draft)
+      if (!setup?.ready) throw new Error(setup?.message || '请先与主 Agent 讨论模拟起点，或委托它配置。')
       providerRequest(provider, connection)
       onPhase('正在连接模型…')
       const saved = await saveConnection(api, csrf, provider, connection)
       onProvider(saved)
       onPhase('正在检查模拟设置…')
-      const ready = await api.setupPaper(input, csrf)
+      const ready = await api.paperSetup(csrf)
       onSetup(ready)
-      if (!ready.ready) throw new Error(ready.message || '模拟设置未完成，请检查必填参数。')
+      if (!ready.ready) throw new Error(ready.message || '模拟设置未完成，请与主 Agent 继续讨论。')
       onPhase('正在运行 workflow…')
       const { date, isoWeek } = currentCycleWindow(now())
       return await api.runCycle({ date, iso_week: isoWeek }, csrf)
     } finally { running = false }
   }
+}
+
+export function discoveryRequest(provider, connection) {
+  const request = providerRequest(provider, connection) || { provider: 'openai-responses-compatible', protocol: connection.protocol ?? CONNECTION_PROTOCOLS[0].id, endpoint: normalizeConnectionEndpoint(connection.endpoint.trim(), connection.protocol) }
+  const { model, ...discovery } = request
+  return discovery
 }

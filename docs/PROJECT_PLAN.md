@@ -1,10 +1,10 @@
 # Tyche 项目规划与验收路线
 
-更新日期：2026-09-05。代码事实基线：`285deb5`（`feat: default agents to Astra with role-based reasoning effort`）。本文件是接续开发与验收计划；“已实现”描述代码存在，“已验证”必须注明验证环境，后续阶段不表示已经完成或已经启用。
+更新日期：2026-09-05。历史 Astra 验收基线：`285deb5`；本轮对话配置及模型池/自动手动分配是在 `68dd5ee` 上的未提交工作区增量，尚未发布。本文件是接续开发与验收计划；“已实现”描述代码存在，“已验证”必须注明验证环境，后续阶段不表示已经完成或已经启用。
 
 ## 1. 产品目标与范围
 
-Tyche 的当前目标是：用户在本机通过主聊天讨论 BTC/ETH 策略，显式应用策略及角色模型设置，然后启动一次可追溯的公开行情分析与确定性 Paper 周期，理解结果、阻断原因和模拟账户变化。语义模型负责分析；数量、杠杆约束、资金限额、计划封印、模拟成交与执行权限由确定性代码负责。
+Tyche 的当前目标是：用户在本机通过主聊天讨论 BTC/ETH 策略，通过请求或委托让主 Agent 配置策略、角色模型和模拟起点，然后启动一次可追溯的公开行情分析与确定性 Paper 周期，理解结果、阻断原因和模拟账户变化。语义模型负责分析；数量、杠杆约束、资金限额、计划封印、模拟成交与执行权限由确定性代码负责。
 
 现有 UI 简化和主聊天策略与模型/effort 操作已完成离线验收，保留为后续回归基线。接续工作首先验证真实模型网关，再验证完整 Paper 联合路径；用户明确选择后才验收已有独立调度及测试网能力。只有后续验证发现具体缺陷，才安排对应 UI 修复。优先跑通可复核的 Paper 闭环，不以产生交易或盈利作为成功标准。证据不足时的 `NO_TRADE` 或明确阻断也是正确结果。
 
@@ -22,11 +22,11 @@ Tyche 的当前目标是：用户在本机通过主聊天讨论 BTC/ETH 策略�
 
 | 能力 | 当前实现 | 验证范围与限制 |
 |---|---|---|
-| 本地分析工作台 | 固定 Agent 列表、主聊天、运行设置、策略面板、运行详情与高级设置 | 本地页面及 fixture 路径已有验收；仍需结合真实网关完成用户最短路径验收 |
+| 本地分析工作台 | 固定 Agent 列表、主聊天、API 两字段、只读配置摘要与运行详情 | 本地页面及 fixture 路径已有验收；仍需结合真实网关完成用户最短路径验收 |
 | 六角色 weekly/daily DAG | 固定拓扑、结构化输出、超时和有界分析重试、失败关闭 | 离线测试及 SDK fixture 已验证；不等于真实模型输出已稳定 |
-| Astra 与角色 effort | 六角色默认 Astra，支持显式应用角色 model/effort | 实际 SDK 请求序列化已用 fixture 验证；真实 API key 与网关兼容性尚未验证 |
-| 策略和主聊天 | 讨论无工具，不直接应用；策略与模型配置分别显式应用 | 会话隔离、busy 互斥、冻结映射、身份校验和回执复用已有离线覆盖 |
-| 首次 Paper 设置 | 十一项显式输入、固定文件、冲突和配置摘要校验 | 初始化与重复运行离线验证；不代表已有用户授权的资金或风险参数 |
+| Astra 与角色 effort | 默认池仅 Astra；用户声明模型池，支持主 Agent 自动分配与手动六角色选择 | 实际 SDK 请求序列化已用 fixture 验证；真实 API key 与网关兼容性尚未验证 |
+| 策略和主聊天 | 讨论无工具；解释不修改，配置请求按明确范围自动应用并反馈服务端状态 | 会话隔离、busy 互斥、冻结映射、身份校验和回执复用已有离线覆盖 |
+| 首次 Paper 设置 | 对话收集十一项模拟参数，委托时明确模拟假设；固定文件与冲突校验 | 对话应用与失败回滚使用隔离 fixture 验证；不代表真实资金或真实偏好 |
 | 公开行情与 Paper | CCXT 公共数据、Gate 权威证据、先结算、确定性计划、模拟账本、周期回执 | 已实现且有离线端到端覆盖；本基线未证明真实网关加当期公开行情的完整联合运行 |
 | 独立 UTC scheduler | 固定 UTC 时槽、状态与依赖控制，cluster 默认 shadow | 实现和离线测试存在；不宣称已部署常驻进程或完成持续运行验收 |
 | 独立 testnet executor | 单场所、独立进程/凭据、arm 与计划身份门禁、对账和保护单 | 实现和 fixture 测试存在；未据此宣称实际账户、真实提交、成交或保护成功 |
@@ -37,20 +37,21 @@ Tyche 的当前目标是：用户在本机通过主聊天讨论 BTC/ETH 策略�
 
 ## 3. 用户最短操作路径
 
-开发者先按 [README 的安装与本地启动步骤](../README.md#local-pi-cluster-and-analysis-cockpit) 安装、构建页面并运行 `scripts/tyche-control-plane.mjs`。服务仅绑定本机 loopback，使用一次性 bootstrap token 登录。独立 `@tyche/control-plane` 包 CLI 是投影壳，不能替代完整脚本入口。
+开发者先按 [README 的安装与本地启动步骤](../README.md#local-pi-cluster-and-analysis-cockpit) 安装、构建页面并运行 `scripts/tyche-control-plane.mjs`。服务仅绑定本机 loopback；默认使用随机一次性 bootstrap token，也可用权限为 `0600` 的 ignored `config/control-plane.token` 显式配置固定可复用登录。完整入口每次启动读取项目自身的固定路径；退出、会话过期和重启后可用同一固定 token 登录，每次仍生成随机 session/CSRF，重登录会撤销同一浏览器的旧会话和模型凭据。独立 `@tyche/control-plane` 包 CLI 是投影壳，保留随机一次性登录，不能替代完整脚本入口。
 
-1. 登录后进入“运行设置”，输入模型 API endpoint 与 API key。连接经过受限传输校验，不把地址校验通过误报为模型网关联通成功。
-2. 首次运行填写十一项 Paper 参数。用户必须自行提供资金和风险偏好；页面不应替用户生成默认限额。再次运行复用通过校验的已有账户与连接。
-3. 如需自定义策略，在主聊天讨论或在策略面板粘贴 BTC/ETH 语义策略；选择“应用策略”。聊天回复或草稿本身不生效。
-4. 如需改变模型或推理强度，请主 Agent 提出六角色配置建议；选择“应用模型配置”。策略应用与模型应用是两个独立动作。
-5. 选择“运行 workflow”。启动时采用当前 UTC 日期与 ISO 周，冻结策略及完整角色配置，执行一次分析、确定性计划和 Paper 周期。
-6. 查看周期状态、结果摘要、模拟账户变化或明确阻断原因。需要排查时在页面运行详情查看 DAG、事件与摘要；实际角色 model/effort 的 provenance 应在本机周期回执及相关 provenance 文件中查证，页面尚无专门的 provenance 查看界面；重复点击可能复用已有同周期回执，不保证产生新分析或新模拟成交。
+1. 登录后进入“运行设置”，手动选择 OpenAI Responses（默认）、OpenAI Chat Completions 或 Anthropic Messages，再输入对应的 API 基础地址与 API key。可填裸域名、基础地址或当前协议完整操作地址，前后端统一自动补全并显示实际基础地址；OpenAI 根地址补 `/v1`，Anthropic 去标准尾 `/v1`，显式网关前缀保留。协议、地址与 Key 整组保存，换协议或地址必须重新填写 Key，失败保留原配置。原连接校验检查 URL、本机 DNS 和 SDK/模型元数据；新目录检测会带会话 Key 请求固定 models GET，但不调用推理或 Paper；已知失败返回固定可操作提示。刷新或新标签页只读恢复当前会话；不同本机端口使用独立 cookie。会话变化后先恢复或重新登录，核对当前配置与保留的协议/域名/Key、聊天草稿，再自行发送；不会自动重试写操作。
+2. 若网关仅支持自定义模型，先在“模型分配”保存可用 ID/effort 池及首次分配主模型，再填写连接；普通 Astra 网关无需新增步骤。在主聊天描述希望验证的 BTC/ETH 想法。主 Agent 主动问一两个必要问题，并在会话草稿中记住已知偏好与参数，不会因为最近八条消息窗口截断就清空答案。
+   已有模型连接时，完整候选池及所有声明 effort 必须兼容当前协议；不兼容的候选在任何保存前整组拒绝。若要准备另一协议的模型池，可先清除模型连接；未连接时仍可预存池，原有 auto pending/manual blocked 的旧角色引用语义保留。
+3. 用户不确定时可说“由你安排模拟起点”。主 Agent 将推断值标为虚拟资金和模拟假设，补齐十一项参数；它不推断真实余额，不保证最优或盈利。无需手填技术问卷。
+4. 请求配置时，响应明确本次应用范围，服务器整组校验后自动应用策略、模型/effort、主题或首次 Paper 设置，并显示真实应用/待补充/失败状态。纯解释不改设置；独立主题或模型调整不顺带提交旧 Paper 草稿。已有账户与风控不会覆盖、重置或归档。
+5. 选择“运行 workflow”。未就绪时引导主 Agent 补问；就绪后按当日 UTC 日期和 ISO 周冻结策略及完整角色配置，执行一次分析、确定性计划和 Paper 周期。
+6. 查看周期结果、明确阻断原因及运行详情的 DAG/事件。实际角色 model/effort 可在本机回执 provenance 核查；同周期仍复用已有回执，不因聊天调整产生重复模拟成交。测试网在页面仅展示状态，独立执行门禁不变。
 
 首次参数对应关系：
 
 | 参数 | 含义 | 存放位置 |
 |---|---|---|
-| `configured_leverage` | 用户设定杠杆，整数 1–3 | ignored 本地配置 |
+| `configured_leverage` | 模拟杠杆，整数 1–3 | ignored 本地配置 |
 | `risk_per_trade_bps` | 单笔风险预算 | ignored 本地配置 |
 | `max_order_notional_usdt` | 单笔名义金额上限 | ignored 本地配置 |
 | `daily_new_notional_cap_usdt` | 当日新增名义金额上限 | ignored 本地配置 |
@@ -118,24 +119,30 @@ weekly 和 daily 使用同一固定拓扑。主聊天不是第七个 DAG 角色�
 
 ### 模型与 effort 的兼容性
 
-固定会话模型目录包含 Astra，以及保留的 Luna、Sol、Terra、5.5、5.4 Mini；精确模型 ID 见 [会话 provider 定义](../packages/pi-agents/src/session-provider.mjs)。只开放 `medium`、`high`、`xhigh`，不代表每个旧模型支持所有组合；必须按实际元数据拒绝不支持的组合，禁止 SDK 静默降档。
+默认会话池仅包含 Astra；已知目录保留 Luna、Sol、Terra、5.5、5.4 Mini 供用户添加，也可声明自定义 ID 与可用 effort。已知模型 ID 见 [会话 provider 定义](../packages/pi-agents/src/session-provider.mjs)。只开放 `medium`、`high`、`xhigh`，不代表每个旧模型支持所有组合；必须按实际元数据拒绝不支持的组合，禁止 SDK 静默降档。
 
-Pi `0.84.4` 自带目录没有 Astra，因此 [会话 provider](../packages/pi-agents/src/session-provider.mjs) 使用显式 custom Responses 定义。`272000` context 与 text/image 输入来自已核实的本机目录；`16384` 是应用单次输出预算，不是模型能力上限。价格未知，SDK 必需的零占位不能展示为免费或费用估算。旧模型保留固定 SDK 元数据，不借此次规划扩展 provider 或模型目录。
+Pi `0.84.4` 自带目录没有 Astra，因此 [会话 provider](../packages/pi-agents/src/session-provider.mjs) 使用显式 custom 模型定义，默认走 Responses，也可明确选择 Chat Completions。`272000` context 与 text/image 输入来自已核实的本机目录；`16384` 是应用单次输出预算，不是模型能力上限。价格未知，SDK 必需的零占位不能展示为免费或费用估算。旧模型保留固定 SDK 元数据。Responses/Chat 的自定义模型只扩展固定协议请求的 model 值，不增加 provider/工具/执行权限；未知 context 在 SDK 使用零哨兵、对用户展示未知，价格不作估算。Anthropic Messages 仅接受模型面板列出的固定 SDK 原生 adaptive Claude 及可原样传输的 effort；GPT、未知别名、仅支持 budget 的模型和不支持的档位明确拒绝，不伪装模型或降档。不支持 OAuth，移除 SDK fallback 模型能力，失败不自动换协议。协议不能由聊天更改；自动目录发现可用已列出且本机支持的模型建立首次聊天候选池，手动配置保持原样。
 
 ## 5. 策略、配置与数据生命周期
 
 | 对象 | 生命周期 | 生效规则与保护 |
 |---|---|---|
-| 模型 endpoint/API key | 服务端会话内存 | 不写项目文件、提示词、结果或日志；退出、过期或服务重启后重新输入 |
-| 讨论历史、策略草稿与已应用策略 | 会话内存 | 讨论不应用；显式应用只影响后续尚未启动的分析 |
-| 六角色 model/effort | 会话内存 | 显式应用与策略应用分离；主聊天取 orchestrator 有效值 |
+| 模型协议/endpoint/API key | 服务端会话内存 | 协议随 job/result/provenance 记录；endpoint/Key 不写项目文件、提示词、结果或日志；退出、过期或服务重启后重新输入 |
+| 讨论历史、策略草稿与已应用策略 | 会话内存 | 解释不应用；配置请求作用域决定所消费的草稿，策略仅影响后续未开始的分析 |
+| 模型池、模式与六角色 model/effort | 会话内存 | 自动池变化标记 pending，主 Agent 完整分配与依据后就绪；手动模式拒绝聊天角色覆盖；主聊天未分配时使用明确 bootstrap |
 | 周期输入快照 | 启动时冻结 | 第一个异步前置检查前冻结完整有效配置；运行中不改变角色身份 |
 | Paper 风险配置 | `config/tyche.local.json`，Git ignored | 默认从 locked 模板建立；不修改提交模板，不静默覆盖冲突 |
 | 自定义启动配置 | 用户选定的本地文件 | 始终保持选定，不由页面重写；缺失限额由用户在原配置补齐 |
 | Paper 账户 | `data/paper/active.json`，Git ignored | 校验配置摘要、哈希链与既有状态，不因新会话或参数更改重置 |
 | 行情、canonical 文档、计划、回执与 provenance | ignored runtime data/outputs | 由确定性代码校验和保存；不提交真实运行数据 |
 
-连接变更、讨论、应用与周期启动遵守现有 busy/session/CSRF 检查。模型输出不能获取或修改凭据，连接信息不能进入分析内容。job、result、provenance 与分析重试身份包含实际角色 model 和 effort；不能仅记录默认值而掩盖实际请求。
+模型池最多十二项，每项为有界 ID 和 medium/high/xhigh 的非空子集。已知元数据与声明冲突整组拒绝；池变化清理失效角色草稿，保留无关 Paper/策略草稿。手动模式支持逐角色保存；自动模式只有主模型返回完整分配及依据才可解除新池 pending，不在每个周期额外调用模型。
+
+模型目录发现新增固定 `/api/provider/discover`，完成输入后 blur 或首次发送前自动读取，保留重新检测及失败后手动路径。单次标准 GET 限 10 秒、256 KiB、200 条，不扩展 query/重定向通道；Anthropic `has_more` 明确标为当前页不完整。目录只保留有界 ID 和固定能力来源，原始 name/description/URL 不入提示；目录列出、本机/SDK effort、用户明确声明、未知能力分别展示。目录五分钟失效，仅会话内存，绑定实际协议、归一化 endpoint 和凭据身份；旧异步响应不能覆盖新输入或重建失效会话。
+
+自动候选池最多十二项，先保留当前可用声明（已声明窄 effort 不扩张），再按本机能力固定顺序补充，并展示规则与未选数量。无 Astra 但含已知可用模型可直接开始聊天，候选池及 bootstrap 只为启动对话，六角色仍须主 Agent 完整选择并提供依据。未知 custom effort 可保留为聊天草稿，但必须在模型面板明确保存才能成为能力声明；保存后匹配目录立即更新，检测事实/失效时间/连接绑定保持不变。无可启动候选时只展示目录，原可用连接及配置不变。显式能力声明独立于当前选用模型池保存；主 Agent 切换池或 effort 不缩减已确认能力。面板在开始编辑时捕获声明目标，服务端核对有界确认 ID 后绑定实际协议、地址和凭据身份；过期或被替换目标的旧草稿须重新确认，目录过期不清除同连接声明，换 Key/地址/协议不继承。目录成功换池复用失效角色草稿清理，保留独立 Paper/策略草稿；手动池、bootstrap 和角色均不被检测或聊天覆盖。
+
+连接变更、讨论、应用与周期启动遵守现有 busy/session/CSRF 检查。模型输出不能获取或修改凭据，连接信息不能进入分析内容。周期冻结模型池、模式及完整角色选择；job、result、provenance 与分析重试身份包含实际角色 model、effort 和池摘要；不能仅记录默认值而掩盖实际请求。
 
 同周期复用是低成本和不重复模拟成交的正确性要求。v2 回执封印 weekly、daily、market、policy、计划、Paper receipt 与账本前后状态摘要；在规定身份及 active ledger 匹配封印后状态时复用。变更提示词、模型或 effort 不能作为绕过回执、重复填单或强制新周期的理由。若回执与当前证据/账本不一致，依现有代码阻断或处理，不能删除回执“重试”。
 
@@ -155,16 +162,16 @@ testnet 必须显式选择一个场所、独立进程及其本地配置/凭据�
 
 阶段采用完成条件，不承诺日期或模型费用。发现当前实现已满足时只补验收证据，不重复重构。
 
-### P0：已完成的 UI 与主聊天离线验收基线
+### P0：历史 Astra 基线与本轮对话配置验收
 
-状态：`285deb5` 已完成现有 UI 简化及主聊天路径的离线验收，不存在本计划额外指定的 UI 待开发功能。保留以下清单用于回归；仅在后续真实验证发现具体缺陷时定向修复，不无依据重复开发。
+历史状态：`285deb5` 完成的是 Astra/effort、手填 Paper 参数及分别确认策略/模型的旧页面离线验收。其 344 项测试与页面证据不能证明本轮 API 两字段、主动追问和自动配置行为。当前工作区增量须单独验证下面清单；自动回归使用仓库内测试与隔离 fixture，最终页面验收由主 Agent 完成。尚未提交或发布新功能。
 
 基线依赖：当前工作台、会话 provider、策略讨论与 Paper 设置接口，使用 fixture，无需真实交易凭据。
 
-已完成的离线验收与后续回归清单：
+本轮工作区增量的验收与后续回归清单：
 
-- 从首次登录到首次 Paper 周期无不必要步骤，十一项参数解释明确，错误指出具体缺项或冲突。
-- 主聊天讨论策略和模型/effort 后，两个显式应用动作独立工作；界面正确显示生效范围。
+- 从首次登录到首次 Paper 周期无不必要步骤，仅 API 域名/Key 手填，十一项参数通过对话收集；错误指出具体缺项或冲突。
+- 主聊天主动补问，用户委托时说明模拟假设并自动配置；模型池与逐角色选择是可手动填写的明确例外；作用域保证独立主题/模型修改不提交旧 Paper 草稿，界面显示服务端真实状态。
 - 主聊天复用 orchestrator 的有效配置；六角色、三档 effort 及不兼容组合拒绝与实际 SDK 请求一致。
 - 忙碌期间不能造成配置穿透；退出/过期后的内存状态消失，Paper 账户保持完整。
 - 同周期复用在页面可理解，不暗示重复成交或静默重置账户。
@@ -177,7 +184,7 @@ testnet 必须显式选择一个场所、独立进程及其本地配置/凭据�
 
 先验证受限连接与主聊天，再用受控公开证据跑 weekly/daily 角色请求。逐项确认请求中的模型与 effort、结构化输出、超时/失败错误及 provenance；一次成功不能推断其他模型/effort 组合也可用。
 
-验收标准：记录实际网关支持的 Astra 请求与本次角色 effort；周/日结果通过 canonical 校验，主聊天应用配置后下一请求采用新值；失败信息不暴露连接秘密；不存在静默降档。Astra 价格仍未知时不计算费用收益比。
+验收标准：记录实际网关支持的 Astra 请求与本次角色 effort；周/日结果通过 canonical 校验，主聊天请求配置并由服务端确认应用后，下一请求采用新值；失败信息不暴露连接秘密；不存在静默降档。Astra 价格仍未知时不计算费用收益比。
 
 停止条件：无有效 key、网关不支持模型或 exact effort、结构化结果不合格、预算范围不明确、网络或传输限制阻断。报告可复核的脱敏错误，不更换未知网关、扩大模型目录或降级配置来伪造通过。
 
@@ -208,8 +215,8 @@ testnet 验收从独立 executor 状态与只规划开始；只有用户选择�
 | 层次 | 必须证明 | 主要入口 | 证据含义 |
 |---|---|---|---|
 | 配置与静态边界 | locked 模板、支持范围、无越权接口 | `npm run check`；[安全测试](../test/repository-safety.test.mjs) | 离线静态与配置检查 |
-| 模型协议与 SDK | 固定角色、effort 原样序列化、身份/重试、兼容性拒绝 | [Astra 测试](../packages/pi-agents/test/astra-effort.test.mjs)、[provider 测试](../packages/pi-agents/test/session-provider.test.mjs) | fixture 使用实际 SDK；不证明网关可用 |
-| 会话/UI | CSRF、busy、显式应用、冻结、首次设置和错误 | [控制平面测试](../apps/control-plane/test/control-plane.test.mjs)、[Paper 设置测试](../test/control-paper-setup.test.mjs)、[UI 入口测试](../apps/web/test/workflow-entry.test.mjs) | 自动回归，另需实际页面验收 |
+| 模型协议与 SDK | 三协议原生路径/认证头/SSE、固定角色、effort 原样序列化、协议身份/重试、兼容性拒绝 | [协议测试](../packages/pi-agents/test/session-protocol.test.mjs)、[Astra 测试](../packages/pi-agents/test/astra-effort.test.mjs)、[provider 测试](../packages/pi-agents/test/session-provider.test.mjs) | fixture 使用实际 SDK；不证明网关或 Key 可用 |
+| 会话/UI | CSRF、busy、对话作用域、冻结、首次设置同步提交与错误 | [控制平面测试](../apps/control-plane/test/control-plane.test.mjs)、[Paper 设置测试](../test/control-paper-setup.test.mjs)、[UI 入口测试](../apps/web/test/workflow-entry.test.mjs) | 自动回归，另需实际页面验收 |
 | Paper 与周期 | 先结算、计划、风险熔断、事件真值和复用 | [Paper 测试](../test/paper-trade.test.mjs)、[Pi 自动化测试](../test/pi-automation.test.mjs)、`npm run test:e2e` | 离线完整路径，不是实际网关/账户证据 |
 | 调度/测试网 | 时槽身份、依赖、arm、歧义、保护和对账 | [scheduler 测试](../test/utc-scheduler.test.mjs)、[executor 测试](../test/testnet-executor.test.mjs)、[testnet 测试](../test/testnet-trade.test.mjs) | fixture 安全门禁，不是实际提交证明 |
 | 全套离线回归 | 既有行为未破坏 | `npm test`、`npm run selftest` | 报告真实通过数与退出结果 |
@@ -275,4 +282,4 @@ testnet 验收从独立 executor 状态与只规划开始；只有用户选择�
 | Paper 计划、账本和回执 | [自动化](../scripts/crypto-automation.mjs)、[Paper](../scripts/paper-trade.mjs)、[Gate 设计](GATE_TRADING.md) |
 | 公共数据及独立测试网 | [多交易所数据](MULTI_EXCHANGE_DATA.md)、[自动 testnet](AUTOMATIC_TESTNET.md) |
 
-P0 已完成离线验收，作为后续回归基线。下一推进项是补齐 P1 网关前置条件并完成真实连接验证，再进入 P2 真实联合 Paper 验收；P3 为等待用户明确选择的可选阶段。每阶段完成后更新事实、证据和剩余阻断，不把下一阶段计划改写为完成承诺。
+历史 P0 的 Astra 路径已有离线基线。本轮对话配置增量先完成独立检查、自动回归与新页面验收，再补齐 P1 网关前置条件并完成真实连接验证，随后进入 P2 真实联合 Paper 验收；P3 为等待用户明确选择的可选阶段。每阶段完成后更新事实、证据和剩余阻断，不把下一阶段计划改写为完成承诺。

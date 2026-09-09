@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
-import { pathToFileURL } from 'node:url'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   SESSION_API_KEY_ENV,
   SESSION_ENDPOINT_ENV,
@@ -10,7 +12,7 @@ import {
   createSessionProviderRuntime,
   discussSessionStrategy
 } from '../packages/pi-agents/src/index.mjs'
-import { createControlPlane, LOOPBACK_HOST } from '../apps/control-plane/src/control-plane.mjs'
+import { createControlPlane, LOOPBACK_HOST, providerValidationError } from '../apps/control-plane/src/control-plane.mjs'
 import {
   EXECUTOR_SOCKET_PATHS,
   readTycheClusterState,
@@ -23,9 +25,43 @@ import {
 } from './tyche-cluster.mjs'
 import { rejectPiMutationCredentials, runPiAutomation } from './pi-automation.mjs'
 import { createPaperSetupAdapter } from './control-paper-setup.mjs'
+import { createConversationStore } from '../apps/control-plane/src/conversations.mjs'
+import { createPaperSceneAdapter } from './control-paper-scene.mjs'
 
 const FLAGS = new Set(['--port', '--provider', '--model', '--mode', '--config', '--testnet-venue'])
 const VENUES = new Set(['gate', 'binance'])
+const CONFIG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../config')
+
+function readLocalBootstrapOptions() {
+  let descriptor
+  try {
+    const directory = fs.lstatSync(CONFIG_ROOT)
+    if (directory.isSymbolicLink() || !directory.isDirectory()) fail('CONTROL_CHILD_BOOTSTRAP_FILE_INVALID', 'Bootstrap config directory must be a real directory')
+    descriptor = fs.openSync(path.join(CONFIG_ROOT, 'control-plane.token'), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK)
+    const stat = fs.fstatSync(descriptor)
+    if (!stat.isFile() || (stat.mode & 0o077) !== 0 || stat.size < 6 || stat.size > 258) {
+      fail('CONTROL_CHILD_BOOTSTRAP_FILE_INVALID', 'config/control-plane.token must be a private regular file containing one bounded token; use mode 0600')
+    }
+    const bytes = Buffer.alloc(259)
+    try {
+      let length = 0
+      while (length < bytes.length) {
+        const count = fs.readSync(descriptor, bytes, length, bytes.length - length, null)
+        if (!count) break
+        length += count
+      }
+      const value = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes.subarray(0, length))
+      if (!/^[A-Za-z0-9_-]{6,256}(?:\r?\n)?$/.test(value)) fail('CONTROL_CHILD_BOOTSTRAP_FILE_INVALID', 'config/control-plane.token must contain one 6 to 256 character URL-safe token')
+      return { bootstrapToken: value.replace(/\r?\n$/, ''), reusableBootstrapToken: true }
+    } finally { bytes.fill(0) }
+  } catch (error) {
+    if (error.code === 'ENOENT' && descriptor === undefined) return {}
+    if (error instanceof ControlChildError) throw error
+    fail('CONTROL_CHILD_BOOTSTRAP_FILE_INVALID', 'Cannot safely read config/control-plane.token; check its format, permissions, and file type')
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor)
+  }
+}
 
 class ControlChildError extends Error {
   constructor(code, message) {
@@ -163,9 +199,18 @@ export async function startControlPlaneChild(rawOptions = {}) {
   let bootstrapToken = null
   let plane
   const controlPlaneFactory = typeof rawOptions.controlPlaneFactory === 'function' ? rawOptions.controlPlaneFactory : createControlPlane
+  // Programmatic callers retain explicit control; the CLI always reads the
+  // fixed project file because it exposes no authentication override flags.
+  const hasBootstrapOptions = ['bootstrapToken', 'reusableBootstrapToken'].some((key) => Object.hasOwn(rawOptions, key))
+  const localBootstrapOptions = hasBootstrapOptions ? {} : readLocalBootstrapOptions()
   plane = controlPlaneFactory({
     host: LOOPBACK_HOST,
     port: options.port,
+    discovery: { lookup: rawOptions.lookup, fetchImpl: rawOptions.fetchImpl },
+    conversationStore: createConversationStore(rawOptions.persistentHistory ? { file: path.resolve(CONFIG_ROOT, '../data/control/conversations.json') } : {}),
+    ...(Object.hasOwn(rawOptions, 'bootstrapToken') ? { bootstrapToken: rawOptions.bootstrapToken } : {}),
+    ...(Object.hasOwn(rawOptions, 'reusableBootstrapToken') ? { reusableBootstrapToken: rawOptions.reusableBootstrapToken } : {}),
+    ...localBootstrapOptions,
     // The web bundle is a fixed server asset. createControlPlane performs its
     // real-directory/index.html startup checks before binding.
     staticRoot: STATIC_ROOT,
@@ -176,20 +221,22 @@ export async function startControlPlaneChild(rawOptions = {}) {
       cycle: () => stateReader().recent_cycle || { status: 'empty' },
       dag: () => stateReader().dag,
       paper: () => stateReader().paper,
+      paperScene: createPaperSceneAdapter(),
       paperSetupStatus: paperSetup.status,
       setupPaper: paperSetup.setup,
       discussStrategy: async (input, runtime) => {
-        const connection = { endpoint: runtime.endpoint, apiKey: runtime.apiKey.toString('utf8'), modelId: runtime.model, ...(rawOptions.lookup ? { lookup: rawOptions.lookup } : {}), ...(rawOptions.fetchImpl ? { fetchImpl: rawOptions.fetchImpl } : {}) }
-        try { return await discussSessionStrategy(input, connection, { runtimeFactory: providerRuntimeFactory }) } finally { connection.apiKey = ''; connection.endpoint = '' }
+        const connection = { endpoint: runtime.endpoint, apiKey: runtime.apiKey.toString('utf8'), protocol: runtime.protocol, modelId: runtime.model, modelPool: runtime.modelPool, effort: runtime.effort, ...(rawOptions.lookup ? { lookup: rawOptions.lookup } : {}), ...(rawOptions.fetchImpl ? { fetchImpl: rawOptions.fetchImpl } : {}) }
+        try { return await discussSessionStrategy(input, connection, { runtimeFactory: providerRuntimeFactory, signal: runtime.signal }) } finally { connection.apiKey = ''; connection.endpoint = '' }
       },
       validateProviderConfig: async (runtime) => {
-        if (!runtime || runtime.provider !== SESSION_PROVIDER_ID || !SESSION_MODEL_IDS.includes(runtime.model) || !Buffer.isBuffer(runtime.apiKey)) {
+        if (!runtime || runtime.provider !== SESSION_PROVIDER_ID || !(runtime.modelPool || SESSION_MODEL_IDS.map((id) => ({ id }))).some(({ id }) => id === runtime.model) || !Buffer.isBuffer(runtime.apiKey)) {
           fail('CONTROL_CHILD_SESSION_PROVIDER_INVALID', 'Session provider configuration is invalid')
         }
         const temporary = {
           endpoint: String(runtime.endpoint || ''),
           apiKey: runtime.apiKey.toString('utf8'),
-          modelId: runtime.model,
+          modelId: runtime.model, modelPool: runtime.modelPool, effort: runtime.effort,
+          protocol: runtime.protocol,
           ...(rawOptions.lookup ? { lookup: rawOptions.lookup } : {}),
           ...(rawOptions.fetchImpl ? { fetchImpl: rawOptions.fetchImpl } : {})
         }
@@ -197,10 +244,8 @@ export async function startControlPlaneChild(rawOptions = {}) {
           await providerRuntimeFactory(temporary)
           return { ok: true }
         } catch (error) {
-          const code = typeof error?.code === 'string' && error.code.startsWith('PI_')
-            ? error.code
-            : 'CONTROL_CHILD_SESSION_PROVIDER_INVALID'
-          fail(code, 'Session provider configuration is invalid')
+          const diagnostic = providerValidationError(error)
+          fail(diagnostic.code, diagnostic.message)
         } finally {
           temporary.apiKey = ''
           temporary.endpoint = ''
@@ -211,7 +256,7 @@ export async function startControlPlaneChild(rawOptions = {}) {
       runCycle: async ({ date, isoWeek }, runtime) => {
         // This adapter is intentionally one-shot analysis/paper only. It has
         // no path to the scheduled executor sequence in tyche-cluster.
-        if (!runtime || runtime.provider !== SESSION_PROVIDER_ID || !SESSION_MODEL_IDS.includes(runtime.model) || !Buffer.isBuffer(runtime.apiKey)) {
+        if (!runtime || runtime.provider !== SESSION_PROVIDER_ID || !(runtime.modelPool || SESSION_MODEL_IDS.map((id) => ({ id }))).some(({ id }) => id === runtime.model) || !Buffer.isBuffer(runtime.apiKey)) {
           fail('CONTROL_CHILD_SESSION_PROVIDER_INVALID', 'Session provider configuration is invalid')
         }
         const temporary = {
@@ -231,12 +276,15 @@ export async function startControlPlaneChild(rawOptions = {}) {
               date,
               isoWeek,
               provider: runtime.provider,
+              protocol: runtime.protocol,
               model: runtime.model,
               mode: 'primary',
               configPath: paperSetup.configPath(),
               strategyPrompt: runtime.strategyPrompt || '',
               roleModels: runtime.roleModels,
               roleEfforts: runtime.roleEfforts,
+              modelPool: runtime.modelPool,
+              modelMode: runtime.modelMode,
               env: workerEnv,
               workerEnv,
               onEvent: (event) => plane.publish(redactSessionValue(projectClusterEvent({ type: 'dag_role', data: event }), sessionSecrets))
@@ -293,7 +341,7 @@ export async function startControlPlaneChild(rawOptions = {}) {
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   try {
     const args = parseControlPlaneArgs(process.argv)
-    await startControlPlaneChild(args)
+    await startControlPlaneChild({ ...args, persistentHistory: true })
   } catch (error) {
     process.stderr.write(`${error.code || 'CONTROL_CHILD_START_FAILED'}: ${String(error.message || error)}\n`)
     process.exitCode = 1

@@ -5,6 +5,7 @@ import { ControlPlaneError, PAPER_SETUP_FIELDS } from '../apps/control-plane/src
 import { validateConfig } from './config.mjs'
 import { createPaperLedger, validatePaperLedger } from './paper-trade.mjs'
 import { sha256Hex } from './gate-trade.mjs'
+import { validatePaperSettings } from '../packages/pi-agents/src/conversation-settings.mjs'
 import { readJsonStrict, withFileLock, writeJsonAtomic, writeTextAtomic } from './lib-iolock.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -77,17 +78,20 @@ export function createPaperSetupAdapter({ configPath, root = ROOT, writeJson = w
   function status() {
     try { return dto(readState()) } catch (error) { const safe = safeFailure(error); return { ready: false, status: 'blocked', values: {}, missing: [], code: safe.code, message: safe.message } }
   }
-  function setup(input) {
+  function setup(input, { assertActive = () => {}, commit = () => {} } = {}) {
     try {
       if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some((key) => !PAPER_SETUP_FIELDS.includes(key))) fail('CONTROL_PAPER_FIELDS_INVALID', '仅接受明确的模拟资金和风险参数。', 400)
       for (const [key, value] of Object.entries(input)) validateValue(key, value)
+      try { validatePaperSettings(input) } catch { fail('CONTROL_PAPER_VALUE_INVALID', '模拟参数或交易限额组合无效。', 400) }
       for (const target of [local, active, `${local}.lock`, `${active}.lock`]) noSymlinks(target)
       return withFileLock(local, () => withFileLock(active, () => {
+        assertActive()
         const state = readState()
         for (const [key, value] of Object.entries(input)) if (Object.hasOwn(state.values, key) && !equalDecimal(value, state.values[key])) fail('CONTROL_PAPER_SETTING_CONFLICT', `${key} 已有不同设置；不会覆盖现有风控或重置账户。`)
         const missing = state.missing.filter((key) => !Object.hasOwn(input, key))
         if (missing.length) fail('CONTROL_PAPER_FIELDS_REQUIRED', `请填写：${missing.join('、')}`, 400)
-        if (state.ledgerExists) return dto(state)
+        try { validatePaperSettings({ ...state.values, ...input }) } catch { fail('CONTROL_PAPER_VALUE_INVALID', '模拟参数或交易限额组合无效。', 400) }
+        if (state.ledgerExists) { assertActive(); const ready = dto(state); commit(ready); return ready }
         const config = structuredClone(state.config)
         for (const key of CONFIG_FIELDS) if (absent(config.gate.usdm[key])) config.gate.usdm[key] = String(input[key])
         validateConfig(config)
@@ -96,17 +100,25 @@ export function createPaperSetupAdapter({ configPath, root = ROOT, writeJson = w
         const writeConfig = fromTemplate || startup === local
         const previous = fs.existsSync(local) ? fs.readFileSync(local, 'utf8') : null
         const changed = writeConfig && (previous === null || sha256Hex(config) !== sha256Hex(state.config))
-        if (changed) writeJson(local, config, { mode: 0o600 })
-        try { writeJson(active, ledger, { mode: 0o600 }) } catch (error) {
+        assertActive()
+        try {
+          if (changed) writeJson(local, config, { mode: 0o600 })
+          writeJson(active, ledger, { mode: 0o600 })
+          const ready = dto(readState())
+          assertActive()
+          // No await: this callback is the shared file/session commit point.
+          commit(ready)
+          return ready
+        } catch (error) {
+          if (fs.existsSync(active) && sha256Hex(readJsonStrict(active)) === sha256Hex(ledger)) fs.unlinkSync(active)
           // Config first: interruption can leave only valid settings without an
           // account, never an account referencing settings that were not saved.
           if (changed) {
-            if (previous === null) fs.unlinkSync(local)
+            if (previous === null) { if (fs.existsSync(local)) fs.unlinkSync(local) }
             else writeTextAtomic(local, previous, { mode: 0o600 })
           }
           throw error
         }
-        return dto(readState())
       }, { waitMs: 500 }), { waitMs: 500 })
     } catch (error) { throw safeFailure(error) }
   }

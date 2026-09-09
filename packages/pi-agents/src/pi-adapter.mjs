@@ -66,12 +66,14 @@ function submitAnalysisTool(capture) {
 
 async function resolveModelAndStream(job, options) {
   if (job.provider === SESSION_PROVIDER_ID) {
-    assertSessionModelEffort(job.model, job.effort)
+    assertSessionModelEffort(job.model, job.effort, job.modelPool, job.protocol)
     const env = options.env || process.env
     const runtime = await createSessionProviderRuntime({
       endpoint: env?.[SESSION_ENDPOINT_ENV],
       apiKey: env?.[SESSION_API_KEY_ENV],
       modelId: job.model,
+      modelPool: job.modelPool,
+      protocol: job.protocol,
       lookup: options.lookup,
       fetchImpl: options.fetchImpl
     })
@@ -103,7 +105,7 @@ export async function runPiAgentJob(inputJob, options = {}) {
   let detachAbort = () => {}
 
   try {
-    if (job.provider === SESSION_PROVIDER_ID && containsSessionSecret(job.input, sessionSecrets)) throw new Error('PI_SESSION_SECRET_IN_INPUT')
+    if (job.provider === SESSION_PROVIDER_ID && containsSessionSecret({ input: job.input, model: job.model, modelPool: job.modelPool }, sessionSecrets)) throw new Error('PI_SESSION_SECRET_IN_INPUT')
     const { model, streamFn } = await resolveModelAndStream(job, options)
     assertModelEffort(model, job.effort)
     const tool = submitAnalysisTool(capture)

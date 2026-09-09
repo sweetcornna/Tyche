@@ -77,7 +77,7 @@ test('effort is required on wire identities and a retry never changes the select
 
 test('a resolved non-session model cannot silently lower the requested effort', async () => {
   let sent = false
-  const result = await runPiAgentJob(makeJob({ ...job('xhigh'), provider: 'fixture' }), { model: { id: 'fixture', reasoning: true, thinkingLevelMap: { xhigh: 'high' } }, streamFn() { sent = true } })
+  const result = await runPiAgentJob(makeJob({ ...job('xhigh'), provider: 'fixture', protocol: undefined }), { model: { id: 'fixture', reasoning: true, thinkingLevelMap: { xhigh: 'high' } }, streamFn() { sent = true } })
   assert.equal(sent, false)
   assert.equal(result.status, 'error')
   assert.equal(result.error.code, 'PI_SESSION_MODEL_EFFORT_UNSUPPORTED')

@@ -31,6 +31,32 @@ npm run selftest
 
 ## Local Pi cluster and analysis cockpit
 
+The cockpit uses a minimal dark interface with an original Blender-built abstract
+scene. Flat, unlit geometric forms replace metal, instrument dials and coin models.
+The login contains only the brand and form; the workspace keeps controls, status
+and data without slogans, onboarding paragraphs or model subtitles. Switch between
+**工作流** and **持仓**, select a role, or expand **详情** for Paper position data.
+Escape closes the expanded panel. Pause and reduced motion use a static poster.
+Light mode remains available through conversation.
+
+`GET /api/paper/scene` is an authenticated, read-only Paper projection. Confirmed
+events update positions; partial fills never count the unfilled remainder. Price,
+equity and unrealized PnL are explicitly dated settlement snapshots, not live
+quotes. Missing marks show **待核算**. A stale or invalid source is identified and
+cannot silently become an empty account. Scene updates poll each second during a
+workflow or active order, and every fifteen seconds while idle; hidden pages stop
+polling and resume from a fresh baseline without replaying old executions.
+
+In **设置 → 连接**, enter **服务地址** and **API Key**, then click **连接**.
+The address accepts a hostname, base URL, or complete standard API URL; operation
+paths identify the protocol. Pasted key boundary whitespace is trimmed. Changing
+fields keeps the unsaved draft, and the key clears only after successful connection.
+Clash/TUN Fake-IP DNS is handled automatically with public-address verification and
+pinned connections. Network errors appear beside the connection fields.
+
+Model sources, the rebuild command, the DTO contract and visual QA instructions
+are documented in [3D 工作台说明](docs/3D_WORKSPACE.md).
+
 The optional safe UI lives in `apps/web` and is served by the loopback-only
 control plane after the production bundle is built:
 
@@ -41,8 +67,29 @@ npm run control:test
 node scripts/tyche-control-plane.mjs --port 8788
 ```
 
-The service binds only to `127.0.0.1`, prints one one-time bootstrap token, and
-serves the built `apps/web/dist` from the same origin. The cockpit receives
+The service binds only to `127.0.0.1` and serves the built `apps/web/dist` from
+the same origin. By default it prints a fresh, one-time bootstrap token at startup.
+For persistent local login, put your chosen token in the ignored project file
+`config/control-plane.token` and set its permissions to `0600`. It must be a real
+private file containing 6–256 URL-safe letters, digits, underscores or hyphens,
+with at most one final newline. The full script reads this fixed project path at
+startup regardless of the working directory; an existing invalid or unreadable
+file blocks startup. A valid file selects a reusable token across logouts,
+session expiry and service restarts. Remove it and restart to restore the random
+one-time mode. Each login still issues fresh random session and CSRF credentials
+with a 15-minute lifetime; relogin revokes the session replaced in that browser.
+Cookies are separated by the bound local port. Refreshing or opening another tab
+restores the current session through a protected read without consuming the login
+token or extending its lifetime. If another login, logout or expiry changes that
+session, the page stops pending actions and offers recovery or login. Unsubmitted
+endpoint/key pairs and chat text remain together in page memory for review; no
+write is retried automatically, and recovery loads the current server settings.
+The standalone package CLI retains random one-time login.
+Programmatic `startControlPlaneChild` callers may instead supply explicit
+`bootstrapToken` / `reusableBootstrapToken` options; these take precedence over
+the local file and undergo the core's strict validation.
+
+The cockpit receives
 sanitized status, cycle, DAG, paper, venue, plan-summary, and bounded event
 projections. It never stores provider or exchange keys and never receives raw
 account data, private history, plans, ledgers, or fills. Testnet actions remain
@@ -51,14 +98,22 @@ confirmation. See [apps/web/UPSTREAM.md](apps/web/UPSTREAM.md) for the fixed
 `xing-shuyin/pi-web-ui` reference commit and the intentionally deleted surface
 area.
 
-After signing in with the one-time token, fill in the model API endpoint and
-API key. On the first Paper run, enter the eleven explicit simulation-capital,
-leverage, risk-limit and fill-constraint values on the page, then select
-**运行 workflow**. The page validates input, saves the session connection,
-creates or reuses the locked/dry-run Paper setup, and starts one complete
-analysis → deterministic plan → Paper cycle. Date and ISO week use the current
-UTC day at launch. No capital or risk defaults are supplied; bps inputs preserve
-decimal precision (1 bps = 0.01%). Repeat runs reuse the account and connection.
+After signing in with the bootstrap token, fill in only the model API endpoint
+and API key. Tell the main Agent what you want to explore with BTC/ETH. It asks
+one or two focused questions, remembers collected preferences and partial
+settings, and can arrange a complete **Paper simulation starting point** when
+you say you are unsure or delegate the choices. Inferred capital is explicitly
+virtual and risk choices are labeled assumptions, not real balances, a claim
+of optimality or a profit promise. There are no hidden hardcoded capital presets.
+
+When you ask for configuration, the server validates the complete selected
+candidate and applies it automatically. No strategy application button or
+eleven-field Paper form is needed; model selection also has an optional manual panel. Explanations alone do not apply changes.
+The read-only summary shows applied, pending or failed status from the server.
+Then select **运行 workflow** for one analysis → deterministic plan → Paper
+cycle. If setup is incomplete, the action asks the main Agent to help complete
+it. Date and ISO week use the current UTC day at launch; repeat runs reuse the
+account and connection. Decimal bps retain precision (1 bps = 0.01%).
 
 The default manual workflow uses the ignored `config/tyche.local.json`, creating
 it from the committed locked template when needed. An explicitly selected
@@ -68,28 +123,112 @@ accounts, configured limits and configuration digests are checked and never
 reset or silently replaced. The standalone `@tyche/control-plane` package CLI
 is only a projection shell; use the script above for the complete workflow.
 
-The conversation workspace has a fixed Agent list on the left, the main Agent
-chat in the center, and settings, strategy drafts and run details on the right.
-It uses a neutral desktop-chat layout while retaining Tyche's identity. Open
-**运行设置** for the model connection and first-run Paper inputs, or open the
-strategy panel to paste a semantic BTC/ETH prompt. Discussion has no tools or account
-access and does not apply changes. Select **应用策略** to snapshot the strategy
-for the next unstarted analysis; all six weekly/daily roles retain their fixed
-contracts. Existing same-cycle receipts still reuse their results, so applying
-a prompt never forces a second simulated fill. Strategies and discussion are
-session-memory only and disappear on logout, expiry or service restart. This
-page runs one Paper cycle per click; it does not enable a scheduler or testnet
-execution. Event logs, the fixed DAG and testnet controls are in run details
-and advanced settings.
+The desktop workspace centers the conversation, with a collapsible history sidebar,
+search/command palette, model and effort controls, and an optional workflow/Paper
+detail panel. Chats support rename, pin, archive, restore, Markdown, code copying,
+quotes, retry and cancellable requests. The full CLI stores bounded conversation
+history in the ignored `data/control/conversations.json` (0600); API credentials
+remain in server session memory. See [Desktop workspace](docs/DESKTOP_WORKSPACE.md)
+for implemented interactions and validation.
 
-Ask the main Agent to change models for any of the six workflow roles. It
-returns a model/effort suggestion; select **应用模型配置** to apply it separately
-from a strategy change. Every role initially uses Astra. Orchestration (including
-the main conversation), BTC/ETH analysis and synthesis use `high`; preflight
-uses `medium`, and review uses `xhigh`. These are the only effort levels exposed.
-Luna, Sol, Terra, 5.5 and 5.4 Mini remain available for explicit model changes.
-The selected model must support the exact requested effort; Tyche rejects an
-unsupported pairing instead of letting the SDK silently lower it.
+The main conversation can adjust semantic strategy and six role model/effort
+choices. A bounded session draft preserves configuration answers beyond the
+eight-message model context window. Each configuration response selects its
+application scope, so an independent theme/model change does not initialize a
+pending Paper draft. Only a complete, validated candidate creates the simulation.
+
+Every role initially uses Astra. Orchestration (including the main conversation),
+BTC/ETH analysis and synthesis use `high`; preflight uses `medium`, and review
+uses `xhigh`. The default pool contains only Astra with these three efforts.
+Luna, Sol, Terra, 5.5 and 5.4 Mini remain available in the known-model directory
+for explicit addition to your pool.
+
+Open **模型分配** to declare up to twelve available model IDs and each
+model's nonempty subset of `medium`, `high`, `xhigh`. You can also describe a pool
+in chat. Custom IDs are user declarations about the same API gateway, not verified
+capabilities. Known SDK metadata is retained, and conflicting effort declarations
+are rejected as a whole instead of silently lowering an effort. Custom context
+and pricing stay unknown: the SDK's zero context sentinel means no known limit,
+while 16,384 tokens is only this application's output budget. For custom models, text-only is the
+application input restriction, not a claim about all model capabilities.
+
+The connection panel offers **OpenAI Responses** (the default), **OpenAI Chat
+Completions**, and **Anthropic Messages**. Select the protocol explicitly, then
+enter a domain, base URL, or that protocol's complete operation URL. Tyche adds
+HTTPS to a bare domain, adds `/v1` to an OpenAI root address, removes a matching
+`/responses`, `/chat/completions`, or `/v1/messages` suffix, and removes the standard
+Anthropic `/v1` suffix. Explicit gateway prefixes such as `/gateway/v2` are retained.
+The panel shows the normalized base URL. Encodings, dot segments, credentials,
+queries, fragments and nonexplicit HTTP loopback spellings remain rejected.
+Changing the address or protocol clears a previously typed key and requires a key
+for the new connection; equivalent normalized addresses can reuse a saved key.
+
+Leaving a completed connection field, or sending the first message, automatically
+reads the provider's standard models list. **重新检测模型** retries discovery.
+OpenAI uses one `GET /models` relative to its base URL; Anthropic uses one
+`GET /v1/models`. The request is limited to ten seconds, 256 KiB and 200 entries.
+Anthropic `has_more` is displayed as **仅当前页，目录不完整**; absent IDs on that
+page do not establish unavailability. No upstream pagination URL is followed.
+Errors and empty lists leave previous settings intact, with a manual model-pool
+path available. Reading a directory verifies neither inference nor every effort.
+
+The session-only catalog lasts five minutes and is bound to the protocol,
+normalized endpoint and credential identity. It exposes bounded model IDs and
+fixed capability provenance to the main Agent, never descriptions, URLs or keys.
+Provider listing, local host/SDK effort support and user-declared support remain
+separate. Unknown custom efforts must be explicitly saved in the model panel;
+chat can retain proposals as untrusted drafts but cannot grant itself new effort
+capabilities. Saving a declaration updates matching catalog entries immediately,
+without renewing their expiry or making a different connection's catalog active.
+Declarations remain bound to the confirmed protocol, endpoint and credential after
+the directory expires. Agent pool/effort selections do not change those declarations
+or narrow SDK capabilities. The model panel captures its declaration target when
+you edit; a changed or expired target requires explicit reconfirmation before saving.
+
+In automatic mode, discovery prepares at most twelve candidates: retain usable
+current declarations first, then use the fixed local capability order. Existing
+narrower efforts stay narrow. The rule and number of eligible models left outside
+the pool are shown. A gateway without Astra but with a known supported model can
+start the first chat without a hand-entered pool; bootstrap prefers high, then
+medium, then xhigh within the selected declaration. This prepares conversation;
+only the main Agent's complete six-role output establishes an allocation. Unknown-
+only catalogs preserve the old connection and require an explicit usable model
+and effort before connection. Manual pools, bootstrap and roles are preserved.
+
+Anthropic Messages accepts only native adaptive Claude models from the pinned
+SDK and efforts transmitted unchanged. Unknown aliases, GPT models, budget-only
+thinking models, OAuth and fallback models remain unsupported. Provider capability
+flags can narrow SDK support but never expand it. Neither chat nor failure changes
+the selected protocol. While connected, every candidate model and effort must
+support that protocol; clear the connection before preparing an incompatible pool.
+Fixed diagnostics omit upstream errors and credential values.
+
+In **自动** mode, select **主 Agent 分配** or ask for an allocation in chat. The
+main model returns six model/effort pairs and a short reason for each; only valid
+complete output clears pending allocation. Every pool change in automatic mode
+marks it pending, even when the previous selections remain valid. The page keeps
+the previous choices visible without treating them as a new allocation. No
+allocation request is added automatically to each workflow cycle.
+
+In **手动** mode, choose and save all six role pairs. Chat cannot overwrite those
+choices; strategy and theme can still be discussed independently. Removing a
+referenced model or effort blocks new workflows until corrected. Pool updates
+remove only incompatible role drafts and preserve unrelated Paper/strategy
+drafts. Pool, mode, bootstrap and submitted role settings commit together through
+the same authenticated endpoint. The displayed source distinguishes fixed defaults,
+user settings and a real main-Agent allocation; gateway compatibility remains
+unverified until independently demonstrated with the user's API service.
+
+Discussion has no tools or raw account access. Paper initialization exposes only
+eleven safe parameter values, readiness and missing fields to the main Agent.
+Existing accounts and saved risk limits cannot be overwritten by conversation.
+Independent strategy/model/theme changes can continue while Paper is blocked.
+Strategies, models, preferences, drafts, theme and discussion are session-memory
+only and disappear on logout, expiry or restart; an initialized Paper account
+remains on disk. Fixed DAG, events and results remain in run details. Testnet
+status is read-only here; independent testnet API/CLI gates remain unchanged.
+Conversation never arms an executor or starts a scheduler. A new strategy or
+model never bypasses same-cycle receipt reuse or forces a second simulated fill.
 
 Astra uses an explicit custom Responses definition because the pinned Pi
 catalog does not contain it. Its 272,000-token context and text/image input
@@ -100,10 +239,10 @@ are not displayed as prices or cost estimates. The user's API gateway must
 support the requested model and effort; local metadata alone does not prove
 that gateway support. Existing models retain their pinned SDK metadata.
 
-The main Agent uses the orchestrator's effective model and effort. Settings
-remain session-local. Each cycle freezes both complete role mappings; job and
+After allocation, the main Agent uses the orchestrator's effective model and effort. Settings
+remain session-local. Each cycle freezes the pool capabilities, mode and both complete role mappings; job and
 result identity checks, retries and persisted provenance include the actual
-model and effort. Configuration changes never bypass receipt reuse or grant
+model and effort plus the pool digest; receipts retain the pool metadata source. Configuration changes never bypass receipt reuse or grant
 additional tools, roles or trading permissions.
 
 The runnable local cluster keeps the scheduler/control plane and the optional
@@ -174,7 +313,7 @@ Workflows require both `date` (`YYYY-MM-DD`) and `isoWeek` (`YYYY-Www`). Before 
 
 ## One-shot USDT-M paper automation
 
-Create an ignored local configuration that remains `locked`/`dry-run`. Set positive `configured_leverage` (1–3), `risk_per_trade_bps`, `max_order_notional_usdt`, `daily_new_notional_cap_usdt`, and `max_managed_notional_usdt` under `gate.usdm`, then provide every paper capital and breaker value explicitly. There are no paper-capital defaults:
+Create an ignored local configuration that remains `locked`/`dry-run`. Set positive `configured_leverage` (1–3), `risk_per_trade_bps`, `max_order_notional_usdt`, `daily_new_notional_cap_usdt`, and `max_managed_notional_usdt` under `gate.usdm`, then provide every paper capital and breaker value explicitly when using the CLI. The conversational UI may derive these simulation-only values after user delegation; the CLI has no paper-capital defaults:
 
 ```sh
 npm run paper -- init \

@@ -13,14 +13,15 @@
     "tyche-pi-cluster": "./src/cli.mjs"
   },
   "scripts": {
-    "check": "node --check src/cli.mjs && node --check src/cluster.mjs && node --check src/env.mjs && node --check src/fixture.mjs && node --check src/index.mjs && node --check src/pi-adapter.mjs && node --check src/protocol.mjs && node --check src/session-provider.mjs && node --check src/strategy-discussion.mjs && node --check src/worker-client.mjs && node --check src/worker.mjs",
+    "check": "node --check src/cli.mjs && node --check src/cluster.mjs && node --check src/conversation-settings.mjs && node --check src/model-pool.mjs && node --check src/connection-endpoint.mjs && node --check src/session-address.mjs && node --check src/session-network.mjs && node --check src/model-discovery.mjs && node --check src/env.mjs && node --check src/fixture.mjs && node --check src/index.mjs && node --check src/pi-adapter.mjs && node --check src/protocol.mjs && node --check src/session-provider.mjs && node --check src/strategy-discussion.mjs && node --check src/worker-client.mjs && node --check src/worker.mjs",
     "test": "node --test test/*.test.mjs",
     "selftest": "node src/cli.mjs --fixture --mode weekly --provider fixture --model fixture --date 2030-01-07 --iso-week 2030-W02",
     "fixture": "node src/cli.mjs --fixture --mode daily --provider fixture --model fixture --date 2030-01-07 --iso-week 2030-W02"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.84.4",
-    "@earendil-works/pi-ai": "0.84.4"
+    "@earendil-works/pi-ai": "0.84.4",
+    "undici": "7.29.0"
   },
   "engines": {
     "node": ">=22.19.0"

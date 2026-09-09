@@ -7,7 +7,7 @@ import { operationDefinitions } from '../scripts/gate-rest.mjs'
 import { binanceOperationDefinitions } from '../scripts/binance-rest.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const SKIP = new Set(['.git', 'node_modules', 'data', 'outputs', 'logs', 'plans', '.cache', 'coverage'])
+const SKIP = new Set(['.git', 'node_modules', 'data', 'outputs', 'logs', 'plans', '.cache', 'coverage', 'dist'])
 
 function files(directory = ROOT) {
   const output = []
@@ -25,14 +25,15 @@ function relative(file) {
 }
 
 function textFiles() {
-  return files().filter((file) => !file.endsWith('package-lock.json')).map((file) => ({ file: relative(file), text: fs.readFileSync(file, 'utf8') }))
+  return files().filter((file) => !file.endsWith('package-lock.json') && !/\.(?:blend|glb|png|webp|jpe?g)$/i.test(file)).map((file) => ({ file: relative(file), text: fs.readFileSync(file, 'utf8') }))
 }
 
 test('bootstrap contains no excluded platform or generated-source surfaces', () => {
   const names = files().map(relative)
   assert.ok(!names.some((name) => name.startsWith('.github/')))
   assert.deepEqual(names.filter((name) => /(^|\/)LICENSE(?:\.|$)/i.test(name)), ['apps/web/LICENSE'])
-  assert.ok(!names.some((name) => name.endsWith('.py')))
+  // The only Python source is the user-requested offline Blender asset builder.
+  assert.deepEqual(names.filter((name) => name.endsWith('.py')), ['assets/3d/build_scene.py'])
   assert.ok(!names.some((name) => /\.(?:zip|tar|gz|sqlite|db)$/i.test(name)))
   const excludedNames = [
     ['board', 'data'].join('_'),
@@ -79,17 +80,21 @@ test('source text has no private path, private infrastructure name, backend mode
   const wildcard = ['0', '0', '0', '0'].join('.')
   const allowedIpLiterals = new Map([
     ['README.md', new Set([loopback])],
+    ['SECURITY.md', new Set([ip(198, 18, 0, 0), ip(1, 1, 1, 1)])],
     ['apps/control-plane/src/cli.mjs', new Set([loopback])],
     ['apps/control-plane/src/control-plane.mjs', new Set([loopback])],
     ['apps/control-plane/test/control-plane.test.mjs', new Set([wildcard, loopback])],
     ['apps/web/vite.config.mjs', new Set([loopback])],
-    ['packages/pi-agents/src/session-provider.mjs', new Set([
+    ['packages/pi-agents/src/session-address.mjs', new Set([
       ip(0, 0, 0, 0), ip(10, 0, 0, 0), ip(100, 64, 0, 0), ip(127, 0, 0, 0), loopback,
       ip(168, 63, 129, 16), ip(169, 254, 0, 0), ip(172, 16, 0, 0), ip(192, 0, 0, 0), ip(192, 0, 2, 0),
       ip(192, 31, 196, 0), ip(192, 52, 193, 0), ip(192, 88, 99, 0), ip(192, 168, 0, 0),
       ip(192, 175, 48, 0), ip(198, 18, 0, 0), ip(198, 51, 100, 0), ip(203, 0, 113, 0),
       ip(224, 0, 0, 0), ip(240, 0, 0, 0)
     ])],
+    ['packages/pi-agents/src/session-provider.mjs', new Set([loopback])],
+    ['packages/pi-agents/src/session-network.mjs', new Set([ip(1, 1, 1, 1)])],
+    ['packages/pi-agents/test/session-network.test.mjs', new Set([loopback, ip(8, 8, 8, 8), ip(198, 18, 0, 37), ip(10, 0, 0, 1), ip(10, 0, 0, 2), ip(192, 168, 1, 1), ip(1, 1, 1, 1)])],
     ['packages/pi-agents/test/session-provider.test.mjs', new Set([
       wildcard, loopback, ip(8, 8, 8, 8), ip(10, 0, 0, 1), ip(10, 0, 0, 2),
       ip(93, 184, 216, 34), ip(100, 64, 0, 1), ip(100, 100, 100, 200),
@@ -140,12 +145,15 @@ test('runtime dependencies remain explicit and imports stay within their package
         '@earendil-works/pi-agent-core',
         '@earendil-works/pi-ai',
         '@earendil-works/pi-ai/api/openai-responses.lazy',
+        '@earendil-works/pi-ai/api/openai-completions.lazy',
+        '@earendil-works/pi-ai/api/anthropic-messages.lazy',
         '@earendil-works/pi-ai/providers/all',
         '@earendil-works/pi-ai/providers/faux'
       ].includes(match[1])
+      const transportAllowed = record.file === 'packages/pi-agents/src/session-network.mjs' && match[1] === 'undici'
       const controlAllowed = record.file.startsWith('apps/control-plane/') && match[1] === 'ws'
       const webAllowed = record.file.startsWith('apps/web/') && ['react', 'react-dom/client', 'vite', '@vitejs/plugin-react'].includes(match[1])
-      assert.ok(externalAllowed || piAllowed || controlAllowed || webAllowed || match[1].startsWith('node:') || match[1].startsWith('./') || match[1].startsWith('../'), `${record.file}: ${match[1]}`)
+      assert.ok(externalAllowed || piAllowed || transportAllowed || controlAllowed || webAllowed || match[1].startsWith('node:') || match[1].startsWith('./') || match[1].startsWith('../'), `${record.file}: ${match[1]}`)
     }
   }
 })
