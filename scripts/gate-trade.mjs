@@ -402,6 +402,17 @@ export function parseSpotRule(input = {}) {
   return { ok: true, ...rule }
 }
 
+// Gate reports order_size_min 0 for contracts that accept decimal sizes
+// (enable_decimal), which is currently the case for ETH_USDT. Tyche sizes whole
+// contracts, and one whole contract is always a valid size under decimal mode,
+// so an explicit zero minimum means one contract. A negative or non-numeric
+// minimum is left as-is so the positivity check below still rejects it.
+function minimumContracts(value) {
+  if (value === undefined || value === null) return '1'
+  const text = String(value).trim()
+  return /^0+(?:\.0+)?$/.test(text) ? '1' : text
+}
+
 export function parseUsdmRule(input = {}) {
   const pair = exactPair(input.name || input.contract || input.symbol)
   const rule = {
@@ -409,7 +420,7 @@ export function parseUsdmRule(input = {}) {
     symbol: pair,
     tick_size: input.order_price_round === undefined ? null : String(input.order_price_round),
     quanto_multiplier: input.quanto_multiplier === undefined ? null : String(input.quanto_multiplier),
-    min_contracts: String(input.order_size_min ?? '1'),
+    min_contracts: minimumContracts(input.order_size_min),
     max_contracts: input.order_size_max === undefined ? null : String(input.order_size_max),
     min_notional: input.min_notional === undefined ? null : String(input.min_notional),
     max_leverage: input.leverage_max === undefined ? null : String(input.leverage_max),
