@@ -466,6 +466,24 @@ function selectionContext(options = {}) {
   return Object.fromEntries([...PAIRS].map((pair) => [pair, String(accounts[`usdm:${pair}`]?.managed_quantity || '0')]))
 }
 
+// Tyche entries are LIMIT orders. One priced through the opposite side of the
+// book executes at once against resting liquidity, at a better price than the
+// one the plan was sized and risk-checked on, so a breakout level silently
+// becomes an immediate fill whose recorded price never traded. Reject it
+// instead of letting the plan and the fill disagree. An entry exactly at the
+// touch fills at its own price and is allowed. Without a usable top of book the
+// order's behaviour cannot be established, so the entry is blocked.
+function entryBookPosition(action, entry, bidText, askText) {
+  const touch = action === 'ENTER_LONG' ? askText : bidText
+  try {
+    if (!decimalPositive(touch)) return 'unavailable'
+    const side = decimalCompare(String(entry), touch)
+    return (action === 'ENTER_LONG' ? side > 0 : side < 0) ? 'through' : 'resting'
+  } catch {
+    return 'unavailable'
+  }
+}
+
 export function selectUsdmCandidates(candidates = [], options = {}) {
   const rows = []
   const rejected = []
@@ -555,11 +573,18 @@ export function selectUsdmCandidates(candidates = [], options = {}) {
     const book = options.marketSnapshot?.assets?.[ASSET_BY_PAIR[pair]]?.usdm?.order_book || {}
     const bid = Number(ticker.highest_bid ?? ticker.bid ?? book.bids?.[0]?.price)
     const ask = Number(ticker.lowest_ask ?? ticker.ask ?? book.asks?.[0]?.price)
+    const bidText = String(ticker.highest_bid ?? ticker.bid ?? book.bids?.[0]?.price ?? '')
+    const askText = String(ticker.lowest_ask ?? ticker.ask ?? book.asks?.[0]?.price ?? '')
     const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : NaN
     const spreadBps = mid > 0 ? ((ask - bid) / mid) * 10000 : Infinity
     const eligible = opening.filter((row) => {
       if (controls.max_spread_bps !== null && !(spreadBps <= Number(controls.max_spread_bps))) {
         rejected.push({ index: row.index, symbol: pair, signal_id: row.signal, code: 'SPREAD_LIMIT' })
+        return false
+      }
+      const position = entryBookPosition(row.valid.action, row.valid.entry_price ?? row.candidate?.entry_price, bidText, askText)
+      if (position !== 'resting') {
+        rejected.push({ index: row.index, symbol: pair, signal_id: row.signal, code: position === 'through' ? 'ENTRY_PRICE_THROUGH_BOOK' : 'ENTRY_BOOK_UNAVAILABLE' })
         return false
       }
       if (controls.max_entry_distance_bps !== null && !(row.rank.distance * 10000 <= Number(controls.max_entry_distance_bps))) {
@@ -3251,7 +3276,7 @@ export async function selftest() {
     }]
   }
   const weeklyAnchor = { schema: WEEKLY_SCHEMA, date, iso_week: week, generated_at: at, status: 'active', assets: { BTC: { spot_bias: 'long', usdm_bias: 'long' }, ETH: { spot_bias: 'neutral', usdm_bias: 'neutral' } }, execution_candidates: [] }
-  const marketSnapshot = { schema: 'tyche_crypto_market/v1', date, iso_week: week, generated_at: at, assets: { BTC: { usdm: { ticker: { last: '100' }, technical: { daily: { level_sets: { selftest: { entry: 100, stop: 90, target: 120 } } }, four_hour: { level_sets: {} } } } }, ETH: {} } }
+  const marketSnapshot = { schema: 'tyche_crypto_market/v1', date, iso_week: week, generated_at: at, assets: { BTC: { usdm: { ticker: { last: '100' }, order_book: { bids: [{ price: '99.9', quantity: '10' }], asks: [{ price: '100.1', quantity: '10' }] }, technical: { daily: { level_sets: { selftest: { entry: 100, stop: 90, target: 120 } } }, four_hour: { level_sets: {} } } } }, ETH: {} } }
   const rule = { name: 'BTC_USDT', order_price_round: '0.1', quanto_multiplier: '0.001', order_size_min: '1', order_size_max: '100000', leverage_max: '3', maintenance_rate: '0.005', maker_fee_rate: '-0.0001', taker_fee_rate: '0.0005', status: 'trading', in_delisting: false, _fetched_at: at }
   const account = { schema: 'tyche_account_epoch/v1', account_epoch_id: 'tae_selftest', product: 'usdm', environment: 'testnet', funding_source: 'usdm_testnet_available', wallet: 'USDT_FUTURES_TESTNET', asset: 'USDT', symbol: 'BTC_USDT', generated_at: at, available_quote: '1000', effective_risk_capital: '1000', managed_quantity: '0', managed_notional: '0', daily_new_notional_used: '0', daily_order_count: 0 }
   const context = { rules: { BTC_USDT: rule }, quotes: { BTC_USDT: { symbol: 'BTC_USDT', price: '100', fetched_at: at } }, accounts: { 'usdm:BTC_USDT': account }, reconciliation: { status: 'ok', generated_at: at, receipt_id: 'tr_selftest', issues: [] }, blockers: [] }
