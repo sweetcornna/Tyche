@@ -105,6 +105,19 @@ export function providerValidationError(error) {
     : { code: 'CONTROL_PROVIDER_VALIDATION_FAILED', message: 'Provider validation failed' }
 }
 
+// A rejection here covers every saved role, not only the model's suggestion,
+// so name the exact role, model and effort instead of a generic sentence.
+function roleModelsMessage(error) {
+  const detail = error?.roleDetail
+  if (!detail || typeof detail.role !== 'string' || typeof detail.model !== 'string') {
+    return '角色模型或 effort 组合不被当前连接支持，请在设置 → 模型中修正。'
+  }
+  const role = String(detail.role).slice(0, 40)
+  const model = String(detail.model).slice(0, 96)
+  const effort = String(detail.effort ?? '').slice(0, 16) || '未设置'
+  return `角色 ${role} 需要 effort ${effort}，但模型 ${model} 未在当前模型池中声明该档位。请在设置 → 模型中为该角色改用已声明的模型，或补充该 effort 声明。`
+}
+
 function safeText(value, limit = 240) {
   return String(value ?? '')
     .replace(/(?:GATE|BINANCE)_[A-Z0-9_]*(?:API_KEY|SECRET_KEY)\s*[:=]\s*\S+/gi, '[REDACTED]')
@@ -968,7 +981,7 @@ export function createControlPlane(options = {}) {
       try { result = await Promise.race([adapter.discussStrategy({ message, prompt: session.strategy || '', history, roleModels: effectiveModels, roleEfforts: effectiveEfforts, setupContext, settingsDraft: structuredClone(session.settingsDraft || {}), preferences: session.preferences || '', theme: session.theme || 'night', modelPool: poolFor(session), modelMode: session.modelMode || 'auto', allocationRequested: body.allocate === true, allocationState: allocationState(session), modelCatalog: catalogDto(session, true), modelDeclarations: declarationPoolFor(session) }, runtime), cancelled]) } catch (error) {
         if (sessions.get(session.id) !== session || Number(now()) >= session.expiresAt) fail('CONTROL_SESSION_REQUIRED', '会话已失效，请重新登录。', 401)
         if (controller.signal.aborted) fail('CONTROL_STRATEGY_CANCELLED', '已停止生成。', 409)
-        if (error?.code === 'PI_STRATEGY_MODELS_INVALID') fail('CONTROL_ROLE_MODELS_INVALID', '模型建议含不支持的角色或模型，请使用设置中列出的模型。', 502)
+        if (error?.code === 'PI_STRATEGY_MODELS_INVALID') fail('CONTROL_ROLE_MODELS_INVALID', roleModelsMessage(error), 502)
         fail('CONTROL_STRATEGY_FAILED', '策略讨论未完成，请检查模型连接后重试。', 502)
       }
       if (sessions.get(session.id) !== session || Number(now()) >= session.expiresAt) fail('CONTROL_SESSION_REQUIRED', '会话已失效，请重新登录。', 401)

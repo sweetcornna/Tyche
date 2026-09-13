@@ -164,12 +164,28 @@ function Login({ onLogin, onResume, busy, canResume, error }) {
 export function App() {
   const [csrf, setCsrf] = useState(null)
   const [sessionExpiry, setSessionExpiry] = useState(null)
+  const [clockTick, setClockTick] = useState(() => Date.now())
+  useEffect(() => {
+    if (!sessionExpiry) return undefined
+    const timer = setInterval(() => setClockTick(Date.now()), 15000)
+    return () => clearInterval(timer)
+  }, [sessionExpiry])
+  const expiryMinutes = (() => {
+    if (!sessionExpiry) return null
+    const remaining = new Date(sessionExpiry).getTime() - clockTick
+    return Number.isFinite(remaining) ? Math.max(0, Math.ceil(remaining / 60000)) : null
+  })()
+  const expiryWarning = expiryMinutes !== null && expiryMinutes <= 5
+    ? `会话剩余约 ${expiryMinutes} 分钟。过期会清空模型连接、已声明的模型池与六角色分配，请先完成当前配置。`
+    : ''
   const [loginError, setLoginError] = useState('')
   const [authBusy, setAuthBusy] = useState(true)
   const [canResume, setCanResume] = useState(false)
   const [selected, setSelected] = useState('orchestrator')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
+  const settingsNoticeRef = useRef(null)
+  useEffect(() => { if (notice) settingsNoticeRef.current?.scrollIntoView({ block: 'nearest' }) }, [notice])
   const [theme, setTheme] = useState('night')
   const [status, setStatus] = useState({ service: 'connecting' })
   const [provider, setProvider] = useState(EMPTY_PROVIDER)
@@ -646,13 +662,15 @@ export function App() {
       {notice && !settingsOpen && !renameTarget && <div className="desktop-notice" role="status"><span>{notice}</span><IconButton icon="close" label="关闭提示" onClick={() => setNotice('')} /></div>}
       {hasRun && <RunResult compact onDetails={() => setPanel('details')} cycle={cycle} workflow={workflow} phase={phase} busy={busy} />}
       {isEmpty ? <div className="thread-welcome"><div className="welcome-mark" aria-hidden="true">τ</div><h1>开始对话</h1><div className="welcome-actions"><button onClick={() => putInComposer('分析 BTC 与 ETH 的策略。')}><Icon name="chat" />讨论策略</button><button onClick={() => setPanel('paper')}><Icon name="positions" />模拟设置</button><button onClick={() => openScene('workflow')}><Icon name="workflow" />查看工作流</button></div></div> : <ConversationView conversationId={conversation?.id} messages={discussion} pending={pendingMessage} onQuote={(text) => putInComposer(text.split('\n').map((line) => '> ' + line).join('\n') + '\n\n')} onEdit={putInComposer} onRetry={retryMessage} busy={working} error={messageError} onDismissError={() => setMessageError(null)} />}
+      {expiryWarning && !settingsOpen && <div className="desktop-notice" role="alert">{expiryWarning}</div>}
       {historyWarning && <div className="desktop-notice" role="alert">{historyWarning}<button onClick={() => changeConversation('save')}>重试保存</button></div>}
       {isEmpty && messageError && <div className="desktop-notice" role="alert">{messageError.message}<button onClick={() => retryMessage(-1)}>重试</button></div>}
       <Composer key={conversation?.id || 'draft'} draft={currentDraft} onChange={updateDraft} onAddAttachments={(rows) => addAttachments(rows, conversation?.id, composerEpoch)} onSend={sendComposer} pending={pendingMessage} onStop={stopDiscussion} disabled={busy || conversationBusy || (providerBusy && !pendingMessage) || Boolean(historyWarning)} model={conversation?.model || modelConfig.chat?.model || modelConfig.default_model} effort={conversation?.effort || modelConfig.chat?.effort || 'high'} pool={modelConfig.pool} onModel={setChatModel} connected={provider.configured} onConnect={() => openSettings('settings')} onWorkflow={() => openScene('trading')} archived={active?.archived} onRestore={() => changeConversation('update', { id: conversation.id, archived: false })} queue={composerState.current.items(conversation?.id)} queuePaused={composerState.current.paused(conversation?.id)} onResumeQueue={() => { composerState.current.resume(conversation?.id); setMessageError(null); setDraftTick((v) => v + 1) }} onRemoveQueued={(id) => { composerState.current.remove(conversation?.id, id); setDraftTick((v) => v + 1) }} />
     </main>
     <DetailPanel open={sidePanel} narrow={narrow}><ResizeHandle side="right" value={detailWidth} onChange={setDetailWidth} min={330} max={620} /><header className="detail-header"><div><button aria-pressed={panel === 'scene'} onClick={() => setPanel('scene')}>场景</button><button aria-pressed={panel === 'details'} onClick={() => setPanel('details')}>运行详情</button></div><IconButton icon="close" label="关闭详情" onClick={closeDetails} /></header><div className="detail-scroll">{panel === 'scene' ? <SceneDock initialMode={sceneMode} motionEnabled={motion} inlineDetails workflow={workflow} selected={selected} onSelectAgent={(role) => { setSelected(role); setPanel('details') }} paperView={paperView} /> : <>{hasRun && <RunResult cycle={cycle} workflow={workflow} phase={phase} busy={busy} />}<Docket selected={selected} workflow={workflow} onSelect={setSelected} /><div className="stream-heading"><h2>事件日志 · {selectedNode?.name}</h2><Tone value={selectedNode?.status || 'waiting'} /></div><MessageStream messages={messages.filter((entry) => !ROLES.includes(entry.label) || entry.label === selected)} /><span className="paper-status">Paper · {statusLabel(paper?.status || cycle?.outcome)}</span></>}</div></DetailPanel>
     <Dialog open={settingsOpen} onClose={() => setPanel(null)} title="设置" className="settings-dialog"><aside className="settings-navigation"><h2>设置</h2>{settingsTabs.map(([key, label, icon]) => <button key={key} aria-pressed={panel === key} onClick={() => setPanel(key)}><Icon name={icon} />{label}</button>)}</aside><section className="settings-content"><header><h2>{settingsTabs.find(([key]) => key === panel)?.[1]}</h2><IconButton icon="close" label="关闭设置" onClick={() => setPanel(null)} /></header><div className="settings-scroll">
-      {notice && <div className="desktop-notice" role="alert"><span>{notice}</span><IconButton icon="close" label="关闭提示" onClick={() => setNotice('')} /></div>}
+      {expiryWarning && <div className="desktop-notice" role="alert">{expiryWarning}</div>}
+      {notice && <div ref={settingsNoticeRef} className="desktop-notice" role="alert"><span>{notice}</span><IconButton icon="close" label="关闭提示" onClick={() => setNotice('')} /></div>}
       {panel === 'appearance' && <><div className="preference-row"><span>外观</span><div className="segmented"><button aria-pressed={theme === 'night'} onClick={() => setAppearance('night')} disabled={working}><Icon name="moon" />深色</button><button aria-pressed={theme === 'light'} onClick={() => setAppearance('light')} disabled={working}><Icon name="sun" />浅色</button></div></div><div className="preference-row"><span>界面动效</span><button className="toggle-switch" role="switch" aria-label="界面动效" aria-checked={motion} onClick={() => setMotion((v) => !v)}><i /></button></div><div className="preference-row"><span>会话</span><button className="quiet-action" onClick={logout} disabled={working}>退出</button></div></>}
       {panel === 'settings' && <div className="entry-form"><ProviderPanel provider={provider} protocol={providerProtocol} setProtocol={setProviderProtocol} endpoint={providerEndpoint} apiKey={providerApiKey} setEndpoint={setProviderEndpoint} setApiKey={setProviderApiKey} onConnectionBlur={onConnectionBlur} onDiscover={() => discoverConnection(true)} error={connectionError} catalog={modelConfig.catalog} busy={working} /><button type="button" className="quiet-action" onClick={clearProvider} disabled={working || !provider.configured}>清除模型连接</button></div>}
       {panel === 'models' && <ModelSettings config={modelConfig} busy={working} onSave={saveModels} onAllocate={() => discuss('按当前模型池分配六个工作流角色的模型和 effort，并给出依据。', true)} />}
