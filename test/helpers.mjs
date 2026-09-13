@@ -81,7 +81,7 @@ export function marketSnapshot(overrides = {}) {
       BTC: {
         symbol: 'BTC_USDT',
         spot: { ticker: { last: '100' }, technical: { daily: { level_sets: levels }, four_hour: { level_sets: {} } } },
-        usdm: { ticker: { last: '100', mark_price: '100', index_price: '100' }, technical: { daily: { level_sets: levels }, four_hour: { level_sets: {} } } }
+        usdm: { ticker: { last: '100', mark_price: '100', index_price: '100' }, order_book: { bids: [{ price: '99.9', quantity: '10' }], asks: [{ price: '100.1', quantity: '10' }] }, technical: { daily: { level_sets: levels }, four_hour: { level_sets: {} } } }
       },
       ETH: {
         symbol: 'ETH_USDT',
