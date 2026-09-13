@@ -32,7 +32,7 @@
 .scene-visual, .scene-canvas { position: absolute; inset: 0; }
 .scene-poster { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
 .scene-visual.is-ready > .scene-poster { opacity: 0; }
-.scene-canvas canvas { display: block; width: 100%; height: 100%; }
+.scene-canvas canvas { display: block; width: 100%; height: 100%; touch-action: pan-y pinch-zoom; }
 .scene-labels { position: absolute; inset: 0; pointer-events: none; }
 .scene-node-target { position: absolute; top: 0; left: 0; width: 28px; height: 28px; border: 0; border-radius: 50%; background: transparent; pointer-events: auto; }
 .scene-node-target:hover { box-shadow: 0 0 0 1px var(--muted); }
@@ -59,8 +59,12 @@
 .position-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .position-card { padding: 20px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); text-align: left; color: var(--text); min-width: 0; }
 .position-card.is-selected { border-color: var(--muted); background: var(--surface-raised); }
+/* Hover is shared with the 3D shape: either side lights the other. */
+.position-card { transition: border-color var(--motion-fast), background var(--motion-fast); }
+.position-card.is-linked { border-color: color-mix(in oklch, var(--fg) 70%, var(--border)); }
 .position-heading { display: flex; align-items: center; gap: 10px; }
-.asset-monogram { font-size: 26px; line-height: 1; }
+.asset-monogram { display: inline-block; font-size: 26px; line-height: 1; transition: transform var(--motion-panel) var(--motion-enter); }
+.position-card.is-linked .asset-monogram { transform: translateY(-2px) scale(1.12); }
 .asset-btc { color: #d5bdaa; }
 .asset-eth { color: #afbeb6; }
 .position-heading strong { font-size: 15px; font-weight: 500; }
