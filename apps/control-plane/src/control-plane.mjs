@@ -358,6 +358,9 @@ export function createControlPlane(options = {}) {
   const requestedSweepMs = options.sessionSweepMs === undefined ? 60_000 : Number(options.sessionSweepMs)
   if (!Number.isInteger(requestedSweepMs) || requestedSweepMs < 10 || requestedSweepMs > 60_000) fail('CONTROL_SESSION_SWEEP_INVALID', 'Session sweep interval must be between 10 and 60000 milliseconds')
   const staticRoot = options.staticRoot === undefined ? null : validStaticRoot(options.staticRoot)
+  // Server-owned dependency, injected like the Paper adapter. Absent means the
+  // workspace is session-only, which is what the tests and any embedded use get.
+  const workspaceStore = options.workspaceStore ?? null
   const adapter = isObject(options.adapters) ? options.adapters : {}
   const conversations = options.conversationStore || createConversationStore({ now })
   const configuredSockets = options.executorSockets || {}
@@ -692,7 +695,25 @@ export function createControlPlane(options = {}) {
     if (!reusableBootstrapToken) bootstrapUsed = true
     // A new login replaces this browser's previous session and its credentials.
     deleteSession(cookieValue(request.headers.cookie, sessionCookieName()), 'relogin')
-    sessions.set(sessionId, { id: sessionId, csrf, expiresAt })
+    const session = { id: sessionId, csrf, expiresAt }
+    // Restore the non-credential setup so expiry and restart no longer discard
+    // roughly twenty inputs. The credential is deliberately not restored.
+    if (workspaceStore) {
+      try {
+        const stored = workspaceStore.read()
+        if (stored) {
+          session.modelPool = stored.pool
+          session.modelMode = stored.mode
+          session.modelBootstrap = stored.bootstrap
+          session.roleModels = { ...stored.role_models }
+          session.roleEfforts = { ...stored.role_efforts }
+          // Left unbound to any connection so a custom model stays declared
+          // for whichever gateway the operator reconnects to.
+          session.declaredModelPool = stored.pool
+        }
+      } catch { session.workspaceRestoreFailed = true }
+    }
+    sessions.set(sessionId, session)
     const secure = request.socket.encrypted ? '; Secure' : ''
     sendJson(response, 200, { ok: true, csrf_token: csrf, expires_at: new Date(expiresAt).toISOString() }, {
       'Set-Cookie': `${sessionCookieName()}=${sessionId}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}${secure}`
@@ -1258,6 +1279,21 @@ export function createControlPlane(options = {}) {
         try { for (const { id, efforts } of candidate.pool) for (const effort of efforts) assertSessionModelEffort(id, effort, candidate.pool, target.protocol) } catch { fail('CONTROL_MODEL_POOL_PROTOCOL_INVALID', '声明的模型或 effort 不支持所确认连接的协议；未保存修改。', 400) }
       }
       if (sessions.get(session.id) !== session || !Number.isFinite(Number(now())) || Number(now()) >= session.expiresAt) fail('CONTROL_SESSION_REQUIRED', '会话已失效，请重新登录。', 401)
+      // Persist first: a rejected write must not leave memory ahead of disk.
+      if (workspaceStore) {
+        try {
+          workspaceStore.write({
+            protocol: target?.protocol || protocolFor(session),
+            pool: candidate.pool,
+            bootstrap: candidate.bootstrap,
+            role_models: candidate.models,
+            role_efforts: candidate.efforts,
+            mode: candidate.mode
+          })
+        } catch (error) {
+          fail('CONTROL_WORKSPACE_PERSIST_FAILED', `模型配置未保存到本地：${String(error?.code || 'WORKSPACE_WRITE_FAILED')}。未修改当前配置。`, 503)
+        }
+      }
       commitModelSettings(session, candidate)
       if (body.pool !== undefined) { session.declaredModelPool = candidate.pool; if (target) session.declarationConnection = target; else delete session.declarationConnection }
       return modelsDto(session)

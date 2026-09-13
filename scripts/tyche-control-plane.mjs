@@ -25,6 +25,7 @@ import {
 } from './tyche-cluster.mjs'
 import { rejectPiMutationCredentials, runPiAutomation } from './pi-automation.mjs'
 import { createPaperSetupAdapter } from './control-paper-setup.mjs'
+import { createWorkspaceStore } from './control-workspace-store.mjs'
 import { createConversationStore } from '../apps/control-plane/src/conversations.mjs'
 import { createPaperSceneAdapter } from './control-paper-scene.mjs'
 
@@ -185,6 +186,9 @@ export async function startControlPlaneChild(rawOptions = {}) {
   if (testnetVenue !== null && !VENUES.has(testnetVenue)) fail('CONTROL_CHILD_VENUE_INVALID', 'testnet venue must be gate or binance')
   const options = { provider, model, mode, port, configPath, testnetVenue }
   const paperSetup = createPaperSetupAdapter({ configPath })
+  // Opt-in like persistentHistory so a direct caller, including the tests,
+  // gets a session-only workspace instead of shared on-disk state.
+  const workspaceStore = rawOptions.persistentWorkspace ? createWorkspaceStore() : null
   const processEnvironment = rawOptions.env || process.env
   rejectPiMutationCredentials(processEnvironment)
   const stateReader = typeof rawOptions.stateReader === 'function' ? rawOptions.stateReader : readTycheClusterState
@@ -214,6 +218,7 @@ export async function startControlPlaneChild(rawOptions = {}) {
     // The web bundle is a fixed server asset. createControlPlane performs its
     // real-directory/index.html startup checks before binding.
     staticRoot: STATIC_ROOT,
+    workspaceStore,
     executorSockets: EXECUTOR_SOCKET_PATHS,
     onBootstrapToken: (token) => { bootstrapToken = token },
     adapters: {
@@ -341,7 +346,7 @@ export async function startControlPlaneChild(rawOptions = {}) {
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   try {
     const args = parseControlPlaneArgs(process.argv)
-    await startControlPlaneChild({ ...args, persistentHistory: true })
+    await startControlPlaneChild({ ...args, persistentHistory: true, persistentWorkspace: true })
   } catch (error) {
     process.stderr.write(`${error.code || 'CONTROL_CHILD_START_FAILED'}: ${String(error.message || error)}\n`)
     process.exitCode = 1
