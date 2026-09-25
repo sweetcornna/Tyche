@@ -4,7 +4,7 @@ JiuwenSwarm supports integration with multiple Chinese chat platforms. Below are
 
 ## Xiaoyi
 
-[Demo video: Xiaoyi channel setup and conversation demo](../assets/videos/xiaoyi_channel.mp4) (Covers: creating an agent on Xiaoyi Open Platform, configuring credentials and whitelist, publishing the agent, connecting to JiuwenSwarm channel, and end-to-end device conversation demo)
+[Demo video: Xiaoyi channel setup and conversation demo](https://github.com/openJiuwen-ai/jiuwenswarm/blob/b7a7c32564a98eb2033271ed93b7ad0124fc92c8/docs/assets/videos/xiaoyi_channel.mp4) (Covers: creating an agent on Xiaoyi Open Platform, configuring credentials and whitelist, publishing the agent, connecting to JiuwenSwarm channel, and end-to-end device conversation demo)
 
 ### 1. Create a Xiaoyi Agent
 

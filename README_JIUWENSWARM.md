@@ -8,9 +8,9 @@
   <strong>Understands Your Intent, Evolves Autonomously — Swarm Collaboration for Complex Tasks</strong>
 </p>
 <p align="center">
-  <a href="README.md">English</a>
+  <a href="README_JIUWENSWARM.md">English</a>
   ·
-  <a href="README_CN.md">Chinese</a>
+  <a href="README_JIUWENSWARM_CN.md">Chinese</a>
   ·
   <a href="docs/README_EN.md">Docs (EN)</a>
   ·
@@ -34,7 +34,7 @@
   <img src="https://img.shields.io/badge/os-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20HarmonyOS-lightgrey.svg" alt="OS Support" />
 </p>
 
-[JiuwenSwarm_Introduction.mp4](docs/assets/videos/JiuwenSwarm_Introduction.mp4)
+[JiuwenSwarm_Introduction.mp4](https://github.com/openJiuwen-ai/jiuwenswarm/blob/b7a7c32564a98eb2033271ed93b7ad0124fc92c8/docs/assets/videos/JiuwenSwarm_Introduction.mp4)
 
 **JiuwenSwarm** is an Agent system that makes multi-agent collaboration truly work. Designed for developers and teams who need to automate complex tasks, it helps users drive multi-agent collaboration, Skill self-evolution, and tool invocation through natural language — delivering end-to-end from intent to result. It runs on a single machine or across a cluster, and you can reach it from a browser, a terminal, or the chat apps you already use.
 

@@ -9,9 +9,9 @@
 </p>
 
 <p align="center">
-  <a href="README_CN.md">中文</a>
+  <a href="README_JIUWENSWARM_CN.md">中文</a>
   ·
-  <a href="README.md">English</a>
+  <a href="README_JIUWENSWARM.md">English</a>
   ·
   <a href="docs/README.md">文档</a>
   ·
