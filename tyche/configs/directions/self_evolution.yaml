@@ -1,0 +1,36 @@
+name: self_evolution
+title: Agent self-evolution
+summary: >-
+  How agents improve their own prompts, skills, tools, or workflows from
+  experience without weight updates, and how to keep such changes safe and
+  measurably beneficial.
+seed_queries:
+  - self-improving LLM agents experience
+  - skill library lifelong learning language agent
+  - verbal reinforcement learning self reflection agents
+  - automatic prompt optimization LLM
+  - self-refine iterative feedback large language models
+  - agent workflow optimization automated
+canonical_works:
+  - Reflexion Language Agents with Verbal Reinforcement Learning
+  - Voyager An Open-Ended Embodied Agent with Large Language Models
+  - Self-Refine Iterative Refinement with Self-Feedback
+  - ExpeL LLM Agents Are Experiential Learners
+  - Large Language Models as Optimizers
+experiment_families:
+  - name: gated_playbook_evolution
+    description: >-
+      A sequence of small tool-use or reasoning tasks; the agent distills
+      lessons after each episode. Compares no evolution, unconditional
+      reflection memory, and the proposed gated promotion of lessons that must
+      show a verified improvement before entering the prompt.
+    metrics: [success_rate, regression_rate, prompt_tokens_per_task]
+  - name: skill_refinement_under_drift
+    description: >-
+      Task distribution shifts midway; measures how quickly each evolution
+      policy adapts and whether stale lessons are retired.
+    metrics: [success_rate_before_shift, success_rate_after_shift, recovery_episodes]
+angle_hints:
+  - promotion gates that require measured improvement before a lesson is kept
+  - retirement of lessons that stop helping after distribution shift
+  - separating episodic reflection from durable skill edits

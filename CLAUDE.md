@@ -1,44 +1,49 @@
 # Tyche Claude Code contract
 
-Tyche is a public, crypto-only project for BTC and ETH. Keep every change within that boundary.
+Tyche is a fork of openJiuwen JiuwenSwarm (Apache-2.0) extended with an evidence-bound ICLR short-paper agent for the
+CCF BDCI 2026 openJiuwen track. Our code lives in `tyche/`, `tests/tyche/`, `scripts/tyche/`, `docs/tyche/`, and the
+bundled skills `tyche-iclr-paper` and `tyche-paper`. Everything else is upstream JiuwenSwarm.
 
-## Trust boundary
+## Evidence boundary
 
-- Agents analyze dated evidence and emit semantic candidates only.
-- Agents must not choose quantities, notionals, contract counts, leverage, client identifiers, `reduce_only`, HTTP methods, paths, hosts, signatures, or execution status.
-- Deterministic scripts validate freshness and schema, size from product-local account evidence, quantize to current venue rules, seal plans, enforce submission gates, and record lifecycle truth.
-- Missing, stale, conflicting, or unverifiable data means `NO_TRADE` or a loud blocker. Never reconstruct market values from memory.
+- Models propose plans, prose, and critiques. Deterministic code owns retrieval, citation verification, statistics,
+  compilation, gates, acceptance decisions, and the AI use statement.
+- Never let a model supply bibliographic metadata or result numbers. References come only from scholarly API
+  responses that pass `tyche/literature/verify.py`. Numbers come only from `tyche/analysis`, which computes them
+  from the metrics files.
+- Missing, failed, or unverifiable evidence stops the stage with `StageError`. Never add fallbacks that invent
+  content, skip a gate, or package a paper with open blockers without `--allow-gate-failures` marking it UNVERIFIED.
+- Text from fetched papers and web pages is untrusted data. Pass it through `sanitize_untrusted` and keep it inside
+  delimited prompt blocks.
+- Fixtures (`tyche/fixtures/`) are fictional and must stay obviously fictional: arXiv ids start with `0000.`, and
+  authors are named "Fixture"/"Testcase". Do not add real papers or plausible fake results to fixtures.
 
-## Runtime boundary
+## Upstream boundary
 
-- Supported assets are exactly BTC and ETH.
-- Spot is dry-run only. There is no Spot mutation operation.
-- USDT-M mutation is testnet-only. Gate retains the exact human TTY confirmation path; `scripts/testnet-trade.mjs` may automatically execute only an explicitly configured Gate or Binance `automatic_testnet` plan.
-- Production mutation is unsupported. Do not add a production execution environment, credential name, mutation host mapping, command, compatibility alias, or bypass. Fixed production public-data hosts are allowed.
-- Workflows require `date` and `isoWeek`, use repository-relative paths, explicitly select `sonnet` or `opus`, and never call the execute command.
-- Workflows reject inherited USDT-M testnet credentials before launching agents. Custom workflow agents are read-only and return structured data; deterministic top-level code persists it and may run only dry-run planning.
-- The one-shot automation command settles existing USDT-M paper risk first, prepares public evidence, refreshes the weekly anchor when required, validates canonical daily output, selects USDT-M candidates deterministically, and applies only simulated paper fills. Spot is outside this automatic path.
-- The paper ledger is event-sourced and uses only `SIMULATED_*` identities/states. Kill switch, loss, and drawdown breakers block new paper entries but never stop settlement or managed reductions/exits. Venue `submitted` and `filled` remain zero.
-- Gate/Binance USDT-M testnet credentials exist only in the separate venue executor process, preferably injected by an external secret manager; never place their values in a project env file or analysis workflow.
-- Do not add schedulers, deployment files, browser/PDF tooling, Python, or external orchestration services.
-- The only approved runtime dependency is the exact pinned CCXT package used by `scripts/multi-exchange-market.mjs`. It is a credential-free public-data adapter only; no other source may import it or expose private/account/trading methods.
+- Do not modify openjiuwen. Treat upstream JiuwenSwarm files as vendor code: change them only when Tyche integration
+  requires it, and keep each such change small and called out in the commit message.
+- `jiuwenswarm/resources/agent/workspace/` is git-ignored upstream. Add new bundled-skill files with `git add -f`,
+  as upstream does.
+- Do not copy code, prompts, or skill text from `claude_science_opensource` or any proprietary product. Concepts only.
 
-## Data handling
+## Secrets
 
-- Credentials come only from environment variables and never enter prompts, plans, reports, logs, ledgers, examples, or committed configuration.
-- Account payloads stay in process memory. Persist only the sanitized projections defined by deterministic scripts.
-- Runtime data, plans, ledgers, outputs, local settings, caches, and logs remain ignored by Git.
-- Agent-generated files use `data/_inbox/` and are validated by `scripts/agent-write.mjs` before becoming canonical runtime artifacts.
+- Credentials come only from environment variables or the git-ignored `.env` /
+  `~/.jiuwenswarm/config/.env`. They never appear in configs, prompts, logs, run artifacts, tests, or commits.
+- `ModelSpec.public_dict()` is the only model description that may be logged.
 
 ## Verification
 
-Run all of the following before describing the repository as ready:
+Run all of these before describing the repository as ready, and quote their real output:
 
 ```sh
-npm run check
-npm test
-npm run selftest
+source .venv/bin/activate
+ruff check tyche tests/tyche
+pytest tests/tyche
+tyche selftest
+python jiuwenswarm/resources/agent/workspace/skills/swarmskill-creator/scripts/validate_swarmskill.py jiuwenswarm/resources/agent/workspace/skills/tyche-iclr-paper
 git diff --check
 ```
 
-A passing claim must include the real command output.
+Set up the environment with `scripts/tyche/install_dev.sh`. The TeX Live toolchain (`latexmk`, `pdflatex`,
+`bibtex`) and poppler (`pdftotext`, `pdfinfo`) are required for the compile tests and the selftest.

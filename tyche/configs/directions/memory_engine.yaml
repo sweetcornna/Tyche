@@ -1,0 +1,38 @@
+name: memory_engine
+title: Agent memory engine design
+summary: >-
+  How an LLM agent stores, updates, retrieves, and forgets information across
+  long interactions, and how memory design trades accuracy against cost.
+seed_queries:
+  - long-term memory for large language model agents
+  - memory management operating system LLM agent
+  - retrieval augmented memory conversational agent long horizon
+  - memory consolidation forgetting LLM agents
+  - benchmark long-term conversational memory LLM
+  - knowledge update contradiction memory language model agent
+canonical_works:
+  # Names only. Tyche resolves each through the literature APIs and cites it
+  # only if a verified record comes back.
+  - MemGPT Towards LLMs as Operating Systems
+  - Generative Agents Interactive Simulacra of Human Behavior
+  - Reflexion Language Agents with Verbal Reinforcement Learning
+  - Lost in the Middle How Language Models Use Long Contexts
+  - LongMemEval Benchmarking Chat Assistants on Long-Term Interactive Memory
+  - A-MEM Agentic Memory for LLM Agents
+experiment_families:
+  - name: evolving_fact_stream
+    description: >-
+      A synthetic stream of sessions introduces, updates, and retracts facts
+      about entities; the agent later answers questions that require the most
+      recent valid fact. Compares full-context, sliding-window, summary,
+      retrieval, and the proposed memory design.
+    metrics: [accuracy, stale_fact_rate, prompt_tokens_per_query]
+  - name: multi_session_task_recall
+    description: >-
+      The agent completes small tasks across sessions and must reuse user
+      preferences stated in earlier sessions.
+    metrics: [preference_recall, task_success, prompt_tokens_per_query]
+angle_hints:
+  - provenance-tagged memories with explicit supersession instead of overwrite
+  - write-time versus read-time consolidation
+  - budget-aware retrieval that trades recall against prompt tokens

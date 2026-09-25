@@ -1,397 +1,166 @@
-# Tyche
+# Tyche：基于 JiuwenSwarm 的证据约束型 Agent 科研短论文自动生成系统
 
-Tyche is a clean-room, public-ready financial-agent foundation for BTC and ETH. Claude Code orchestrates weekly strategic analysis and daily tactical analysis; deterministic Node.js scripts own all exchange-facing validation, sizing, plan sealing, and lifecycle truth.
+> CCF BDCI 2026 · 【华为 openJiuwen】基于 JiuwenSwarm 的 Agent 科研论文自动生成
+>
+> English summary: [below](#english-summary)
 
-详细中文项目规划、当前验证状态及后续验收路线见 [项目规划](docs/PROJECT_PLAN.md)。
+Tyche 在 [openJiuwen JiuwenSwarm](https://github.com/openJiuwen-ai/jiuwenswarm) 源码基础上构建。给定一个 Agent 方向的研究题目，它自动完成
+**选题拆解 → 文献调研 → 方法设计 → 实验 → 结果分析 → 论文撰写 → 模拟评审与修订**，输出一篇可编译的 **ICLR 2027 模板短论文**
+（主文默认 ≤ 5 页），可直接上传到 [Stanford Agentic Reviewer](https://paperreview.ai) 评测。
 
-## Safety boundary
+核心原则是**模型负责提议，代码负责核验**：
 
-- **Gate Spot is dry-run only.** Tyche can read public Spot data and can optionally read a production Spot account for dry-run sizing. No Spot order-mutation operation exists in this repository.
-- **Gate and Binance USDT-M testnet execution is available.** The venue-explicit module can plan and submit automatically only when an ignored local configuration selects `automatic_testnet`; Gate's original manual TTY path remains available.
-- **Production execution is unsupported.** There is no production USDT-M mutation host, credential set, or command path.
-- **Execution is fail-closed.** The local Pi cluster defaults to shadow mode and never starts a testnet executor; any testnet venue must be selected explicitly and run in its own process.
-- **Derivatives are high risk.** Testnet behavior does not establish production safety, profitability, liquidity, or protection against liquidation.
+- 参考文献只来自 arXiv / Semantic Scholar / OpenAlex / Crossref 的真实检索结果，经核验后才进入 `refs.bib`；模型不能凭记忆生成文献。
+- 论文中的每个结果数字都必须能追溯到实验日志经确定性统计脚本计算出的值（数字门禁）；伪造或估算的数字无法通过打包。
+- 编译、页数、结构、占位符、引用解析等全部由确定性门禁检查；任何门禁阻断项未解决时拒绝打包（除非显式标记为 UNVERIFIED）。
+- ICLR 2027 要求的 *AI use statement* 由代码根据运行记录生成，而不是由模型撰写，保证披露与事实一致。
 
-## Requirements
+## 系统架构
 
-- Node.js 22.19 or newer
-- Claude Code for the included agents, skills, and workflows
-- Exact pinned CCXT dependency for credential-free multi-exchange public data
-
-## Setup
-
-```sh
-npm install --ignore-scripts
-cp config/tyche.json config/tyche.local.json
-npm run check
-npm test
-npm run test:e2e
-npm run selftest
+```mermaid
+flowchart LR
+    T[研究题目 + 方向预设] --> P[S0 规划<br/>可证伪研究计划]
+    P --> S[S1 文献调研<br/>多源检索·筛选·引文扩展·核验·证据卡]
+    S --> E[S2 实验<br/>openJiuwen auto_research<br/>设计→编码→执行→反思]
+    E --> A[S3 分析<br/>Bootstrap CI·置换检验<br/>允许数字登记表·图表]
+    A --> W[S4 写作<br/>分节上下文装配<br/>ICLR 2027]
+    W --> R[S5 评审修订<br/>7 维评审团 + 忠实度审计<br/>发现台账·门禁·接受检验]
+    R --> V[S6 演进<br/>跨运行写作经验<br/>门控晋升/淘汰]
+    V --> K[S7 打包<br/>PDF·源码·溯源清单·报告]
+    M[(科研记忆引擎<br/>SQLite FTS5 / BM25)] -.-> P & S & W & R & V
 ```
 
-## Local Pi cluster and analysis cockpit
+| 阶段 | 做什么 | 由谁负责 |
+|---|---|---|
+| S0 规划 | 把题目拆成 1–3 个研究问题、可证伪假设、方法机制、基线、指标与贡献 | 模型（结构化 JSON，校验后入库） |
+| S1 文献 | 查询规划 → 三源检索 → 去重 → BM25 预排序 → 摘要级相关性筛选 → 一跳引文图扩展 → 元数据核验 → 证据卡（引文必须逐字出自摘要）→ 主题归纳 | 检索/核验：代码；筛选/归纳：模型 |
+| S2 实验 | 复用 openJiuwen `auto_research` 的 ManagerRuntime（仅开启 设计/编码/执行/反思，关闭其网页检索与 NeurIPS 报告模块）；也可导入团队自有实验结果 | openJiuwen 智能体 + 真实执行 |
+| S3 分析 | 逐条目 bootstrap 置信区间、配对 sign-flip 置换检验、方向感知的最优标注；生成表格、图和“允许数字登记表” | 代码（固定随机种子） |
+| S4 写作 | 按依赖顺序（方法→实验→分析→相关工作→引言→结论→摘要）逐节写作；每次调用的上下文由记忆引擎在 token 预算内装配并留存清单 | 模型 + 确定性清洗 |
+| S5 评审 | 三位视角评审（严谨性/新颖与定位/清晰与影响）按 Agentic Reviewer 的 7 个维度打分 + 忠实度审计；发现写入台账，定向修订，重新编译与门禁，分数不降才接受 | 模型评审 + 代码裁决 |
+| S6 演进 | 从台账提炼写作经验；跨 ≥2 次运行复现且修复被接受并提分才晋升为生效经验；无效则淘汰；导出为 JiuwenSwarm 技能 `evolutions.json` | 模型提炼 + 代码门控 |
+| S7 打包 | 论文 PDF、LaTeX 源码、全部产物的 SHA-256 溯源清单、评审台账、门禁报告、运行报告（含各阶段 token 用量） | 代码 |
 
-The cockpit uses a minimal dark interface with an original Blender-built abstract
-scene. Flat, unlit geometric forms replace metal, instrument dials and coin models.
-The login contains only the brand and form; the workspace keeps controls, status
-and data without slogans, onboarding paragraphs or model subtitles. Switch between
-**工作流** and **持仓**, select a role, or expand **详情** for Paper position data.
-Escape closes the expanded panel. Pause and reduced motion use a static poster.
-Light mode remains available through conversation.
+更详细的设计见 [docs/tyche/DESIGN.md](docs/tyche/DESIGN.md)。
 
-`GET /api/paper/scene` is an authenticated, read-only Paper projection. Confirmed
-events update positions; partial fills never count the unfilled remainder. Price,
-equity and unrealized PnL are explicitly dated settlement snapshots, not live
-quotes. Missing marks show **待核算**. A stale or invalid source is identified and
-cannot silently become an empty account. Scene updates poll each second during a
-workflow or active order, and every fifteen seconds while idle; hidden pages stop
-polling and resume from a fresh baseline without replaying old executions.
+## 与赛题三个建议方向的对应
 
-In **设置 → 连接**, enter **服务地址** and **API Key**, then click **连接**.
-The address accepts a hostname, base URL, or complete standard API URL; operation
-paths identify the protocol. Pasted key boundary whitespace is trimmed. Changing
-fields keeps the unsaved draft, and the key clears only after successful connection.
-Clash/TUN Fake-IP DNS is handled automatically with public-address verification and
-pinned connections. Network errors appear beside the connection fields.
+Tyche 既能就三个方向**生成论文**（`--direction context_engineering | memory_engine | self_evolution`，每个方向带有种子查询、经典工作名、可执行的实验族与指标），其自身也是这三项技术的一个实现：
 
-Model sources, the rebuild command, the DTO contract and visual QA instructions
-are documented in [3D 工作台说明](docs/3D_WORKSPACE.md).
+- **Agent 记忆引擎**：`tyche/memory/store.py` —— 带来源类型（retrieved / observed / inferred）、作用域（run / project / global）、更正链（supersession）与使用记录的科研记忆，SQLite FTS5 + BM25 检索。
+- **Agent 上下文工程**：`tyche/memory/context_pack.py` —— 必选块 + 按优先级/相关度装入的可选块，在硬 token 预算内装配，超长块截断而非静默丢弃；每次模型调用都保存装配清单，可审计、可研究。
+- **Agent 自演进**：`tyche/evolution/playbook.py` —— 评审发现 → 经验候选 → 需“多次复现 + 修复被接受且分数不降”才晋升 → 失效自动淘汰，并与 JiuwenSwarm 的技能演进机制互通。
 
-The optional safe UI lives in `apps/web` and is served by the loopback-only
-control plane after the production bundle is built:
+## 相对上游的改动
 
-```sh
-npm run web:build
-npm run control:check
-npm run control:test
-node scripts/tyche-control-plane.mjs --port 8788
+本仓库是 JiuwenSwarm 在提交 `b7a7c32` 处的完整 fork（Apache-2.0）。导入提交与上游逐字一致（仅去掉 6 个无法推送的 Git LFS 演示视频，链接改指上游）。本项目新增：
+
+| 路径 | 内容 |
+|---|---|
+| `tyche/` | 全部自研代码：配置、LLM 封装、工作区与溯源、记忆引擎、文献、实验桥接、统计分析、论文写作与编译、门禁、评审、演进、流水线、CLI、离线自检 |
+| `tests/tyche/` | 88 个离线单元/端到端测试（含真实 LaTeX 编译的完整自检） |
+| `jiuwenswarm/resources/agent/workspace/skills/tyche-iclr-paper/` | SwarmFlow 蜂群技能：按阶段编排，可在 TUI `/swarmflows` 监控，支持人工审批研究计划 |
+| `jiuwenswarm/resources/agent/workspace/skills/tyche-paper/` | Agent 模式技能：在对话中驱动 `tyche` |
+| `scripts/tyche/install_dev.sh` | 开发环境安装；gitcode 不可达时自动改用 GitHub 镜像的**同一提交** |
+| `pyproject.toml` | 注册 `tyche` 包、数据文件与 `tyche` 命令 |
+
+openJiuwen 本身未作修改：实验环节通过公开接口调用 `openjiuwen.rsi.artifact_rsi.paper_opt.auto_research`，技能演进导出复用 `openjiuwen.agent_evolving` 的数据结构。
+
+## 快速开始
+
+环境要求：Python 3.11–3.13、[uv](https://docs.astral.sh/uv/)、TeX Live（`latexmk`、`pdflatex`、`bibtex`）与 poppler（`pdftotext`、`pdfinfo`）。
+
+```bash
+# 1. 安装（Ubuntu 示例）
+sudo apt-get install -y latexmk texlive-latex-recommended texlive-latex-extra texlive-fonts-recommended poppler-utils
+scripts/tyche/install_dev.sh          # 创建 .venv 并安装锁定依赖、JiuwenSwarm 与 Tyche
+source .venv/bin/activate
+
+# 2. 配置模型（默认 DeepSeek，OpenAI 兼容接口）；密钥只放在被忽略的 .env 中
+cp .env.example .env && chmod 600 .env   # 填写 API_KEY
+
+# 3. 自检：离线跑通全部阶段并真实编译一篇（合成数据的）ICLR 论文，无需网络与密钥
+tyche selftest --keep out/
+
+# 4. 检查工具链、密钥与网络
+tyche doctor --ping-model
+
+# 5. 生成论文（可分阶段：--stop-after plan 后检查/修改，再 --resume）
+tyche run --topic "带更正链的 Agent 记忆能否减少过期事实回答" --direction memory_engine --stop-after plan
+tyche run --resume --run-id <run-id>
 ```
 
-The service binds only to `127.0.0.1` and serves the built `apps/web/dist` from
-the same origin. By default it prints a fresh, one-time bootstrap token at startup.
-For persistent local login, put your chosen token in the ignored project file
-`config/control-plane.token` and set its permissions to `0600`. It must be a real
-private file containing 6–256 URL-safe letters, digits, underscores or hyphens,
-with at most one final newline. The full script reads this fixed project path at
-startup regardless of the working directory; an existing invalid or unreadable
-file blocks startup. A valid file selects a reusable token across logouts,
-session expiry and service restarts. Remove it and restart to restore the random
-one-time mode. Each login still issues fresh random session and CSRF credentials
-with a 15-minute lifetime; relogin revokes the session replaced in that browser.
-Cookies are separated by the bound local port. Refreshing or opening another tab
-restores the current session through a protected read without consuming the login
-token or extending its lifetime. If another login, logout or expiry changes that
-session, the page stops pending actions and offers recovery or login. Unsubmitted
-endpoint/key pairs and chat text remain together in page memory for review; no
-write is retried automatically, and recovery loads the current server settings.
-The standalone package CLI retains random one-time login.
-Programmatic `startControlPlaneChild` callers may instead supply explicit
-`bootstrapToken` / `reusableBootstrapToken` options; these take precedence over
-the local file and undergo the core's strict validation.
+产物位于 `workspace/runs/<run-id>/package/`：`paper.pdf`、`paper_source/`、`run_record/`（全部产物版本、上下文装配清单、评审轮次、事件与用量日志、运行配置）、`provenance.json`、`review_ledger.json`、`gates.json`、`run_report.md`。用 `--allow-gate-failures` 强制打包未通过门禁的论文时，文件名为 `paper_UNVERIFIED.pdf`，其 AI use statement 会被重新生成并注明未通过核验。
 
-The cockpit receives
-sanitized status, cycle, DAG, paper, venue, plan-summary, and bounded event
-projections. It never stores provider or exchange keys and never receives raw
-account data, private history, plans, ledgers, or fills. Testnet actions remain
-behind the fixed executor sockets, exact arm phrases, and exact plan-hash
-confirmation. See [apps/web/UPSTREAM.md](apps/web/UPSTREAM.md) for the fixed
-`xing-shuyin/pi-web-ui` reference commit and the intentionally deleted surface
-area.
+每个运行的完整配置保存在 `runs/<run-id>/config.json`，`--resume` 时自动沿用（本次命令行给出的 `--engine`、`--set` 等会叠加并保存）。`--resume --stage X` 重跑某阶段时，其后所有阶段会被重置为待运行，避免沿用过期结果。
 
-After signing in with the bootstrap token, fill in only the model API endpoint
-and API key. Tell the main Agent what you want to explore with BTC/ETH. It asks
-one or two focused questions, remembers collected preferences and partial
-settings, and can arrange a complete **Paper simulation starting point** when
-you say you are unsure or delegate the choices. Inferred capital is explicitly
-virtual and risk choices are labeled assumptions, not real balances, a claim
-of optimality or a profit promise. There are no hidden hardcoded capital presets.
+常用选项：
 
-When you ask for configuration, the server validates the complete selected
-candidate and applies it automatically. No strategy application button or
-eleven-field Paper form is needed; model selection also has an optional manual panel. Explanations alone do not apply changes.
-The read-only summary shows applied, pending or failed status from the server.
-Then select **运行 workflow** for one analysis → deterministic plan → Paper
-cycle. If setup is incomplete, the action asks the main Agent to help complete
-it. Date and ISO week use the current UTC day at launch; repeat runs reuse the
-account and connection. Decimal bps retain precision (1 bps = 0.01%).
+- `--engine imported --results-dir <dir>`：使用团队自己跑出的 `<variant>.metrics.json`（可含逐条目结果 `per_question`），跳过自动实验。
+- `--set review.max_rounds=4`、`--set paper.max_main_pages=6`：覆盖任意配置项（默认值见 `tyche/configs/tyche.default.yaml`）。
+- `TYCHE_REVIEW_MODEL_NAME=...`：评审使用不同于写作的模型，降低自我认同偏差。
+- `tyche review paper.pdf`：用本地 7 维评审团评审任意论文 PDF。
+- `tyche lessons`：查看跨运行写作经验及其状态。
 
-The default manual workflow uses the ignored `config/tyche.local.json`, creating
-it from the committed locked template when needed. An explicitly selected
-custom startup configuration stays selected and is never rewritten by the page;
-missing limits in that custom file require correction there. Existing Paper
-accounts, configured limits and configuration digests are checked and never
-reset or silently replaced. The standalone `@tyche/control-plane` package CLI
-is only a projection shell; use the script above for the complete workflow.
+### 在 JiuwenSwarm 中使用
 
-The desktop workspace centers the conversation, with a collapsible history sidebar,
-search/command palette, model and effort controls, and an optional workflow/Paper
-detail panel. Chats support rename, pin, archive, restore, Markdown, code copying,
-quotes, retry and cancellable requests. The full CLI stores bounded conversation
-history in the ignored `data/control/conversations.json` (0600); API credentials
-remain in server session memory. See [Desktop workspace](docs/DESKTOP_WORKSPACE.md)
-for implemented interactions and validation.
+- **Cluster 模式 + SwarmFlow**：在配置中开启 `enable_swarmflow` 后，让 Leader 运行技能 `tyche-iclr-paper`（参数 `topic`、`direction`、可选 `review_plan: true` 进行人工审批），在 TUI 中用 `/swarmflows` 查看阶段进度。每个阶段智能体只执行对应的 `tyche` 命令并汇报状态，核验逻辑始终留在确定性代码里。
+- **Agent 模式**：直接说“用 tyche-paper 技能写一篇关于 Agent 上下文压缩的 ICLR 短论文”。
+- 运行时加 `--export-skill-dir ~/.jiuwenswarm/agent/workspace/skills/tyche-paper`，生效的写作经验会出现在 `/evolve_list` 中，可用 JiuwenSwarm 自带的 `/evolve_rollback` 等命令管理。
 
-The main conversation can adjust semantic strategy and six role model/effort
-choices. A bounded session draft preserves configuration answers beyond the
-eight-message model context window. Each configuration response selects its
-application scope, so an independent theme/model change does not initialize a
-pending Paper draft. Only a complete, validated candidate creates the simulation.
+## 用 Stanford Agentic Reviewer 评测
 
-Every role initially uses Astra. Orchestration (including the main conversation),
-BTC/ETH analysis and synthesis use `high`; preflight uses `medium`, and review
-uses `xhigh`. The default pool contains only Astra with these three efforts.
-Luna, Sol, Terra, 5.5 and 5.4 Mini remain available in the known-model directory
-for explicit addition to your pool.
+1. 取 `package/paper.pdf`，在 <https://paperreview.ai> 上传，目标会议选择 **ICLR**（只有选 ICLR 时才显示分数）。
+2. 对照 `run_report.md` 中各轮的 7 维分数，定位薄弱维度，可用 `--notes` 调整研究计划或增加评审轮数后重跑。
 
-Open **模型分配** to declare up to twelve available model IDs and each
-model's nonempty subset of `medium`, `high`, `xhigh`. You can also describe a pool
-in chat. Custom IDs are user declarations about the same API gateway, not verified
-capabilities. Known SDK metadata is retained, and conflicting effort declarations
-are rejected as a whole instead of silently lowering an effort. Custom context
-and pricing stay unknown: the SDK's zero context sentinel means no known limit,
-while 16,384 tokens is only this application's output budget. For custom models, text-only is the
-application input restriction, not a claim about all model capabilities.
+`run_report.md` 里的 *composite* 是 Tyche 自己对 7 个维度的等权平均，只用于比较同一篇论文的不同草稿，**不是** paperreview.ai 分数的预测。
 
-The connection panel offers **OpenAI Responses** (the default), **OpenAI Chat
-Completions**, and **Anthropic Messages**. Select the protocol explicitly, then
-enter a domain, base URL, or that protocol's complete operation URL. Tyche adds
-HTTPS to a bare domain, adds `/v1` to an OpenAI root address, removes a matching
-`/responses`, `/chat/completions`, or `/v1/messages` suffix, and removes the standard
-Anthropic `/v1` suffix. Explicit gateway prefixes such as `/gateway/v2` are retained.
-The panel shows the normalized base URL. Encodings, dot segments, credentials,
-queries, fragments and nonexplicit HTTP loopback spellings remain rejected.
-Changing the address or protocol clears a previously typed key and requires a key
-for the new connection; equivalent normalized addresses can reuse a saved key.
+## 诚信与复现
 
-Leaving a completed connection field, or sending the first message, automatically
-reads the provider's standard models list. **重新检测模型** retries discovery.
-OpenAI uses one `GET /models` relative to its base URL; Anthropic uses one
-`GET /v1/models`. The request is limited to ten seconds, 256 KiB and 200 entries.
-Anthropic `has_more` is displayed as **仅当前页，目录不完整**; absent IDs on that
-page do not establish unavailability. No upstream pagination URL is followed.
-Errors and empty lists leave previous settings intact, with a manual model-pool
-path available. Reading a directory verifies neither inference nor every effort.
+- 实验失败时流水线停止并报告原因，不会在没有结果的情况下写论文；门禁阻断项未解决时拒绝打包。
+- `provenance.json` 记录每个产物的阶段、输入、父版本与 SHA-256，打包时重新校验，确保论文对应的就是这些数据。
+- 统计分析使用固定随机种子；所有模型调用的上下文装配清单都保存在 `write/context_manifests/`。
+- 自检使用的文献与实验数据全部是**虚构的合成夹具**（arXiv 编号以 `0000.` 开头，作者名为 Fixture/Testcase），输出会明确标注，不构成任何研究结论。
+- 提交前请团队人工检查计划、实验代码、结果与论文。`paper.human_review_statement` 默认为空，此时 AI use statement 会如实写明“流水线未记录人工审阅”；人工审阅完成后再用 `--set paper.human_review_statement="..."` 填写。
 
-The session-only catalog lasts five minutes and is bound to the protocol,
-normalized endpoint and credential identity. It exposes bounded model IDs and
-fixed capability provenance to the main Agent, never descriptions, URLs or keys.
-Provider listing, local host/SDK effort support and user-declared support remain
-separate. Unknown custom efforts must be explicitly saved in the model panel;
-chat can retain proposals as untrusted drafts but cannot grant itself new effort
-capabilities. Saving a declaration updates matching catalog entries immediately,
-without renewing their expiry or making a different connection's catalog active.
-Declarations remain bound to the confirmed protocol, endpoint and credential after
-the directory expires. Agent pool/effort selections do not change those declarations
-or narrow SDK capabilities. The model panel captures its declaration target when
-you edit; a changed or expired target requires explicit reconfirmation before saving.
+## 测试
 
-In automatic mode, discovery prepares at most twelve candidates: retain usable
-current declarations first, then use the fixed local capability order. Existing
-narrower efforts stay narrow. The rule and number of eligible models left outside
-the pool are shown. A gateway without Astra but with a known supported model can
-start the first chat without a hand-entered pool; bootstrap prefers high, then
-medium, then xhigh within the selected declaration. This prepares conversation;
-only the main Agent's complete six-role output establishes an allocation. Unknown-
-only catalogs preserve the old connection and require an explicit usable model
-and effort before connection. Manual pools, bootstrap and roles are preserved.
-
-Anthropic Messages accepts only native adaptive Claude models from the pinned
-SDK and efforts transmitted unchanged. Unknown aliases, GPT models, budget-only
-thinking models, OAuth and fallback models remain unsupported. Provider capability
-flags can narrow SDK support but never expand it. Neither chat nor failure changes
-the selected protocol. While connected, every candidate model and effort must
-support that protocol; clear the connection before preparing an incompatible pool.
-Fixed diagnostics omit upstream errors and credential values.
-
-In **自动** mode, select **主 Agent 分配** or ask for an allocation in chat. The
-main model returns six model/effort pairs and a short reason for each; only valid
-complete output clears pending allocation. Every pool change in automatic mode
-marks it pending, even when the previous selections remain valid. The page keeps
-the previous choices visible without treating them as a new allocation. No
-allocation request is added automatically to each workflow cycle.
-
-In **手动** mode, choose and save all six role pairs. Chat cannot overwrite those
-choices; strategy and theme can still be discussed independently. Removing a
-referenced model or effort blocks new workflows until corrected. Pool updates
-remove only incompatible role drafts and preserve unrelated Paper/strategy
-drafts. Pool, mode, bootstrap and submitted role settings commit together through
-the same authenticated endpoint. The displayed source distinguishes fixed defaults,
-user settings and a real main-Agent allocation; gateway compatibility remains
-unverified until independently demonstrated with the user's API service.
-
-Discussion has no tools or raw account access. Paper initialization exposes only
-eleven safe parameter values, readiness and missing fields to the main Agent.
-Existing accounts and saved risk limits cannot be overwritten by conversation.
-Independent strategy/model/theme changes can continue while Paper is blocked.
-Strategies, models, preferences, drafts, theme and discussion are session-memory
-only and disappear on logout, expiry or restart; an initialized Paper account
-remains on disk. Fixed DAG, events and results remain in run details. Testnet
-status is read-only here; independent testnet API/CLI gates remain unchanged.
-Conversation never arms an executor or starts a scheduler. A new strategy or
-model never bypasses same-cycle receipt reuse or forces a second simulated fill.
-
-Astra uses an explicit custom Responses definition because the pinned Pi
-catalog does not contain it. Its 272,000-token context and text/image input
-metadata were verified from the local host catalog. The 16,384-token session
-output budget is an application request ceiling, not a claim about the model's
-maximum output. Astra pricing is unavailable; SDK-required zero placeholders
-are not displayed as prices or cost estimates. The user's API gateway must
-support the requested model and effort; local metadata alone does not prove
-that gateway support. Existing models retain their pinned SDK metadata.
-
-After allocation, the main Agent uses the orchestrator's effective model and effort. Settings
-remain session-local. Each cycle freezes the pool capabilities, mode and both complete role mappings; job and
-result identity checks, retries and persisted provenance include the actual
-model and effort plus the pool digest; receipts retain the pool metadata source. Configuration changes never bypass receipt reuse or grant
-additional tools, roles or trading permissions.
-
-The runnable local cluster keeps the scheduler/control plane and the optional
-testnet executor in separate processes. The cluster service owns no exchange
-credentials, binds only to `127.0.0.1`, and uses fixed state/socket locations
-under `data/runtime/`. Start the processes in this order when deliberately
-using one testnet venue (choose Gate or Binance, never both):
-
-```sh
-# 1. Build the optional cockpit once.
-npm run web:build
-
-# 2. Optional: start exactly one independently configured executor.
-npm run executor -- start --venue gate --socket data/runtime/gate.sock --config config/tyche.local.json
-
-# 3. Start the scheduler/Pi service; shadow is the default and never executes.
-npm run cluster -- start --provider fixture --model fixture --mode shadow --config config/tyche.local.json
+```bash
+source .venv/bin/activate
+ruff check tyche tests/tyche
+pytest tests/tyche                       # 88 项，含真实 LaTeX 编译的端到端自检
+tyche selftest
+python jiuwenswarm/resources/agent/workspace/skills/swarmskill-creator/scripts/validate_swarmskill.py \
+    jiuwenswarm/resources/agent/workspace/skills/tyche-iclr-paper
 ```
 
-For a primary testnet run, use `--mode primary --testnet-venue gate` (or
-`binance`) only after the selected executor is independently armed. The cluster
-does one fixed-venue `plan`, then `status`, and sends a scheduled execute only
-when the executor reports armed. Shadow, unarmed, RED, ambiguous, and weekly
-dependency failures stop before execution; there is no retry or venue failover.
-The control plane's manual cycle endpoint runs one Pi/paper cycle only and can
-never trigger scheduled execution. `npm run cluster -- status` shows the
-sanitized runtime summary.
+上游 JiuwenSwarm 的测试与使用说明见 [README_JIUWENSWARM_CN.md](README_JIUWENSWARM_CN.md)、[README_JIUWENSWARM.md](README_JIUWENSWARM.md) 与 `docs/`。
 
-The committed configuration is locked and has no invented capital limits. Edit only the ignored local configuration. Gate's existing reviewed path uses `gate.submission_mode=manual_testnet`; the automatic module requires `automatic_testnet` in the selected `gate` or `binance` block, `usdm.environment=testnet`, and positive user-supplied limits plus leverage from 1 through 3. Keep the committed file locked.
+## 许可与致谢
 
-Before starting paper automation, inspect every local prerequisite without making a network request:
+- 代码以 Apache-2.0 发布（见 [LICENSE](LICENSE)），第三方声明见 [NOTICE.md](NOTICE.md) 与 [OPEN_SOURCE_SOFTWARE_NOTICE.md](OPEN_SOURCE_SOFTWARE_NOTICE.md)。
+- 基于 openJiuwen 社区的 [JiuwenSwarm](https://github.com/openJiuwen-ai/jiuwenswarm) 与 [agent-core](https://github.com/openJiuwen-ai/agent-core)。
+- ICLR 2027 样式文件来自官方 [ICLR/Master-Template](https://github.com/ICLR/Master-Template)，未作修改（见 `tyche/paper/template/SOURCE.md`）。
 
-```sh
-npm run automation -- doctor --config config/tyche.local.json
-```
+## English summary
 
-Environment variables are read directly by Node; Tyche does not load `.env` files. `.env.example` lists only the optional read-only Spot account variables. Claude Code analysis and paper processes reject Gate and Binance testnet credentials before launching an agent. Inject `GATE_USDM_TESTNET_API_KEY`/`GATE_USDM_TESTNET_SECRET_KEY` or `BINANCE_USDM_TESTNET_API_KEY`/`BINANCE_USDM_TESTNET_SECRET_KEY` only into the separate testnet process. Never store their values in the project; an external secret manager with per-process injection is preferred.
+Tyche is a fork of openJiuwen **JiuwenSwarm** that turns a research topic about LLM agents into a compiled
+**ICLR 2027 short paper**. Its stages are plan, survey, experiments, analysis, write, review, evolve, and package.
+Language models propose plans, prose, and critiques. Deterministic code handles the rest:
 
-## Multi-exchange public data
+- retrieval and verification of references from arXiv, Semantic Scholar, OpenAlex, and Crossref;
+- statistics: bootstrap confidence intervals and paired permutation tests;
+- LaTeX compilation;
+- gates that reject citations to unverified keys, numbers that do not trace to computed results, broken references,
+  and papers over the page limit.
 
-Tyche uses an exact pinned [CCXT](https://github.com/ccxt/ccxt) package to discover every exchange in its current registry. The adapter is limited to BTC/ETH public market discovery and fixed unified reads. It never accepts credentials, caller-controlled URLs, private methods, account reads, or trading methods. Gate remains authoritative for paper execution evidence; Gate and Binance use separate fixed-host native adapters for testnet execution.
+Experiments reuse openJiuwen's `auto_research` runtime; alternatively, the team can import its own metrics.
 
-List the current registry, collect all exchanges with the practical core channel set, or request every supported channel:
+A three-lens review panel scores the Stanford Agentic Reviewer's seven dimensions, and a fidelity auditor checks
+claims against the evidence. Their findings drive targeted, acceptance-tested revisions.
 
-```sh
-npm run market:all -- catalog
-npm run market:all -- snapshot --date 2030-01-07 --iso-week 2030-W02 --channels core --out data/crypto_multi_exchange.json
-npm run market:all -- snapshot --date 2030-01-07 --iso-week 2030-W02 --channels all --out data/crypto_multi_exchange.json
-```
+Lessons distilled from reviews evolve across runs through a promotion/retirement gate. They are exported in
+JiuwenSwarm's skill `evolutions.json` format.
 
-`core` collects ticker, order book, current funding, and open interest. `all` additionally collects 4-hour/daily candles, recent trades, funding history, and liquidations, so a full-registry run is substantially slower. Regional restrictions, maintenance, and unsupported symbols are isolated per exchange and produce a sealed `PARTIAL` snapshot rather than deleting successful sources. The full exchange records remain in `data/crypto_multi_exchange.json`; only aggregates, counts, provenance, and its hash are embedded into the canonical strategy snapshot. The normal automation entry point performs these steps after paper settlement:
-
-```sh
-npm run automation -- prepare --date 2030-01-07 --iso-week 2030-W02 --config config/tyche.local.json --exchanges all --channels core
-```
-
-## Analysis
-
-Run the Claude Code skills:
-
-- `/weekly-crypto` creates a weekly BTC/ETH anchor. Weekly output always contains zero execution candidates.
-- `/daily-crypto` reads the current weekly anchor, analyzes current public data, and emits semantic daily candidates.
-- `/auto-crypto` runs one credential-free USDT-M paper cycle: settle, snapshot, refresh weekly when required, analyze daily, select, plan, simulate, and report.
-- `/perp-scan` focuses the daily analysis on USDT-M risk and setup quality without submitting.
-- `/gate-trade` explains deterministic planning, status, reconciliation, and the manual testnet boundary.
-
-Workflows require both `date` (`YYYY-MM-DD`) and `isoWeek` (`YYYY-Www`). Before a workflow starts, top-level deterministic code validates configuration and creates the public market snapshot. Workflow subagents have read-only tools and return structured data; the top-level caller persists the exact result through `scripts/agent-write.mjs`, renders the report, and may run only dry-run planning. Workflows use repository-relative paths, reject inherited USDT-M testnet credentials, and never create a signed client or execute an order.
-
-## One-shot USDT-M paper automation
-
-Create an ignored local configuration that remains `locked`/`dry-run`. Set positive `configured_leverage` (1–3), `risk_per_trade_bps`, `max_order_notional_usdt`, `daily_new_notional_cap_usdt`, and `max_managed_notional_usdt` under `gate.usdm`, then provide every paper capital and breaker value explicitly when using the CLI. The conversational UI may derive these simulation-only values after user delegation; the CLI has no paper-capital defaults:
-
-```sh
-npm run paper -- init \
-  --initial-usdt <amount> \
-  --daily-loss-bps <bps> \
-  --max-drawdown-bps <bps> \
-  --max-spread-bps <bps> \
-  --max-entry-distance-bps <bps> \
-  --trigger-slippage-bps <bps> \
-  --config config/tyche.local.json
-```
-
-The automation entry point joins the safe unattended part of the pipeline without adding a timer or venue-submission path. `prepare` always settles existing paper positions before it collects and archives fresh public evidence. Follow its `anchor_action`, persist the required weekly/daily workflow documents, then apply the deterministic USDT-M paper plan:
-
-```sh
-npm run automation -- prepare --date 2030-01-07 --iso-week 2030-W02 --config config/tyche.local.json --exchanges all --channels core
-# Run /weekly-crypto first if prepare returns REFRESH_WEEKLY, then /daily-crypto.
-npm run automation -- plan --date 2030-01-07 --iso-week 2030-W02 --config config/tyche.local.json
-```
-
-`plan` accepts only fresh canonical daily output produced from the current `data/crypto_market.json` and a valid active paper account. It selects USDT-M candidates independently of model order, writes a sealed plan, watches the public book for the configured 30-second window, records simulated fills/protection only, and writes `outputs/automation-<date>.json` plus reports. The v2 receipt seals weekly, daily, market, policy, pre/post ledger, plan, and paper-receipt digests. A repeated call whose active ledger matches the sealed post-state reuses the cycle rather than simulating a second fill.
-
-The kill switch, daily-loss limit, drawdown limit, spread limit, and entry-distance limit block new paper entries while settlement and managed exits/reductions continue. This command never invokes `execute`; venue `submitted` and `filled` are always zero. Paper fills are reported separately as `simulated_filled_contracts`.
-
-Inspect, settle, report, or archive paper state with:
-
-```sh
-npm run paper -- status
-npm run paper -- settle
-npm run paper -- report
-npm run paper -- archive --account-id <id> --confirm "ARCHIVE PAPER <id>"
-```
-
-Archive succeeds only when no paper position or active paper order remains.
-
-## Automatic Gate/Binance testnet execution
-
-The automatic module is venue-explicit and never broadcasts one signal to both exchanges. Configure one venue at a time in `config/tyche.local.json`, inject only that venue's testnet credentials into the command process, and run:
-
-```sh
-npm run trade:testnet -- plan --venue gate --source data/crypto_daily.json --date 2030-01-07 --iso-week 2030-W02 --config config/tyche.local.json
-npm run trade:testnet -- cycle --venue gate --source data/crypto_daily.json --date 2030-01-07 --iso-week 2030-W02 --config config/tyche.local.json
-
-npm run trade:testnet -- plan --venue binance --source data/crypto_daily.json --date 2030-01-07 --iso-week 2030-W02 --config config/tyche.local.json
-npm run trade:testnet -- cycle --venue binance --source data/crypto_daily.json --date 2030-01-07 --iso-week 2030-W02 --config config/tyche.local.json
-```
-
-`plan` performs signed testnet account/rule reconciliation and writes a sealed venue-bound plan without submitting. `cycle` plans and then submits automatically if every gate remains green. The executor preserves atomic reservation, exact client identity, no-blind-retry recovery, fill proof, reduce-only stop/take-profit protection, per-venue ledger, sticky-red reconciliation, and kill switches (`data/gate_KILL` or `data/binance_KILL`). The production public REST interfaces remain available for market reads, but no production credential namespace or mutation route exists. See [docs/AUTOMATIC_TESTNET.md](docs/AUTOMATIC_TESTNET.md).
-
-## Deterministic commands
-
-Validate configuration and collect a public market snapshot:
-
-```sh
-node scripts/config.mjs check --config config/tyche.local.json
-node scripts/crypto-market.mjs snapshot --date 2030-01-07 --iso-week 2030-W02 --multi-exchange data/crypto_multi_exchange.json --out data/crypto_market.json
-```
-
-Create dry-run plans from a daily analysis file:
-
-```sh
-node scripts/gate-trade.mjs plan --product spot --environment dry-run --source data/crypto_daily.json --date 2030-01-07 --iso-week 2030-W02 --config config/tyche.local.json
-node scripts/gate-trade.mjs plan --product usdm --environment dry-run --source data/crypto_daily.json --date 2030-01-07 --iso-week 2030-W02 --config config/tyche.local.json
-```
-
-Inspect local lifecycle state or perform read-only USDT-M testnet reconciliation:
-
-```sh
-node scripts/gate-trade.mjs status
-node scripts/gate-trade.mjs reconcile --product usdm --environment testnet --config config/tyche.local.json
-```
-
-`status` lists every unresolved red cause. Reconciliation observes them but clears none by default. To request cause-specific resolution after reviewing the exact identity evidence, add `--resolve-cause <cause-id>` (comma-separate multiple IDs). A green account snapshot, absence from a bounded open-order list, or a legacy receipt link cannot clear ambiguity.
-
-Gate's original manual execute command is deliberately not documented here. After reviewing a sealed Gate manual-testnet plan, use the `/gate-trade` skill in a separate interactive credential-bearing terminal to obtain the exact per-plan procedure. Analysis agents and workflows are prohibited from running any executor.
-
-## Runtime privacy
-
-Public market snapshots may be read by analysis agents. Credentials, raw account payloads, plans, ledgers, fills, and private trading history must not enter prompts or external searches. The repository ignores runtime data, local configuration, plans, outputs, logs, caches, and Claude local settings.
-
-See [docs/AUTOMATIC_TESTNET.md](docs/AUTOMATIC_TESTNET.md), [docs/MULTI_EXCHANGE_DATA.md](docs/MULTI_EXCHANGE_DATA.md), [docs/GATE_TRADING.md](docs/GATE_TRADING.md), [docs/NO_HALLUCINATION.md](docs/NO_HALLUCINATION.md), and [SECURITY.md](SECURITY.md) for the complete trust and failure model.
+To get started, run `tyche selftest`, which is fully offline and still compiles a real PDF, then `tyche doctor`,
+then `tyche run --topic ... --direction ...`.

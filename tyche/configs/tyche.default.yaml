@@ -1,0 +1,124 @@
+# Tyche default configuration.
+#
+# Secrets never live here. Model credentials come from the environment
+# (API_KEY, API_BASE, MODEL_NAME, MODEL_PROVIDER), the same names openjiuwen's
+# auto_research modules read, so one .env drives both layers.
+
+models:
+  # Shared defaults. Per-role entries below override only the fields they set.
+  default:
+    provider: ${MODEL_PROVIDER:-OpenAI}
+    model_name: ${MODEL_NAME:-deepseek-v4-flash}
+    api_base: ${API_BASE:-https://api.deepseek.com}
+    api_key_env: API_KEY
+    timeout: 600
+    temperature: 0.4
+    max_tokens: 8192
+  planner: {}
+  writer: {}
+  # A different model for reviewing reduces self-agreement bias. Leave empty
+  # to reuse the default model.
+  reviewer:
+    model_name: ${TYCHE_REVIEW_MODEL_NAME:-}
+    temperature: 0.0
+  # Model used by openjiuwen's experiment agents and by the generated
+  # experiment code (exported to it as API_KEY/API_BASE/MODEL_NAME).
+  experiments: {}
+
+workspace:
+  # Runs, caches, and the cross-run memory database live here.
+  root: ${TYCHE_HOME:-workspace}
+
+literature:
+  sources: [arxiv, semantic_scholar, openalex]
+  contact_email: ${TYCHE_CONTACT_EMAIL:-}
+  semantic_scholar_api_key_env: S2_API_KEY
+  per_query_results: 12
+  max_queries: 8
+  prerank_pool: 60
+  max_papers: 24
+  min_papers: 8
+  expansion_seeds: 5
+  expansion_per_seed: 10
+  evidence_cards_per_paper: 2
+  request_timeout: 30
+  min_interval_seconds:
+    export.arxiv.org: 3.1
+    api.semanticscholar.org: 1.1
+    api.openalex.org: 0.2
+    api.crossref.org: 0.2
+  cache_ttl_days: 30
+
+experiments:
+  # openjiuwen: run openjiuwen auto_research's design -> code -> execute ->
+  #   reflect loop with its survey and reporting modules disabled.
+  # imported: read metrics JSON files you produced yourself (--results-dir).
+  # fixture: synthetic metrics for the offline selftest only.
+  engine: openjiuwen
+  # Directory of <variant>.metrics.json files for the imported engine (saved with the run).
+  results_dir: null
+  max_rounds: 30
+  max_code_retries: 3
+  max_design_revisions: 3
+  max_execution_retries: 2
+  max_variants: 4
+  constraints:
+    - "This is a short paper: implement one proposed method and at most three baselines or ablations."
+    - "Use small, controlled, reproducible tasks (synthetic or public benchmark subsets) that finish within the execution timeout."
+    - "Record per-item outcomes in per_question so confidence intervals and paired tests can be computed."
+    - "Never hard-code or simulate metric values; every number must come from executed runs."
+
+analysis:
+  bootstrap_resamples: 2000
+  permutation_resamples: 5000
+  confidence: 0.95
+  seed: 20260925
+
+paper:
+  template: iclr2027
+  max_main_pages: 5
+  anonymous: true
+  authors: []
+  # Human-review disclosure used verbatim in the ICLR AI use statement. Leave it
+  # empty until a person has actually reviewed the paper; the statement then says
+  # that no human review was recorded. Example, once true:
+  #   The submitting team inspected the generated plan, experiment code, results,
+  #   and manuscript and takes responsibility for the final content.
+  human_review_statement: ""
+  sections:
+    abstract: {min_words: 120, max_words: 200}
+    introduction: {min_words: 400, max_words: 650}
+    related_work: {min_words: 250, max_words: 450, min_citations: 6}
+    method: {min_words: 400, max_words: 800}
+    experiments: {min_words: 350, max_words: 700}
+    analysis: {min_words: 200, max_words: 420}
+    conclusion: {min_words: 80, max_words: 180}
+  compile_repair_attempts: 3
+  trim_attempts: 3
+  latex_timeout: 180
+
+review:
+  reviewers: [rigor, positioning, clarity]
+  samples_per_reviewer: 1
+  max_rounds: 3
+  target_composite: 7.5
+  acceptance_tolerance: 0.15
+  plateau_rounds: 2
+  reflag_cap: 2
+  max_findings_per_revision: 8
+  auditor: true
+
+memory:
+  context_budgets:
+    plan: 6000
+    survey_screen: 12000
+    section: 9000
+    review: 24000
+    revise: 12000
+  evidence_per_section: 12
+  lessons_per_section: 5
+
+evolution:
+  promote_after_runs: 2
+  promote_after_helped: 1
+  retire_after_misses: 2

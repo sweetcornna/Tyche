@@ -1,0 +1,36 @@
+name: context_engineering
+title: Agent context engineering
+summary: >-
+  How an agent decides what enters the model's context window at each step:
+  selection, compression, offloading, ordering, and budgeting of instructions,
+  tool outputs, memories, and retrieved evidence.
+seed_queries:
+  - context compression for LLM agents tool outputs
+  - prompt compression long context language models
+  - context window management agent trajectories
+  - retrieval augmented generation context selection budget
+  - long context language models position bias
+  - summarization of agent interaction history
+canonical_works:
+  - Lost in the Middle How Language Models Use Long Contexts
+  - LLMLingua Compressing Prompts for Accelerated Inference of Large Language Models
+  - ReAct Synergizing Reasoning and Acting in Language Models
+  - Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks
+  - MemGPT Towards LLMs as Operating Systems
+experiment_families:
+  - name: long_tool_trace_qa
+    description: >-
+      Multi-step tasks whose tool calls return long, partly irrelevant
+      outputs; questions require facts scattered across the trace. Compares
+      raw context, truncation, rolling summaries, offload-and-recall, and the
+      proposed packing policy under equal token budgets.
+    metrics: [accuracy, prompt_tokens_per_step, budget_violation_rate]
+  - name: needle_in_trajectory
+    description: >-
+      Controlled insertion of a decisive observation at varying depths of an
+      agent trajectory, measuring whether each context policy preserves it.
+    metrics: [recall_at_depth, accuracy, prompt_tokens_per_step]
+angle_hints:
+  - priority- and provenance-aware packing under a hard token budget
+  - structured tool-output offloading with on-demand recall
+  - ordering effects of evidence placement in agent context
