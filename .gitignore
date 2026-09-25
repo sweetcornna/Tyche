@@ -59,6 +59,7 @@ developerID_application.cer
 .DS_Store
 .claude
 **/CLAUDE.md
+!/CLAUDE.md
 **/CLAUDE.local.md
 **/JIUWENCLAW.local.md
 **/JIUWENCLAW.md
@@ -106,3 +107,7 @@ report/index.html
 /sub_agents/
 /context/
 /.plans/
+
+# Tyche runtime data (root-anchored so it never matches jiuwenswarm/**/workspace paths)
+/workspace/
+/out/
