@@ -20,11 +20,12 @@
 | `provenance.jsonl` | 每个产物版本一行：名称、版本、路径、SHA-256、产生阶段、输入、父版本 |
 | `artifacts/<name>/v<N>.*` | 不可变的产物版本；重复保存生成新版本 |
 | `usage.jsonl` | 每次模型调用的阶段、用途、token 数与时延 |
-| `write/context_manifests/` | 每次写作调用的上下文装配清单（纳入/截断/丢弃的块及 token 数、引用的记忆条目） |
+| `config.json` | 本次运行的完整解析配置（不含密钥），`--resume` 时沿用 |
+| `write/context_manifests/`、`review/context_manifests/` | 写作与修订调用的上下文装配清单（纳入/截断/丢弃的块及 token 数、引用的记忆条目），每次重跑该阶段时清空重建 |
 | `review/` | 每轮构建目录、评审 JSON、台账、轮次记录 |
 | `package/` | 最终交付物 |
 
-`tyche run --resume` 从第一个未完成阶段继续；`--stage X` 可单独重跑某一阶段。打包时重新计算全部产物的哈希，任何改动都会记录在 `provenance.json` 的 `drifted_artifacts` 中。
+`tyche run --resume` 从第一个未完成阶段继续；`--stage X` 重跑某一阶段，并把其后所有阶段重置为待运行。重跑调研、分析或规划时，本运行此前写入记忆的同类条目会先被标记为失效，不会进入之后的提示词。实验引擎每次尝试使用新的 manager run id，只收集最新一次执行中成功的变体。打包时重新计算全部产物的哈希，任何改动都会记录在 `provenance.json` 的 `drifted_artifacts` 中。
 
 ## 3. 各阶段
 
@@ -88,7 +89,7 @@
 | 门禁 | 规则 | 严重度 |
 |---|---|---|
 | compile | 编译成功；无未定义引用、未定义文献；PDF 中无 `??` | blocker |
-| number | 摘要/引言/实验/分析/结论中的每个数字（排除标识符参数、年份与 10 以下整数）须是登记值按其精度的四舍五入，或其百分比形式 | blocker |
+| number | 摘要/引言/实验/分析/结论中的每个数字须是登记值按其精度的四舍五入或其百分比形式；带负号的数字须符号一致。跳过标识符参数（`\ref`/`\cite`/`\label` 等）、版面尺寸、上下标与指数、“Table 3/Section 4.2”之类的交叉引用编号、处于年份语境的四位年份，以及 10 以下的正整数；紧贴单位（如 `12.5x`、`13.5ms`）的数字整体检查，不会被截断 | blocker |
 | citation | 引用键必须存在于核验后的 bib；“X et al. (年份)” 附近必须有引用命令；相关工作引用篇数达标 | blocker / major |
 | structure | 各章节齐全；引言有贡献列表；分析有局限性；所有表图被引用；字数在契约范围内；主文页数不超限 | blocker / major / minor |
 | placeholder | 无 TODO/TBD/XXX/`??`/[citation needed] 等残留 | blocker |
@@ -116,7 +117,7 @@
 
 ### S7 打包
 
-门禁未通过时拒绝打包（`--allow-gate-failures` 可强制打包，但报告会标记 UNVERIFIED）。交付物为 `paper.pdf`、`paper_source/`、`provenance.json`、`review_ledger.json`、`gates.json`、`run_report.md`。
+打包只使用评审阶段本次运行记录下的 PDF、源码与门禁结果（按产物版本号精确引用），不会取到更早评审运行留下的 PDF。门禁未通过时拒绝打包；`--allow-gate-failures` 可强制打包，此时重新生成注明 UNVERIFIED 的 AI use statement 并重新编译，输出 `paper_UNVERIFIED.pdf`。交付物还包括 `paper_source/`、`run_record/`（全部产物版本、上下文清单、评审轮次、事件/用量日志、运行配置）、`provenance.json`、`review_ledger.json`、`gates.json`、`run_report.md`。
 
 ## 4. 与 JiuwenSwarm 的集成
 

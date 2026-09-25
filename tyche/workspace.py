@@ -154,6 +154,19 @@ class Workspace:
         self._update_state(mutate)
         self.event(f"stage.{status}", stage=stage, **extra)
 
+    def reset_from(self, stage: str) -> list[str]:
+        """Mark ``stage`` and every later stage pending, so a rerun cannot reuse stale downstream results."""
+        order = list(STAGES)
+        later = order[order.index(stage):]
+
+        def mutate(state: dict[str, Any]) -> None:
+            for name in later:
+                state.setdefault("stages", {})[name] = {"status": "pending"}
+
+        self._update_state(mutate)
+        self.event("stages.reset", stages=later)
+        return later
+
     def set_meta(self, **values: Any) -> None:
         self._update_state(lambda state: state.setdefault("meta", {}).update(values))
 
@@ -174,6 +187,9 @@ class Workspace:
             if line.strip():
                 out.append(ArtifactRecord(**json.loads(line)))
         return out
+
+    def record(self, record_id: str) -> ArtifactRecord | None:
+        return next((rec for rec in self.records() if rec.id == record_id), None)
 
     def latest(self, name: str) -> ArtifactRecord | None:
         found = [rec for rec in self.records() if rec.name == name]

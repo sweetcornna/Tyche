@@ -58,7 +58,7 @@ Tyche 既能就三个方向**生成论文**（`--direction context_engineering |
 | 路径 | 内容 |
 |---|---|
 | `tyche/` | 全部自研代码：配置、LLM 封装、工作区与溯源、记忆引擎、文献、实验桥接、统计分析、论文写作与编译、门禁、评审、演进、流水线、CLI、离线自检 |
-| `tests/tyche/` | 61 个离线单元/端到端测试（含真实 LaTeX 编译的完整自检） |
+| `tests/tyche/` | 88 个离线单元/端到端测试（含真实 LaTeX 编译的完整自检） |
 | `jiuwenswarm/resources/agent/workspace/skills/tyche-iclr-paper/` | SwarmFlow 蜂群技能：按阶段编排，可在 TUI `/swarmflows` 监控，支持人工审批研究计划 |
 | `jiuwenswarm/resources/agent/workspace/skills/tyche-paper/` | Agent 模式技能：在对话中驱动 `tyche` |
 | `scripts/tyche/install_dev.sh` | 开发环境安装；gitcode 不可达时自动改用 GitHub 镜像的**同一提交** |
@@ -90,7 +90,9 @@ tyche run --topic "带更正链的 Agent 记忆能否减少过期事实回答" -
 tyche run --resume --run-id <run-id>
 ```
 
-产物位于 `workspace/runs/<run-id>/package/`：`paper.pdf`、`paper_source/`、`provenance.json`、`review_ledger.json`、`gates.json`、`run_report.md`。
+产物位于 `workspace/runs/<run-id>/package/`：`paper.pdf`、`paper_source/`、`run_record/`（全部产物版本、上下文装配清单、评审轮次、事件与用量日志、运行配置）、`provenance.json`、`review_ledger.json`、`gates.json`、`run_report.md`。用 `--allow-gate-failures` 强制打包未通过门禁的论文时，文件名为 `paper_UNVERIFIED.pdf`，其 AI use statement 会被重新生成并注明未通过核验。
+
+每个运行的完整配置保存在 `runs/<run-id>/config.json`，`--resume` 时自动沿用（本次命令行给出的 `--engine`、`--set` 等会叠加并保存）。`--resume --stage X` 重跑某阶段时，其后所有阶段会被重置为待运行，避免沿用过期结果。
 
 常用选项：
 
@@ -119,14 +121,14 @@ tyche run --resume --run-id <run-id>
 - `provenance.json` 记录每个产物的阶段、输入、父版本与 SHA-256，打包时重新校验，确保论文对应的就是这些数据。
 - 统计分析使用固定随机种子；所有模型调用的上下文装配清单都保存在 `write/context_manifests/`。
 - 自检使用的文献与实验数据全部是**虚构的合成夹具**（arXiv 编号以 `0000.` 开头，作者名为 Fixture/Testcase），输出会明确标注，不构成任何研究结论。
-- 提交前请团队人工检查计划、实验代码、结果与论文；ICLR AI use statement 中的人工审阅声明在 `paper.human_review_statement` 配置，请如实填写。
+- 提交前请团队人工检查计划、实验代码、结果与论文。`paper.human_review_statement` 默认为空，此时 AI use statement 会如实写明“流水线未记录人工审阅”；人工审阅完成后再用 `--set paper.human_review_statement="..."` 填写。
 
 ## 测试
 
 ```bash
 source .venv/bin/activate
 ruff check tyche tests/tyche
-pytest tests/tyche                       # 61 项，含真实 LaTeX 编译的端到端自检
+pytest tests/tyche                       # 88 项，含真实 LaTeX 编译的端到端自检
 tyche selftest
 python jiuwenswarm/resources/agent/workspace/skills/swarmskill-creator/scripts/validate_swarmskill.py \
     jiuwenswarm/resources/agent/workspace/skills/tyche-iclr-paper

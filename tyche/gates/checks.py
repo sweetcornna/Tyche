@@ -25,16 +25,28 @@ from tyche.textutil import word_count
 
 NUMBER_CHECKED_SECTIONS = ("abstract", "introduction", "experiments", "analysis", "conclusion")
 
+# Commands whose brace arguments are identifiers or layout, never prose numbers.
 _STRIP_ARGS = re.compile(
-    r"\\(?:ref|eqref|cref|Cref|autoref|label|cite[tp]?|citealp|citeauthor|citeyear|url|href|includegraphics|input|"
-    r"begin|end|paragraph|subsection|subsubsection|textsc|texttt)\*?(\[[^\]]*\])?\{[^}]*\}"
+    r"\\(?:ref|eqref|cref|Cref|autoref|label|[Cc]ite(?:t|p|alp|alt|author|year|num)?|url|href|includegraphics|"
+    r"input|include|begin|end)\*?(?:\[[^\]]*\]){0,2}\{[^}]*\}"
 )
+# One number: optional single minus (not part of an en-dash range), thousands groups, decimals,
+# then an optional percent or glued unit. Atomic groups stop "12.5x" backtracking to "12".
 _NUMBER = re.compile(
-    r"(?<![A-Za-z0-9_\-/.^])(\d{1,3}(?:(?:\{,\}|,)\d{3})+|\d+)(\.\d+)?(\s*(?:\\%|%|\\,\\%|~\\%))?(?![A-Za-z0-9])"
+    r"(?<![A-Za-z0-9_/.^])(?<![A-Za-z0-9]-)"
+    r"(?P<sign>(?<!-)-)?"
+    r"(?P<int>(?>\d{1,3}(?:(?:\{,\}|,)\d{3})+|\d+))(?P<frac>\.\d+)?+"
+    r"(?P<unit>\s*(?:\\%|%|\\,\\%|~\\%)|(?:x|ms|s|pp|pts?)\b)?"
+    r"(?![A-Za-z0-9])"
 )
+_LAYOUT_AFTER = re.compile(r"\s*(?:\\(?:linewidth|textwidth|columnwidth|hsize)|(?:pt|em|ex|cm|mm|in|bp)\b|\^)")
+_REFERENCE_BEFORE = re.compile(r"(?:Section|Sec\.|Table|Tab\.|Figure|Fig\.|Eq\.|Equation|Appendix|Line|Step)~?\s*$")
+_YEAR_BEFORE = re.compile(r"(?:\(|\bin|\bsince|\bfrom|\buntil|\bby|\bof|\bduring|\byears?|et al\.,?|,)\s*$", re.I)
 _ETAL = re.compile(r"\b[A-Z][A-Za-z\-]+\s+et\s+al\.?(?:,)?\s*\(?\s*(?:19|20)\d{2}")
+# Template leftovers. Upper-case tokens are matched case-sensitively so prose ("we insert ...") is fine.
 _PLACEHOLDER = re.compile(
-    r"\bTODO\b|\bTBD\b|\bXXX\b|\?\?|\[citation needed\]|lorem ipsum|\bINSERT\b|<\s*placeholder|\[(?:number|value|X)\]",
+    r"(?-i:\bTODO\b|\bTBD\b|\bXXX\b|\bINSERT\b)|\?\?|\[citation needed\]|lorem ipsum|<\s*placeholder"
+    r"|\[(?:number|value|X)\]",
     re.I,
 )
 
@@ -66,19 +78,25 @@ class GateReport:
 
 
 def numeric_tokens(latex: str) -> list[tuple[str, bool, str]]:
-    """(number, is_percent, context) triples from a LaTeX section, skipping identifiers."""
+    """(number, is_percent, context) triples from a LaTeX section, skipping identifiers and layout."""
     text = _STRIP_ARGS.sub(" ", latex)
     text = re.sub(r"(?<!\\)%.*$", "", text, flags=re.M)
     tokens = []
     for match in _NUMBER.finditer(text):
-        integer, frac, pct = match.group(1), match.group(2) or "", match.group(3) or ""
-        number = integer.replace("{,}", "").replace(",", "") + frac
-        is_percent = bool(pct.strip())
+        integer, frac = match.group("int"), match.group("frac") or ""
+        unit = (match.group("unit") or "").strip()
+        is_percent = "%" in unit
+        number = match.group("sign") or ""
+        number += integer.replace("{,}", "").replace(",", "") + frac
+        before = text[max(0, match.start() - 24) : match.start()]
+        if _LAYOUT_AFTER.match(text, match.end()) or _REFERENCE_BEFORE.search(before) or re.search(r"[\^_]\{?$", before):
+            continue  # widths, exponents and subscripts, and cross-reference numbers are not claims
         if not frac and not is_percent:
-            value = int(number)
-            if value < 10:
+            value = abs(int(number))
+            if value < 10 and not number.startswith("-"):
                 continue
-            if 1900 <= value <= 2100 and len(integer) == 4:
+            year_like = 1900 <= value <= 2100 and len(integer) == 4
+            if year_like and (_YEAR_BEFORE.search(before) or text[match.end() : match.end() + 1] in (")", ";")):
                 continue
         start = max(0, match.start() - 60)
         tokens.append((number, is_percent, text[start : match.end() + 20].replace("\n", " ")))
@@ -205,10 +223,19 @@ def run_gates(
             report.findings.append(
                 GateFinding("compile", "blocker", err.file or "main", f"LaTeX error: {err.message}", f"line {err.line}")
             )
+    def _owner(needle: str) -> str:
+        """The section whose text contains the unresolved label or key, so a revision can fix it."""
+        for name, body in sections.items():
+            if needle in body:
+                return name
+        return "main"
+
     for ref in compile_result.undefined_references:
-        report.findings.append(GateFinding("compile", "blocker", "main", f"undefined reference {ref}"))
+        report.findings.append(
+            GateFinding("compile", "blocker", _owner("{" + ref + "}"), f"undefined reference {ref}", ref)
+        )
     for cite in compile_result.undefined_citations:
-        report.findings.append(GateFinding("compile", "blocker", "main", f"undefined citation {cite}"))
+        report.findings.append(GateFinding("compile", "blocker", _owner(cite), f"undefined citation {cite}", cite))
     if pdf_text and "??" in pdf_text:
         report.findings.append(GateFinding("compile", "blocker", "main", "the PDF shows '??' (unresolved reference)"))
     if main_pages > max_main_pages:

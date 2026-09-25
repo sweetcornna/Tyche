@@ -16,7 +16,8 @@ from typing import Any, Iterable
 
 from tyche.analysis.stats import Analysis
 
-_NUM_IN_TEXT = re.compile(r"(?<![\w.])[-+]?\d+(?:\.\d+)?")
+# Thousands separators (1,319 or 12{,}000) belong to one number.
+_NUM_IN_TEXT = re.compile(r"(?<![\w.])([-+]?)(\d{1,3}(?:(?:\{,\}|,)\d{3})+|\d+)(\.\d+)?")
 
 
 @dataclass
@@ -40,23 +41,29 @@ class NumberRegistry:
     def add_text_numbers(self, text: str, label: str, kind: str = "setup") -> None:
         """Register every number that literally appears in a setup document."""
         for match in _NUM_IN_TEXT.finditer(text or ""):
+            sign, integer, frac = match.group(1), match.group(2), match.group(3) or ""
             try:
-                self.add(float(match.group(0)), label, kind)
+                self.add(float(sign + integer.replace("{,}", "").replace(",", "") + frac), label, kind)
             except ValueError:
                 continue
 
     def match(self, token: str, *, percent: bool = False) -> NumberEntry | None:
-        """Return the registered entry this token could be a rounding of."""
+        """Return the registered entry this token could be a rounding of.
+
+        An unsigned token may state a magnitude ("reduces tokens by 1,461" for a
+        difference of -1461); a token written with a minus sign must match the sign.
+        """
         try:
             x = float(token)
         except ValueError:
             return None
+        signed = token.strip().startswith("-")
         decimals = len(token.split(".", 1)[1]) if "." in token else 0
         tol = 0.5 * 10 ** (-decimals) + 1e-9
         for entry in self.entries:
-            candidates = [entry.value, abs(entry.value)]
+            candidates = [entry.value] if signed else [entry.value, abs(entry.value)]
             if percent or abs(entry.value) <= 1.0:
-                candidates += [entry.value * 100.0, abs(entry.value) * 100.0]
+                candidates += [c * 100.0 for c in list(candidates)]
             for cand in candidates:
                 if abs(cand - x) <= tol:
                     return entry
@@ -121,8 +128,11 @@ def build_registry(analysis: Analysis, *, setup_texts: dict[str, str] | None = N
     reg.add(len(analysis.variants), "count.variants", "setup")
     reg.add(len(analysis.baselines), "count.baselines", "setup")
     reg.add(len(analysis.metrics), "count.metrics", "setup")
-    reg.add(95, "confidence.percent", "setup")
+    reg.add(analysis.confidence * 100, "confidence.percent", "setup")
     reg.add(0.05, "alpha", "setup")
+    # Thresholds the results brief itself uses when reporting small p-values ("p < 0.001").
+    reg.add(0.001, "p_threshold", "setup")
+    reg.add(0.01, "p_threshold", "setup")
     for label, text in (setup_texts or {}).items():
         reg.add_text_numbers(text, f"setup:{label}")
     return reg
@@ -138,7 +148,7 @@ def results_brief(analysis: Analysis) -> str:
             s = metrics[metric]
             if s.mean is not None and s.ci_low is not None:
                 lines.append(
-                    f"  - {variant}: {fmt(s.mean, metric)} (95% CI {fmt(s.ci_low, metric)} to "
+                    f"  - {variant}: {fmt(s.mean, metric)} ({analysis.confidence_percent}% CI {fmt(s.ci_low, metric)} to "
                     f"{fmt(s.ci_high, metric)}, n = {s.n})"
                 )
             else:
@@ -149,7 +159,8 @@ def results_brief(analysis: Analysis) -> str:
             rel = f", relative {c.relative:+.1f}%" if c.relative is not None else ""
             verdict = "favors proposed" if c.better else "does not favor proposed"
             lines.append(
-                f"  - {c.metric} vs {c.baseline}: diff {fmt(c.diff, c.metric)} (95% CI {fmt(c.ci_low, c.metric)} to "
+                f"  - {c.metric} vs {c.baseline}: diff {fmt(c.diff, c.metric)} ({analysis.confidence_percent}% CI "
+                f"{fmt(c.ci_low, c.metric)} to "
                 f"{fmt(c.ci_high, c.metric)}), {p_phrase(c.p_value)}, n = {c.n}{rel}; {verdict}"
             )
     for note in analysis.notes:

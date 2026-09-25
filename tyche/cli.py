@@ -8,11 +8,12 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from tyche import STAGES, __version__
 from tyche.config import DIRECTIONS, ConfigError, TycheConfig, load_direction
 from tyche.llm import LLMError
-from tyche.workspace import StageError, Workspace
+from tyche.workspace import StageError, Workspace, read_json, write_json_atomic
 
 
 def _load_env_files() -> None:
@@ -24,16 +25,18 @@ def _load_env_files() -> None:
     load_dotenv(Path.home() / ".jiuwenswarm" / "config" / ".env", override=False)
 
 
-def _config(args: argparse.Namespace) -> TycheConfig:
-    overrides = list(getattr(args, "set", None) or [])
+def _config(args: argparse.Namespace, base: dict[str, Any] | None = None) -> TycheConfig:
+    overrides: list[str | dict[str, Any]] = list(getattr(args, "set", None) or [])
     if getattr(args, "engine", None):
-        overrides.append(f"experiments.engine={args.engine}")
+        overrides.append({"experiments": {"engine": args.engine}})
+    if getattr(args, "results_dir", None):
+        overrides.append({"experiments": {"results_dir": str(Path(args.results_dir).expanduser().resolve())}})
     if getattr(args, "workspace", None):
-        overrides.append(f"workspace.root={args.workspace}")
-    return TycheConfig.load(getattr(args, "config", None), overrides)
+        overrides.append({"workspace": {"root": str(Path(args.workspace).expanduser().resolve())}})
+    return TycheConfig.load(getattr(args, "config", None), overrides, base=base)
 
 
-def build_services(config: TycheConfig, results_dir: str | None):
+def build_services(config: TycheConfig):
     from tyche.experiments import ImportedEngine, OpenJiuwenEngine, fixture_engine
     from tyche.literature import build_clients
     from tyche.llm import OpenJiuwenLLM, UsageMeter
@@ -50,9 +53,8 @@ def build_services(config: TycheConfig, results_dir: str | None):
     )
     engine_name = config.get("experiments.engine")
     if engine_name == "imported":
-        if not results_dir:
-            raise ConfigError("--results-dir is required with --engine imported")
-        engine = ImportedEngine(Path(results_dir))
+        results_dir = config.get("experiments.results_dir")
+        engine = ImportedEngine(Path(results_dir) if results_dir else None)
     elif engine_name == "fixture":
         engine = fixture_engine()
     else:
@@ -66,19 +68,34 @@ def build_services(config: TycheConfig, results_dir: str | None):
     return services, http
 
 
+def _save_run_config(ws: Workspace, config: TycheConfig) -> None:
+    """Persist the resolved configuration (no secrets: models name only their key variable)."""
+    write_json_atomic(ws.run_dir / "config.json", config.data)
+
+
 async def _cmd_run(args: argparse.Namespace) -> int:
     from tyche.memory import MemoryStore
     from tyche.pipeline import Pipeline
 
     config = _config(args)
     root = config.workspace_root()
-    if args.resume:
+    exists = bool(args.run_id) and (root / "runs" / str(args.run_id) / "state.json").exists()
+    if args.resume or (args.resume_if_exists and exists):
         if not args.run_id:
             raise ConfigError("--resume needs --run-id")
         ws = Workspace.open(root, args.run_id)
         topic, direction = ws.state["topic"], ws.state["direction"]
+        if (args.topic and args.topic != topic) or (args.direction and args.direction != direction):
+            raise ConfigError(f"run {args.run_id!r} already exists with a different topic or direction")
+        saved = read_json(ws.run_dir / "config.json")
+        # A resumed run keeps its own configuration; flags given now are layered on top and saved.
+        config = _config(args, base=saved)
+        if saved != config.data:
+            _save_run_config(ws, config)
+            ws.event("config.updated", digest=config.digest())
+        services, http = build_services(config)
         if args.stage:
-            ws.mark_stage(args.stage, "pending")
+            ws.reset_from(args.stage)
     else:
         if not args.topic or not args.direction:
             raise ConfigError("a new run needs --topic and --direction")
@@ -88,12 +105,15 @@ async def _cmd_run(args: argparse.Namespace) -> int:
 
         run_id = args.run_id or f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{slugify(args.topic, 32)}"
         topic, direction = args.topic, args.direction
+        load_direction(direction)
+        # Build services first so missing credentials fail before an empty run directory is created.
+        services, http = build_services(config)
         ws = Workspace.create(root, run_id, topic=topic, direction=direction, config_digest=config.digest())
+        _save_run_config(ws, config)
     notes = ""
     if args.notes:
         path = Path(args.notes)
         notes = path.read_text(encoding="utf-8") if path.exists() else args.notes
-    services, http = build_services(config, args.results_dir)
     memory = MemoryStore(root / "memory.db")
     skill_dir = Path(args.export_skill_dir).expanduser() if args.export_skill_dir else None
     pipeline = Pipeline(
@@ -112,9 +132,10 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         await http.aclose()
         memory.close()
     print(f"[tyche] run {ws.run_id} at {ws.run_dir}")
-    package = ws.run_dir / "package" / "paper.pdf"
-    if package.exists():
-        print(f"[tyche] paper: {package}")
+    for name in ("paper.pdf", "paper_UNVERIFIED.pdf"):
+        package = ws.run_dir / "package" / name
+        if package.exists():
+            print(f"[tyche] paper: {package}")
     return 0
 
 
@@ -268,8 +289,15 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--direction", choices=DIRECTIONS, help="topic direction preset")
     run.add_argument("--run-id")
     run.add_argument("--resume", action="store_true", help="continue an existing run from its first unfinished stage")
+    run.add_argument(
+        "--resume-if-exists",
+        action="store_true",
+        help="with --run-id: resume that run if it exists (topic and direction must match), otherwise create it",
+    )
     run.add_argument("--stop-after", choices=STAGES, help="stop after this stage (inspect or edit, then --resume)")
-    run.add_argument("--stage", choices=STAGES, help="with --resume: rerun exactly this stage")
+    run.add_argument(
+        "--stage", choices=STAGES, help="with --resume: rerun exactly this stage and mark every later stage pending"
+    )
     run.add_argument("--engine", choices=["openjiuwen", "imported", "fixture"], help="experiment engine")
     run.add_argument("--results-dir", help="with --engine imported: directory of <variant>.metrics.json files")
     run.add_argument("--notes", help="operator notes (text or a file path) for the planner")
@@ -316,6 +344,12 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, StageError, LLMError) as exc:
         print(f"[tyche] error: {exc}", file=sys.stderr)
         return 2
+    except Exception as exc:  # noqa: BLE001 - one readable line; TYCHE_DEBUG=1 shows the traceback
+        if os.environ.get("TYCHE_DEBUG"):
+            raise
+        print(f"[tyche] error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print("[tyche] the failed stage is recorded; fix the cause and rerun with --resume", file=sys.stderr)
+        return 1
     return 1
 
 

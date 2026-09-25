@@ -121,17 +121,21 @@ class TycheConfig:
     def load(
         cls,
         path: str | Path | None = None,
-        overrides: list[str] | None = None,
+        overrides: list[str | dict[str, Any]] | None = None,
         env: Mapping[str, str] | None = None,
+        base: Mapping[str, Any] | None = None,
     ) -> "TycheConfig":
+        """Defaults, then ``base`` (a run's saved config), then the user file, then overrides."""
         data = _default_config()
+        if base:
+            data = deep_merge(data, base)
         if path is not None:
             user = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
             if not isinstance(user, dict):
                 raise ConfigError(f"{path} must contain a mapping")
             data = deep_merge(data, user)
         for expr in overrides or []:
-            data = deep_merge(data, parse_override(expr))
+            data = deep_merge(data, expr if isinstance(expr, Mapping) else parse_override(expr))
         return cls(_expand(data, os.environ if env is None else env))
 
     def _validate(self) -> None:

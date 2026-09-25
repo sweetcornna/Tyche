@@ -3,6 +3,7 @@
 Each phase delegates to the deterministic `tyche` CLI. Stage agents run one
 command and report the run state; they never write paper content themselves.
 """
+import hashlib
 import json
 import re
 import shlex
@@ -54,17 +55,18 @@ $command
 
 Rules:
 - Do not edit, create, or delete any files, and do not run any other command except the state check below.
-- After the command exits, read the file workspace/runs/$run_id/state.json and look at stages.$stage.
+- After the command exits, run: tyche status --run-id $run_id
+  It prints the run state as JSON; read stages.$stage.status from it.
 - If the command failed, copy the last error line it printed into detail.
 
-Return ONLY a JSON object with fields: "stage" (the string $stage), "status" (the value of stages.$stage.status, or "failed" if the file is missing), "exit_code" (integer), "detail" (one short sentence).
+Return ONLY a JSON object with fields: "stage" (the string $stage), "status" (the value of stages.$stage.status, or "failed" if the status command fails), "exit_code" (integer), "detail" (one short sentence).
 """
 )
 
 PLAN_REVIEW_PROMPT = Template(
-    """Tyche drafted a research plan for run $run_id. Please review the file workspace/runs/$run_id/artifacts/plan_md (latest version) or ask the assistant to show it.
+    """Tyche drafted a research plan for run $run_id (the latest version of artifacts/plan_md in that run's directory; tyche status --run-id $run_id shows where it lives).
 
-Approve to continue, or reject and write notes describing what the plan should change (for example: a different baseline, a narrower question, or a different experiment family).
+Set approve to true to continue. To change the plan, set approve to false and write notes describing what should change (for example: a different baseline, a narrower question, or a different experiment family). Rejecting without notes stops the workflow.
 """
 )
 
@@ -110,9 +112,11 @@ def safe_get(obj, key, default=""):
     return default
 
 
-def slug(text):
-    cleaned = re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")
-    return cleaned[:32].rstrip("-") or "paper"
+def run_id_for(topic, direction):
+    """Deterministic run id: readable slug plus a hash of topic and direction, so non-ASCII topics never collide."""
+    cleaned = re.sub(r"[^a-z0-9]+", "-", str(topic).lower()).strip("-")[:24].rstrip("-") or "paper"
+    digest = hashlib.sha256((direction + "\n" + str(topic)).encode("utf-8")).hexdigest()[:10]
+    return "swarm-" + cleaned + "-" + digest
 
 
 def stage_command(run_id, stop_after, extra=""):
@@ -135,7 +139,7 @@ async def run(args):
     if not topic or direction not in DIRECTIONS:
         log("tyche-iclr-paper needs a topic and a direction in: " + ", ".join(DIRECTIONS))
         return {"status": "degraded", "reason": "missing topic or invalid direction"}
-    run_id = str(safe_get(args, "run_id", "")) or "swarm-" + slug(topic)
+    run_id = str(safe_get(args, "run_id", "")) or run_id_for(topic, direction)
     engine = str(safe_get(args, "engine", "openjiuwen"))
     engine_flag = ""
     if engine == "imported":
@@ -143,9 +147,11 @@ async def run(args):
     results = []
 
     phase("Plan")
+    # --resume-if-exists makes a retried workflow continue its own run instead of failing on the existing id;
+    # tyche refuses when an existing run has a different topic or direction.
     create = (
         "tyche run --topic " + shlex.quote(topic) + " --direction " + direction + " --run-id "
-        + shlex.quote(run_id) + " --stop-after plan " + engine_flag
+        + shlex.quote(run_id) + " --resume-if-exists --stop-after plan " + engine_flag
     ).strip()
     raw = await agent(build_stage_prompt("plan", create, run_id), label="plan", phase="Plan", schema=STAGE_RESULT_SCHEMA)
     result = extract_json(raw, fallback={"stage": "plan", "status": "failed"})
@@ -157,9 +163,12 @@ async def run(args):
         decision = await human(
             PLAN_REVIEW_PROMPT.substitute(run_id=run_id), schema=PLAN_DECISION_SCHEMA, label="plan-approval", phase="Plan"
         )
-        decision = extract_json(decision, fallback={"approve": True, "notes": ""})
+        decision = extract_json(decision, fallback={"approve": False, "notes": ""})
         notes = str(safe_get(decision, "notes", "")).strip()
-        if not safe_get(decision, "approve", True) and notes:
+        if safe_get(decision, "approve", False) is not True:
+            if not notes:
+                log("Plan not approved and no notes given; stopping so the plan can be revised.")
+                return {"status": "stopped", "run_id": run_id, "reason": "plan not approved", "stages": results}
             replan = stage_command(run_id, "plan", "--stage plan --notes " + shlex.quote(notes))
             raw = await agent(build_stage_prompt("plan", replan, run_id), label="replan", phase="Plan", schema=STAGE_RESULT_SCHEMA)
             result = extract_json(raw, fallback={"stage": "plan", "status": "failed"})
@@ -229,6 +238,6 @@ async def run(args):
     return {
         "status": status,
         "run_id": run_id,
-        "paper": "workspace/runs/" + run_id + "/package/paper.pdf",
+        "paper": "see the package directory of run " + run_id + " (tyche status --run-id " + run_id + ")",
         "stages": results,
     }

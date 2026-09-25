@@ -46,3 +46,29 @@ def test_export_uses_jiuwenswarm_evolution_format(memory, tmp_path):
     assert log.skill_id == "tyche-paper"
     assert [e.change.content for e in log.entries] == ["Report CIs."]
     assert log.entries[0].change.section == "Instructions"
+
+
+def test_rerunning_evolve_for_the_same_run_does_not_double_count(memory):
+    policy = EvolutionPolicy(promote_after_runs=2, promote_after_helped=1, retire_after_misses=2)
+    lesson = Lesson(category="x", lesson="Do x.", finding_ids=["F001"])
+    for _ in range(3):
+        update_lessons(memory, [lesson], ledger=_ledger(True, 0.2), run_id="r1", injected_ids=set(), policy=policy)
+    [item] = memory.list(kinds=["lesson"], scopes=["global"])
+    assert item.meta["helped"] == 1 and item.meta["support_runs"] == ["r1"] and item.meta["status"] == "candidate"
+
+
+def test_export_keeps_other_evolution_records(memory, tmp_path):
+    from openjiuwen.agent_evolving.checkpointing.types import EvolutionLog, EvolutionPatch, EvolutionRecord
+
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    foreign = EvolutionLog.empty("tyche-paper")
+    foreign.entries.append(EvolutionRecord.make("user", "ctx", EvolutionPatch(section="Instructions", action="append",
+                                                                               content="Human note.")))
+    (skill / "evolutions.json").write_text(json.dumps(foreign.to_dict()))
+    memory.add("lesson", "Report CIs.", provenance="inferred", scope="global",
+               meta={"category": "ci", "status": "active", "helped": 1, "support_runs": ["a", "b"]})
+    export_evolutions(memory, skill)
+    export_evolutions(memory, skill)  # idempotent
+    log = EvolutionLog.from_dict(json.loads((skill / "evolutions.json").read_text()))
+    assert sorted(e.change.content for e in log.entries) == ["Human note.", "Report CIs."]

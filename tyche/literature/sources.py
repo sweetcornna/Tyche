@@ -25,6 +25,19 @@ def normalize_arxiv_id(raw: str) -> str:
     return match.group(1) if match else ""
 
 
+def _xml_ok(body: str) -> None:
+    try:
+        ET.fromstring(body)
+    except ET.ParseError as exc:
+        raise ValueError(f"unparseable Atom feed: {exc}") from exc
+
+
+def _json_ok(body: str) -> None:
+    value = json.loads(body)  # JSONDecodeError is a ValueError
+    if not isinstance(value, dict):
+        raise ValueError("expected a JSON object")
+
+
 def _year(value: Any) -> int | None:
     try:
         year = int(str(value)[:4])
@@ -42,7 +55,10 @@ class ArxivClient:
 
     @staticmethod
     def parse(feed: str, query: str = "") -> list[Paper]:
-        root = ET.fromstring(feed)
+        try:
+            root = ET.fromstring(feed)
+        except ET.ParseError as exc:
+            raise ValueError(f"unparseable Atom feed: {exc}") from exc
         papers = []
         for entry in root.findall("a:entry", _ATOM):
             title = sanitize_untrusted(entry.findtext("a:title", default="", namespaces=_ATOM))
@@ -75,6 +91,7 @@ class ArxivClient:
         feed = await self.http.get_text(
             self.base,
             {"search_query": terms or f"all:{query}", "start": 0, "max_results": limit, "sortBy": "relevance"},
+            validate=_xml_ok,
         )
         return self.parse(feed, query)
 
@@ -82,7 +99,9 @@ class ArxivClient:
         ids = [normalize_arxiv_id(i) for i in ids if normalize_arxiv_id(i)]
         if not ids:
             return []
-        feed = await self.http.get_text(self.base, {"id_list": ",".join(ids), "max_results": len(ids)})
+        feed = await self.http.get_text(
+            self.base, {"id_list": ",".join(ids), "max_results": len(ids)}, validate=_xml_ok
+        )
         return self.parse(feed)
 
 
@@ -119,7 +138,8 @@ class SemanticScholarClient:
 
     async def search(self, query: str, limit: int) -> list[Paper]:
         body = await self.http.get_text(
-            f"{self.base}/paper/search", {"query": query, "limit": limit, "fields": _S2_FIELDS}, self.headers
+            f"{self.base}/paper/search", {"query": query, "limit": limit, "fields": _S2_FIELDS}, self.headers,
+            validate=_json_ok,
         )
         data = json.loads(body).get("data") or []
         return [p for p in (self.to_paper(item, query) for item in data) if p]
@@ -127,7 +147,9 @@ class SemanticScholarClient:
     async def lookup(self, identifier: str) -> Paper | None:
         """identifier: ``arXiv:<id>``, ``DOI:<doi>``, or an S2 paper id."""
         try:
-            body = await self.http.get_text(f"{self.base}/paper/{identifier}", {"fields": _S2_FIELDS}, self.headers)
+            body = await self.http.get_text(
+                f"{self.base}/paper/{identifier}", {"fields": _S2_FIELDS}, self.headers, validate=_json_ok
+            )
         except HttpError as exc:
             if exc.status == 404:
                 return None
@@ -138,7 +160,8 @@ class SemanticScholarClient:
         """One hop along the citation graph: direction is 'references' or 'citations'."""
         key = "citedPaper" if direction == "references" else "citingPaper"
         body = await self.http.get_text(
-            f"{self.base}/paper/{s2_id}/{direction}", {"fields": _S2_FIELDS, "limit": limit}, self.headers
+            f"{self.base}/paper/{s2_id}/{direction}", {"fields": _S2_FIELDS, "limit": limit}, self.headers,
+            validate=_json_ok,
         )
         data = json.loads(body).get("data") or []
         return [p for p in (self.to_paper(item.get(key) or {}) for item in data) if p]
@@ -200,7 +223,7 @@ class OpenAlexClient:
         params: dict[str, Any] = {"search": query, "per-page": limit}
         if self.mailto:
             params["mailto"] = self.mailto
-        body = await self.http.get_text(f"{self.base}/works", params)
+        body = await self.http.get_text(f"{self.base}/works", params, validate=_json_ok)
         return [p for p in (self.to_paper(item, query) for item in json.loads(body).get("results") or []) if p]
 
 
@@ -229,8 +252,10 @@ class CrossrefClient:
             if name:
                 authors.append(sanitize_untrusted(name))
         venue = (item.get("container-title") or [""])[0]
+        subtitle = (item.get("subtitle") or [""])[0]
+        title = titles[0] + (f": {subtitle}" if subtitle and subtitle.lower() not in titles[0].lower() else "")
         return Paper(
-            title=sanitize_untrusted(titles[0]),
+            title=sanitize_untrusted(title),
             authors=authors,
             year=year,
             venue=sanitize_untrusted(venue),
@@ -242,7 +267,7 @@ class CrossrefClient:
     async def by_doi(self, doi: str) -> Paper | None:
         params = {"mailto": self.mailto} if self.mailto else None
         try:
-            body = await self.http.get_text(f"{self.base}/works/{doi}", params)
+            body = await self.http.get_text(f"{self.base}/works/{doi}", params, validate=_json_ok)
         except HttpError as exc:
             if exc.status == 404:
                 return None

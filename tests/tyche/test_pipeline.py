@@ -61,11 +61,101 @@ async def test_package_refuses_unverified_paper(tmp_path):
     ws = Workspace.create(tmp_path, "r", topic="t", direction="memory_engine", config_digest="x")
     pdf = tmp_path / "p.pdf"
     pdf.write_bytes(b"%PDF-1.4")
-    ws.save_file("paper_pdf", pdf, stage="review")
+    pdf_rec = ws.save_file("paper_pdf", pdf, stage="review")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "main.tex").write_text("x")
+    src_rec = ws.save_tree("paper_source", src, stage="review")
     blocker = {"severity": "blocker", "gate": "number", "section": "experiments", "message": "number 9.9 unknown"}
-    ws.save_json("gates", {"passed": False, "findings": [blocker]}, stage="review")
+    gates_rec = ws.save_json("gates", {"passed": False, "findings": [blocker]}, stage="review")
+    ws.set_meta(review_outputs={"gates": gates_rec.id, "paper_pdf": pdf_rec.id, "paper_source": src_rec.id})
     services = Services(planner=None, writer=None, reviewer=None, searchers=[], verifier=None, s2=None, engine=None,
                         meter=UsageMeter())
     pipe = Pipeline(TycheConfig.load(env={}), ws, services, memory=None, direction={}, echo=lambda *a: None)
     with pytest.raises(StageError, match="gate blocker"):
         await pipe.stage_package()
+
+
+def _pipeline(tmp_path, ws, **kwargs):
+    from tyche.config import TycheConfig
+    from tyche.llm import UsageMeter
+    from tyche.pipeline import Pipeline, Services
+
+    services = Services(planner=None, writer=None, reviewer=None, searchers=[], verifier=None, s2=None, engine=None,
+                        meter=UsageMeter(), model_names=["test-model"])
+    return Pipeline(TycheConfig.load(env={}), ws, services, memory=None, direction={}, echo=lambda *a: None, **kwargs)
+
+
+async def test_package_never_ships_a_pdf_from_an_earlier_review(tmp_path):
+    from tyche.workspace import StageError, Workspace
+
+    ws = Workspace.create(tmp_path, "r", topic="t", direction="memory_engine", config_digest="x")
+    pdf = tmp_path / "old.pdf"
+    pdf.write_bytes(b"%PDF-1.4 old")
+    ws.save_file("paper_pdf", pdf, stage="review")  # left over from an earlier review run
+    gates_rec = ws.save_json("gates", {"passed": True, "findings": []}, stage="review")
+    ws.set_meta(review_outputs={"gates": gates_rec.id, "paper_pdf": None, "paper_source": None})
+    with pytest.raises(StageError, match="no compiled paper"):
+        await _pipeline(tmp_path, ws).stage_package()
+
+
+@needs_latex
+async def test_unverified_package_is_recompiled_with_an_unverified_statement(tmp_path):
+    from tyche.paper.latex import PaperSource, compile_pdf, pdf_text, write_build
+    from tyche.workspace import Workspace
+
+    ws = Workspace.create(tmp_path, "r", topic="t", direction="memory_engine", config_digest="x")
+    bib = tmp_path / "refs.bib"
+    bib.write_text("@misc{k1, title={A}, author={B, C}, year={2024}}\n")
+    src = PaperSource(title="Tiny", abstract="An abstract.", sections={"introduction": "Hello \\citep{k1}."},
+                      ai_statement="Original statement.", reproducibility="Repro.")
+    build = tmp_path / "build"
+    result = compile_pdf(write_build(src, build, bib_path=bib, figures=[]))
+    assert result.ok
+    pdf_rec = ws.save_file("paper_pdf", result.pdf, stage="review")
+    src_rec = ws.save_tree("paper_source", build, stage="review")
+    blocker = {"severity": "blocker", "gate": "number", "section": "experiments", "message": "number 9.9 unknown"}
+    gates_rec = ws.save_json("gates", {"passed": False, "findings": [blocker]}, stage="review")
+    ws.save_json("ledger", {"reflag_cap": 2, "entries": []}, stage="review")
+    ws.set_meta(review_outputs={"gates": gates_rec.id, "paper_pdf": pdf_rec.id, "paper_source": src_rec.id})
+    info = await _pipeline(tmp_path, ws, allow_gate_failures=True).stage_package()
+    assert info["verified"] is False and info["pdf"].endswith("paper_UNVERIFIED.pdf")
+    text = pdf_text(Path(info["pdf"]))
+    assert "UNVERIFIED" in text and "Original statement" not in text
+    record = ws.run_dir / "package" / "run_record"
+    assert (record / "artifacts").is_dir() and (record / "state.json").exists()
+
+
+def test_rerunning_a_stage_resets_every_later_stage(tmp_path):
+    from tyche import STAGES
+    from tyche.workspace import Workspace
+
+    ws = Workspace.create(tmp_path, "r", topic="t", direction="memory_engine", config_digest="x")
+    for stage in STAGES:
+        ws.mark_stage(stage, "done")
+    assert ws.reset_from("write") == ["write", "review", "evolve", "package"]
+    assert [ws.stage_status(s) for s in STAGES] == ["done"] * 4 + ["pending"] * 4
+
+
+def test_resume_keeps_the_run_config_and_rejects_mismatched_reuse(tmp_path, monkeypatch, capsys):
+    import tyche.cli as cli
+    from tyche.workspace import Workspace, write_json_atomic
+
+    root = tmp_path / "ws"
+    ws = Workspace.create(root, "r1", topic="topic A", direction="memory_engine", config_digest="x")
+    saved = cli._config(cli.build_parser().parse_args(
+        ["run", "--workspace", str(root), "--engine", "imported", "--results-dir", str(tmp_path)]))
+    write_json_atomic(ws.run_dir / "config.json", saved.data)
+    seen = {}
+
+    def fake_services(config):
+        seen["engine"] = config.get("experiments.engine")
+        seen["results_dir"] = config.get("experiments.results_dir")
+        raise cli.ConfigError("stop before running")
+
+    monkeypatch.setattr(cli, "build_services", fake_services)
+    assert cli.main(["run", "--workspace", str(root), "--run-id", "r1", "--resume"]) == 2
+    assert seen == {"engine": "imported", "results_dir": str(tmp_path.resolve())}
+    code = cli.main(["run", "--workspace", str(root), "--run-id", "r1", "--resume-if-exists",
+                     "--topic", "topic B", "--direction", "memory_engine"])
+    assert code == 2 and "different topic" in capsys.readouterr().err

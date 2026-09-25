@@ -17,7 +17,14 @@ import numpy as np
 
 from tyche.experiments.bridge import numeric_metrics
 
-_LOWER_BETTER = re.compile(r"token|cost|latency|time|error|stale|violation|regression|loss|perplexity|steps|calls", re.I)
+_LOWER_TOKENS = {
+    "token", "tokens", "cost", "costs", "latency", "time", "seconds", "ms", "error", "errors", "stale", "violation",
+    "violations", "regression", "regressions", "loss", "perplexity", "ppl", "steps", "calls", "episodes", "wer", "cer",
+}
+_HIGHER_TOKENS = {
+    "accuracy", "acc", "f1", "success", "precision", "recall", "score", "reward", "em", "bleu", "rouge", "auc",
+    "hit", "hits", "win", "pass", "correct", "exact",
+}
 _ITEM_ID_KEYS = ("id", "item_id", "question_id", "qid", "task_id", "index")
 _BOOL_ALIASES = {
     "accuracy": ("correct", "is_correct", "exact_match", "em"),
@@ -26,7 +33,11 @@ _BOOL_ALIASES = {
 
 
 def lower_is_better(metric: str) -> bool:
-    return bool(_LOWER_BETTER.search(metric))
+    """Decide direction from whole name tokens; quality words (accuracy, f1, success) win over cost words."""
+    tokens = set(re.split(r"[^a-z0-9]+", metric.lower())) - {""}
+    if tokens & _HIGHER_TOKENS:
+        return False
+    return bool(tokens & _LOWER_TOKENS)
 
 
 @dataclass
@@ -62,9 +73,15 @@ class Analysis:
     comparisons: list[Comparison] = field(default_factory=list)
     lower_is_better: dict[str, bool] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    confidence: float = 0.95
+
+    @property
+    def confidence_percent(self) -> str:
+        return f"{self.confidence * 100:g}"
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "confidence": self.confidence,
             "proposed": self.proposed,
             "baselines": self.baselines,
             "metrics": self.metrics,
@@ -105,6 +122,13 @@ def _item_ids(items: list[dict[str, Any]]) -> list[str] | None:
     return None
 
 
+def _per_id_means(ids: list[str], values: np.ndarray) -> dict[str, float]:
+    groups: dict[str, list[float]] = {}
+    for key, value in zip(ids, values):
+        groups.setdefault(key, []).append(float(value))
+    return {key: float(np.mean(vals)) for key, vals in groups.items()}
+
+
 def bootstrap_ci(values: np.ndarray, rng: np.random.Generator, resamples: int, confidence: float) -> tuple[float, float]:
     if len(values) < 2:
         m = float(values.mean()) if len(values) else float("nan")
@@ -125,18 +149,27 @@ def sign_flip_p(diffs: np.ndarray, rng: np.random.Generator, resamples: int) -> 
     return float((np.sum(null >= observed - 1e-12) + 1) / (resamples + 1))
 
 
+def _tokens(text: str) -> set[str]:
+    return set(re.split(r"[^a-z0-9]+", text.lower())) - {""}
+
+
 def pick_proposed(names: list[str], hint: str = "") -> str:
+    """The proposed variant: 'proposed'/'ours' by name first, then a whole-token match with the method name."""
     for name in names:
         if name.lower() == "proposed":
             return name
-    lowered = hint.lower()
     for name in names:
-        if lowered and (name.lower() in lowered or lowered in name.lower()):
+        if _tokens(name) & {"proposed", "ours"}:
             return name
-    for name in names:
-        if "proposed" in name.lower() or "ours" in name.lower():
-            return name
-    return names[0]
+    hint_tokens = _tokens(hint)
+    if hint_tokens:
+        matches = [n for n in names if _tokens(n) == hint_tokens]
+        if matches:
+            return matches[0]
+    raise ValueError(
+        "cannot tell which variant is the proposed method; name it 'proposed' (or include 'ours') in the metrics "
+        f"file names. Variants: {', '.join(names)}"
+    )
 
 
 def analyze(
@@ -194,13 +227,14 @@ def analyze(
                 continue
             ia, ib = ids[proposed], ids[baseline]
             if ia and ib:
-                common = [i for i in ia if i in set(ib)]
+                # Repeated trials of the same item are averaged per item before pairing.
+                mean_a = _per_id_means(ia, a)
+                mean_b = _per_id_means(ib, b)
+                common = [k for k in mean_a if k in mean_b]
                 if len(common) < 2:
                     continue
-                pos_a = {k: j for j, k in enumerate(ia)}
-                pos_b = {k: j for j, k in enumerate(ib)}
-                a_al = np.asarray([a[pos_a[k]] for k in common])
-                b_al = np.asarray([b[pos_b[k]] for k in common])
+                a_al = np.asarray([mean_a[k] for k in common])
+                b_al = np.asarray([mean_b[k] for k in common])
             elif len(a) == len(b):
                 a_al, b_al = a, b
             else:
@@ -234,4 +268,5 @@ def analyze(
         comparisons=comparisons,
         lower_is_better={m: lower_is_better(m) for m in ordered},
         notes=notes,
+        confidence=confidence,
     )

@@ -5,10 +5,9 @@ from __future__ import annotations
 import re
 
 from tyche.literature.models import Paper
-from tyche.textutil import ascii_fold
+from tyche.textutil import ascii_fold, latex_unicode
 
 _STOPWORDS = {"a", "an", "the", "on", "of", "for", "in", "to", "and", "with", "towards", "toward", "via", "is", "are"}
-_LATEX_SPECIAL = {"&": r"\&", "%": r"\%", "$": r"\$", "#": r"\#", "_": r"\_"}
 
 
 def _surname(author: str) -> str:
@@ -41,18 +40,42 @@ def assign_keys(papers: list[Paper]) -> dict[str, Paper]:
     return keyed
 
 
-def _escape(value: str) -> str:
+_MATH_SEGMENT = re.compile(r"(\$[^$]+\$)")
+_UNESCAPED_SPECIAL = re.compile(r"(?<!\\)([&%#_])")
+# Acronyms and model names (two or more capitals/digits), but never a LaTeX command name.
+_CONTROL_SEQ = re.compile(r"\\[A-Za-z]+(?:\{(?:[^{}]|\{[^{}]*\})*\})?")
+_CAPITALIZED = re.compile(r"(?<![\\\w{])([A-Za-z]*[A-Z][A-Za-z0-9\-]*[A-Z0-9][A-Za-z0-9\-]*)\b")
+
+
+def _bib_text(value: str, *, protect: bool = False) -> str:
+    """Make API text safe for BibTeX + pdflatex: keep $math$, escape specials, map Unicode."""
     out = []
-    for char in value:
-        out.append(_LATEX_SPECIAL.get(char, char))
-    text = "".join(out)
-    return re.sub(r"\s+", " ", text).strip()
+    for part in _MATH_SEGMENT.split(value or ""):
+        if len(part) > 1 and part.startswith("$") and part.endswith("$"):
+            math = latex_unicode(part)[0]
+            # Bibliography styles lowercase titles; braces keep math (and its commands) intact.
+            out.append("{" + math + "}" if protect else math)
+            continue
+        part = _UNESCAPED_SPECIAL.sub(r"\\\1", part)
+        part = re.sub(r"(?<!\\)\$", r"\\$", part)
+        if part.count("{") != part.count("}"):
+            part = part.replace("{", "").replace("}", "")
+        part = latex_unicode(part)[0]
+        if protect:
+            # Keep acronyms capitalized under bibliography styles that lowercase titles, and brace
+            # every control sequence so \LaTeX or \ensuremath{\Delta} is not lowercased into garbage.
+            part = _CAPITALIZED.sub(r"{\1}", part)
+            part = _CONTROL_SEQ.sub(lambda m: "{" + m.group(0) + "}", part)
+        out.append(part)
+    return re.sub(r"\s+", " ", "".join(out)).strip()
+
+
+def _escape(value: str) -> str:
+    return _bib_text(value)
 
 
 def _protect_title(title: str) -> str:
-    # Keep acronyms and model names capitalized under bibliography styles that lowercase titles.
-    escaped = _escape(title)
-    return re.sub(r"\b([A-Za-z]*[A-Z][A-Za-z0-9\-]*[A-Z0-9][A-Za-z0-9\-]*)\b", r"{\1}", escaped)
+    return _bib_text(title, protect=True)
 
 
 def format_authors(authors: list[str]) -> str:

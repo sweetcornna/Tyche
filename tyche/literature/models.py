@@ -36,8 +36,15 @@ class Paper:
             keys.append(f"doi:{self.doi.lower()}")
         if self.s2_id:
             keys.append(f"s2:{self.s2_id}")
+        if self.openalex_id:
+            keys.append(f"openalex:{self.openalex_id}")
         if self.norm_title:
             keys.append(f"title:{self.norm_title}")
+        elif self.title.strip():
+            # Titles that fold to nothing in ASCII (e.g. CJK) still need a stable identity.
+            keys.append(f"rawtitle:{self.title.strip().lower()}")
+        if not keys:
+            keys.append(f"object:{id(self)}")
         return keys
 
     def merge(self, other: "Paper") -> None:
@@ -74,12 +81,25 @@ def dedupe(papers: list[Paper]) -> list[Paper]:
     merged: list[Paper] = []
     index: dict[str, Paper] = {}
     for paper in papers:
-        target = next((index[k] for k in paper.identity_keys() if k in index), None)
-        if target is None:
+        hits: list[Paper] = []
+        for key in paper.identity_keys():
+            found = index.get(key)
+            if found is not None and all(found is not h for h in hits):
+                hits.append(found)
+        if not hits:
             merged.append(paper)
             target = paper
         else:
+            # A record can bridge two earlier records (one known by arXiv id, one by DOI):
+            # fold all of them into the first so the same work is never listed twice.
+            target = hits[0]
             target.merge(paper)
+            for other in hits[1:]:
+                target.merge(other)
+                merged[:] = [p for p in merged if p is not other]
         for key in target.identity_keys():
             index[key] = target
+        for other in hits[1:]:
+            for key in other.identity_keys():
+                index[key] = target
     return merged

@@ -202,7 +202,7 @@ class Surveyor:
         for name in direction.get("canonical_works", []):
             try:
                 paper = await self.verifier.resolve_title(name)
-            except HttpError as exc:
+            except (HttpError, ValueError) as exc:
                 self.errors.append(f"canonical lookup {name!r}: {exc}")
                 continue
             if paper is not None:
@@ -244,7 +244,7 @@ class Surveyor:
             for direction in ("references", "citations"):
                 try:
                     found.extend(await self.s2.neighbours(seed.s2_id, direction, per_seed))
-                except HttpError as exc:
+                except (HttpError, ValueError) as exc:
                     self.errors.append(f"expansion {seed.s2_id}/{direction}: {exc}")
         known_keys = {k for p in known for k in p.identity_keys()}
         fresh = [p for p in dedupe(found) if not set(p.identity_keys()) & known_keys]

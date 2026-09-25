@@ -67,12 +67,13 @@ def comparison_table(analysis: Analysis, *, label: str = "tab:paired") -> str:
         r"\begin{table}[t]",
         r"\centering",
         r"\caption{Paired comparisons of the proposed method against each baseline: mean per-item difference "
-        r"(proposed minus baseline), 95\% bootstrap confidence interval, and sign-flip permutation $p$-value.}",
+        r"(proposed minus baseline), " + analysis.confidence_percent + r"\% bootstrap confidence interval, and "
+        r"sign-flip permutation $p$-value.}",
         r"\label{" + label + "}",
         r"\small",
         r"\begin{tabular}{llccc}",
         r"\toprule",
-        r"Metric & Baseline & $\Delta$ & 95\% CI & $p$ \\",
+        r"Metric & Baseline & $\Delta$ & " + analysis.confidence_percent + r"\% CI & $p$ \\",
         r"\midrule",
     ]
     for c in analysis.comparisons:
@@ -87,7 +88,7 @@ def comparison_table(analysis: Analysis, *, label: str = "tab:paired") -> str:
 
 
 def results_figure(analysis: Analysis, out_path: Path) -> Path | None:
-    """Bar chart with 95% CI error bars, one panel per metric (up to three)."""
+    """Bar chart with confidence-interval error bars, one panel per metric (up to three)."""
     import matplotlib
 
     matplotlib.use("Agg")

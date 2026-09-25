@@ -10,50 +10,29 @@ removed citation is visible in the gate report.
 from __future__ import annotations
 
 import re
-import unicodedata
 from dataclasses import dataclass, field
 
-_CITE = re.compile(r"\\(cite[tp]?|citealp|citeauthor|citeyear)\*?(\[[^\]]*\])?\{([^}]*)\}")
+from tyche.textutil import latex_unicode
+
+_CITE = re.compile(r"\\([Cc]ite(?:t|p|alp|alt|author|year|num)?)\*?((?:\[[^\]]*\]){0,2})\{([^}]*)\}")
 _SECTION = re.compile(r"^\s*\\(?:section|chapter)\*?\{[^}]*\}\s*$", re.M)
 _MD_HEADING = re.compile(r"^\s*#{1,6}\s+(.*)$", re.M)
 _MD_BOLD = re.compile(r"\*\*(.+?)\*\*")
 _MD_ITALIC = re.compile(r"(?<![\*\w])\*(?!\s)([^*\n]+?)\*(?!\w)")
-_MD_CODE = re.compile(r"`([^`\n]+)`")
+# Markdown code spans, but never LaTeX quotes (``like this'' or `this').
+_MD_CODE = re.compile(r"(?<!`)`(?!`)([^`'\n]+)`(?![`'])")
 
-_UNICODE = {
-    "\u201c": "``",
-    "\u201d": "''",
-    "\u2018": "`",
-    "\u2019": "'",
-    "\u2014": "---",
-    "\u2013": "--",
-    "\u2026": r"\ldots{}",
-    "\u00d7": r"$\times$",
-    "\u2248": r"$\approx$",
-    "\u2264": r"$\leq$",
-    "\u2265": r"$\geq$",
-    "\u2192": r"$\rightarrow$",
-    "\u2190": r"$\leftarrow$",
-    "\u00b1": r"$\pm$",
-    "\u2212": "-",
-    "\u00a0": "~",
-    "\u2032": "'",
-    "\u00b7": r"$\cdot$",
-    "\u2022": r"$\bullet$",
-    "\u03b1": r"$\alpha$",
-    "\u03b2": r"$\beta$",
-    "\u03b3": r"$\gamma$",
-    "\u03b4": r"$\delta$",
-    "\u0394": r"$\Delta$",
-    "\u03bb": r"$\lambda$",
-    "\u03c4": r"$\tau$",
-    "\u03b8": r"$\theta$",
-    "\u03c3": r"$\sigma$",
-    "\u03bc": r"$\mu$",
-}
 
-_MATH_ENVS = ("equation", "equation*", "align", "align*", "gather", "gather*", "multline", "multline*", "eqnarray")
-_VERBATIM_ENVS = ("tabular", "tabular*", "array", "verbatim", "lstlisting")
+_MATH_ENVS = (
+    "equation", "equation*", "align", "align*", "gather", "gather*", "multline", "multline*", "eqnarray", "array",
+)
+_VERBATIM_ENVS = ("verbatim", "lstlisting")
+_ALIGN_ENVS = ("tabular", "tabular*", "tabularx")
+# Commands whose brace argument is an identifier or path, copied without escaping.
+_IDENTIFIER_CMD = re.compile(
+    r"\\(?:label|ref|eqref|cref|Cref|autoref|url|href|input|include|includegraphics|"
+    r"[Cc]ite(?:t|p|alp|alt|author|year|num)?)\*?(?:\[[^\]]*\]){0,2}\{[^}]*\}"
+)
 
 
 @dataclass
@@ -63,30 +42,22 @@ class SanitizeReport:
 
 
 def _replace_unicode(text: str, report: SanitizeReport) -> str:
-    out = []
-    changed = False
-    for char in text:
-        if char in _UNICODE:
-            out.append(_UNICODE[char])
-            changed = True
-        elif ord(char) < 128:
-            out.append(char)
-        else:
-            folded = unicodedata.normalize("NFKD", char).encode("ascii", "ignore").decode("ascii")
-            out.append(folded)
-            changed = True
-    if changed:
-        report.fixes.append("replaced non-ASCII characters")
-    return "".join(out)
+    converted, dropped = latex_unicode(text)
+    if converted != text:
+        report.fixes.append("mapped non-ASCII characters to LaTeX")
+    if dropped:
+        report.fixes.append("dropped characters pdflatex cannot typeset: " + "".join(sorted(set(dropped)))[:40])
+    return converted
 
 
 def _escape_text_specials(text: str, report: SanitizeReport) -> str:
-    """Escape % & _ # in text mode; leave math, tabular, and command arguments alone."""
+    """Escape % & _ # in text mode; in tabular cells escape all but &; leave math and identifiers alone."""
     out: list[str] = []
     i = 0
     n = len(text)
     math_stack: list[str] = []
     env_depth = 0
+    align_depth = 0
     escaped = 0
     while i < n:
         ch = text[i]
@@ -98,6 +69,9 @@ def _escape_text_specials(text: str, report: SanitizeReport) -> str:
                 if env in _MATH_ENVS or env in _VERBATIM_ENVS:
                     env_depth += 1 if m.group(1) == "begin" else -1
                     env_depth = max(env_depth, 0)
+                elif env in _ALIGN_ENVS:
+                    align_depth += 1 if m.group(1) == "begin" else -1
+                    align_depth = max(align_depth, 0)
                 out.append(m.group(0))
                 i += len(m.group(0))
                 continue
@@ -114,7 +88,7 @@ def _escape_text_specials(text: str, report: SanitizeReport) -> str:
                 continue
             # Copy a control word or control symbol verbatim, including its brace
             # arguments for commands whose arguments are identifiers.
-            m = re.match(r"\\(label|ref|eqref|cref|Cref|autoref|url|href|cite[tp]?|citealp|includegraphics)\*?(\[[^\]]*\])?\{[^}]*\}", text[i:])
+            m = _IDENTIFIER_CMD.match(text, i)
             if m:
                 out.append(m.group(0))
                 i += len(m.group(0))
@@ -139,7 +113,8 @@ def _escape_text_specials(text: str, report: SanitizeReport) -> str:
             i += 1
             continue
         in_math = bool(math_stack) or env_depth > 0
-        if not in_math and ch in "%&#_":
+        specials = "%#_" if align_depth > 0 else "%&#_"
+        if not in_math and ch in specials:
             out.append("\\" + ch)
             escaped += 1
             i += 1
@@ -172,7 +147,9 @@ def filter_citations(text: str, allowed: set[str], report: SanitizeReport) -> st
         return f"\\{command}{opt}{{{','.join(kept)}}}"
 
     cleaned = _CITE.sub(repl, text)
-    cleaned = re.sub(r"\s+([.,;:])", r"\1", cleaned) if report.removed_citations else cleaned
+    if report.removed_citations:
+        cleaned = re.sub(r"[ \t]+([.,;:])", r"\1", cleaned)
+        cleaned = re.sub(r"(?<=\S)[ \t]{2,}(?=\S)", " ", cleaned)
     return cleaned
 
 

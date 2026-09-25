@@ -148,3 +148,69 @@ async def test_survey_fails_loudly_without_sources(memory):
                         memory=memory, run_id="r", settings={})
     with pytest.raises(StageError):
         await surveyor.run(ResearchPlan.model_validate(PLAN), {})
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        r"$\mathcal{O}(n)$ Attention for \LaTeX\ Agents",
+        "\u03b2-VAE & GPT-4 at 50% {unbalanced",
+        "Nguy\u1ec5n's \u4e2d\u6587 Agents",
+    ],
+)
+def test_bibtex_titles_and_authors_are_latex_safe(title, tmp_path):
+    import shutil
+
+    entry = to_bibtex("k1", Paper(title=title, authors=["Nguy\u1ec5n V\u0103n A", "Zo\u00eb O'Brien"], year=2024,
+                                  arxiv_id="2401.00001"))
+    assert entry.count("{") == entry.count("}")
+    assert all(ord(ch) < 0x180 for ch in entry)  # only characters pdflatex can typeset
+    if shutil.which("latexmk"):
+        from tyche.paper.latex import PaperSource, compile_pdf, write_build
+
+        bib = tmp_path / "refs.bib"
+        bib.write_text(entry)
+        src = PaperSource(title="T", abstract="A.", sections={"introduction": "See \\citep{k1}."},
+                          ai_statement="S.", reproducibility="R.")
+        result = compile_pdf(write_build(src, tmp_path / "b", bib_path=bib, figures=[]))
+        assert result.ok and not result.undefined_citations, (result.errors, result.log_tail[-400:])
+
+
+def test_untrusted_text_keeps_comparisons():
+    from tyche.textutil import sanitize_untrusted
+
+    assert sanitize_untrusted("error < 5% when n > 100 for all tasks") == "error < 5% when n > 100 for all tasks"
+    assert sanitize_untrusted("a <b>bold</b> claim") == "a bold claim"
+
+
+def test_identity_keys_and_transitive_dedupe():
+    cjk = Paper(title="\u4e2d\u6587\u8bba\u6587", sources=["openalex"])
+    assert cjk.identity_keys() and cjk.identity_keys()[0].startswith("rawtitle:")
+    a = Paper(title="Work A", arxiv_id="2401.00001", sources=["arxiv"])
+    b = Paper(title="Work A (journal version)", doi="10.1/x", sources=["crossref"])
+    c = Paper(title="Something else entirely", arxiv_id="2401.00001", doi="10.1/x", sources=["semantic_scholar"])
+    merged = dedupe([a, b, c])
+    assert len(merged) == 1 and merged[0].doi == "10.1/x"
+
+
+async def test_malformed_arxiv_body_is_reported_and_never_cached(tmp_path):
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(200, text="<html>rate limited</html" if calls["n"] == 1 else ATOM)
+
+    http = HttpClient(cache_path=tmp_path / "c.sqlite", transport=httpx.MockTransport(handler))
+    client = ArxivClient(http)
+    with pytest.raises(ValueError):
+        await client.search("memory ledgers", 5)
+    papers = await client.search("memory ledgers", 5)  # not served from cache: the bad body was never stored
+    assert calls["n"] == 2 and papers[0].arxiv_id == "2401.01234"
+    await http.aclose()
+
+
+def test_crossref_subtitle_is_part_of_the_title():
+    from tyche.literature.sources import CrossrefClient
+
+    paper = CrossrefClient.to_paper({"title": ["Memory Ledgers"], "subtitle": ["Provenance for Agents"], "DOI": "10.1/x"})
+    assert paper.title == "Memory Ledgers: Provenance for Agents"

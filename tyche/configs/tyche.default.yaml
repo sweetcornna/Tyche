@@ -55,6 +55,8 @@ experiments:
   # imported: read metrics JSON files you produced yourself (--results-dir).
   # fixture: synthetic metrics for the offline selftest only.
   engine: openjiuwen
+  # Directory of <variant>.metrics.json files for the imported engine (saved with the run).
+  results_dir: null
   max_rounds: 30
   max_code_retries: 3
   max_design_revisions: 3
@@ -77,11 +79,12 @@ paper:
   max_main_pages: 5
   anonymous: true
   authors: []
-  # Human-review disclosure used verbatim in the ICLR AI use statement.
-  human_review_statement: >-
-    The submitting team inspected the generated plan, experiment code, results,
-    and manuscript before submission and takes responsibility for the final
-    content.
+  # Human-review disclosure used verbatim in the ICLR AI use statement. Leave it
+  # empty until a person has actually reviewed the paper; the statement then says
+  # that no human review was recorded. Example, once true:
+  #   The submitting team inspected the generated plan, experiment code, results,
+  #   and manuscript and takes responsibility for the final content.
+  human_review_statement: ""
   sections:
     abstract: {min_words: 120, max_words: 200}
     introduction: {min_words: 400, max_words: 650}

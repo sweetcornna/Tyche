@@ -189,6 +189,21 @@ class MemoryStore:
         with self._conn:
             self._conn.execute("UPDATE items SET meta=? WHERE id=?", (json.dumps(meta, ensure_ascii=False), item_id))
 
+    def retire_run_items(self, run_id: str, tags: Iterable[str]) -> int:
+        """Hide this run's items carrying any of ``tags`` (used before a stage is rerun, so stale
+        evidence from the previous attempt cannot reach later prompts). History is kept."""
+        wanted = set(tags)
+        retired = 0
+        rows = self._conn.execute(
+            "SELECT id, tags FROM items WHERE scope='run' AND run_id=? AND superseded_by IS NULL", (run_id,)
+        ).fetchall()
+        with self._conn:
+            for row in rows:
+                if wanted & set(json.loads(row["tags"] or "[]")):
+                    self._conn.execute("UPDATE items SET superseded_by='retired' WHERE id=?", (row["id"],))
+                    retired += 1
+        return retired
+
     def touch(self, ids: Iterable[str]) -> None:
         now = utcnow()
         with self._conn:

@@ -14,11 +14,14 @@ re-flag count instead of creating a duplicate.
 
 from __future__ import annotations
 
+import copy
 import difflib
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable
 
 SEVERITY_ORDER = {"blocker": 0, "major": 1, "minor": 2}
+_SECTION_FILE = re.compile(r"(?:\./)?sections/([a-z_]+?)(?:_floats)?\.tex")
 
 
 @dataclass
@@ -69,10 +72,35 @@ class FindingsLedger:
             out[entry.status] = out.get(entry.status, 0) + 1
         return out
 
+    def snapshot(self) -> dict[str, Any]:
+        """A deep copy of the ledger, used to roll back a rejected revision round."""
+        return copy.deepcopy({"entries": self.entries, "counter": self._counter})
+
+    def restore(self, snap: dict[str, Any]) -> None:
+        self.entries = copy.deepcopy(snap["entries"])
+        self._counter = snap["counter"]
+
     # -- updates -------------------------------------------------------
+    @staticmethod
+    def _is_gate(finding_or_entry: Any) -> bool:
+        source = finding_or_entry.get("source", "") if isinstance(finding_or_entry, dict) else finding_or_entry.source
+        return str(source).startswith("gate")
+
     def _match(self, finding: dict[str, Any]) -> Entry | None:
+        if self._is_gate(finding):
+            # Gate messages share wording; only an identical report is the same finding.
+            for entry in self.entries:
+                if (
+                    entry.status == "open"
+                    and entry.source == finding.get("source")
+                    and entry.section == finding.get("section")
+                    and entry.problem == finding.get("problem")
+                    and entry.quote == finding.get("quote", "")
+                ):
+                    return entry
+            return None
         for entry in self.entries:
-            if entry.status != "open" or entry.section != finding.get("section"):
+            if entry.status != "open" or entry.section != finding.get("section") or self._is_gate(entry):
                 continue
             same_quote = finding.get("quote") and entry.quote and (
                 finding["quote"].strip().lower() == entry.quote.strip().lower()
@@ -84,6 +112,9 @@ class FindingsLedger:
 
     def add(self, finding: dict[str, Any], *, round_no: int) -> Entry:
         existing = self._match(finding)
+        if existing is not None and self._is_gate(finding):
+            # A gate that still reports the same problem is not a re-flag; the entry simply stays open.
+            return existing
         if existing is not None:
             existing.reflags += 1
             existing.history.append(f"r{round_no}: re-flagged by {finding.get('source', '?')}")
@@ -161,7 +192,13 @@ def gate_findings_as_review(report_findings: list[dict[str, Any]]) -> list[dict[
     for f in report_findings:
         if f["severity"] == "minor":
             continue
-        section = f["section"] if f["section"] not in ("main", "") else "general"
+        section = str(f.get("section") or "")
+        match = _SECTION_FILE.fullmatch(section)
+        if match:
+            section = match.group(1)
+        if section in ("main", ""):
+            section = "general"
+        page_limit = f["gate"] == "structure" and "page" in f["message"] and "limit" in f["message"]
         out.append(
             {
                 "source": f"gate:{f['gate']}",
@@ -177,7 +214,10 @@ def gate_findings_as_review(report_findings: list[dict[str, Any]]) -> list[dict[
                     "structure": "Restore the required element described in the problem.",
                     "placeholder": "Replace the placeholder with final text.",
                     "compile": "Fix the LaTeX so the document compiles and every reference resolves.",
-                }.get(f["gate"], "Address the problem."),
+                }.get(f["gate"], "Address the problem.")
+                if not page_limit
+                else "Shorten this section: cut repetition and secondary detail while keeping every citation, "
+                "reported number, and reference label that supports a claim.",
                 "close_criterion": "The deterministic gate no longer reports this problem.",
             }
         )

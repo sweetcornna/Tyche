@@ -8,7 +8,8 @@ import unicodedata
 from functools import lru_cache
 
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-_TAG = re.compile(r"<[^>]{0,200}>")
+# Only real markup: "<" immediately followed by a letter or "/", so "error < 5% when n > 100" survives.
+_TAG = re.compile(r"</?[A-Za-z][^<>]{0,200}>")
 _WS = re.compile(r"\s+")
 # Markers that could be mistaken for instructions or for Tyche's own prompt
 # delimiters when untrusted text (abstracts, web pages) is placed in a prompt.
@@ -33,6 +34,53 @@ def sanitize_untrusted(text: str, limit: int | None = None) -> str:
     if limit is not None and len(cleaned) > limit:
         cleaned = cleaned[: max(0, limit - 1)].rstrip() + "…"
     return cleaned
+
+
+_GREEK = {
+    "α": "alpha", "β": "beta", "γ": "gamma", "δ": "delta", "ε": "epsilon", "ζ": "zeta", "η": "eta", "θ": "theta",
+    "ι": "iota", "κ": "kappa", "λ": "lambda", "μ": "mu", "ν": "nu", "ξ": "xi", "π": "pi", "ρ": "rho", "σ": "sigma",
+    "τ": "tau", "υ": "upsilon", "φ": "phi", "χ": "chi", "ψ": "psi", "ω": "omega", "Γ": "Gamma", "Δ": "Delta",
+    "Θ": "Theta", "Λ": "Lambda", "Ξ": "Xi", "Π": "Pi", "Σ": "Sigma", "Φ": "Phi", "Ψ": "Psi", "Ω": "Omega",
+}
+# Unicode that pdflatex cannot typeset directly. Math symbols use \ensuremath so the same
+# replacement is valid inside and outside math mode.
+LATEX_UNICODE: dict[str, str] = {
+    "\u201c": "``", "\u201d": "''", "\u2018": "`", "\u2019": "'", "\u2032": "'",
+    "\u2014": "---", "\u2013": "--", "\u2212": "-", "\u00a0": "~", "\u2026": r"\ldots{}",
+    "\u00d7": r"\ensuremath{\times}", "\u00f7": r"\ensuremath{\div}", "\u2248": r"\ensuremath{\approx}",
+    "\u2260": r"\ensuremath{\neq}", "\u2264": r"\ensuremath{\leq}", "\u2265": r"\ensuremath{\geq}",
+    "\u2192": r"\ensuremath{\rightarrow}", "\u2190": r"\ensuremath{\leftarrow}", "\u2194": r"\ensuremath{\leftrightarrow}",
+    "\u21d2": r"\ensuremath{\Rightarrow}", "\u00b1": r"\ensuremath{\pm}", "\u00b7": r"\ensuremath{\cdot}",
+    "\u2022": r"\ensuremath{\bullet}", "\u00b5": r"\ensuremath{\mu}", "\u221e": r"\ensuremath{\infty}",
+    "\u2208": r"\ensuremath{\in}", "\u2211": r"\ensuremath{\sum}", "\u221a": r"\ensuremath{\surd}",
+    "\u00b0": r"\ensuremath{^\circ}", "\u2217": r"\ensuremath{\ast}", "\u2032\u2032": "''",
+    "\u00b9": r"\textsuperscript{1}", "\u00b2": r"\textsuperscript{2}", "\u00b3": r"\textsuperscript{3}",
+    **{char: "\\ensuremath{\\" + name + "}" for char, name in _GREEK.items()},
+}
+
+
+def _pdflatex_native(char: str) -> bool:
+    """Characters pdflatex (utf8 inputenc, T1) typesets as-is: ASCII, Latin-1 letters, Latin Extended-A."""
+    code = ord(char)
+    return code < 128 or (0xC0 <= code <= 0x17F and char not in "\u00d7\u00f7")
+
+
+def latex_unicode(text: str) -> tuple[str, list[str]]:
+    """Map non-ASCII text to pdflatex-safe LaTeX; returns the text and characters that had to be dropped."""
+    out: list[str] = []
+    dropped: list[str] = []
+    for char in text or "":
+        if char in LATEX_UNICODE:
+            out.append(LATEX_UNICODE[char])
+        elif _pdflatex_native(char):
+            out.append(char)
+        else:
+            folded = unicodedata.normalize("NFKD", char)
+            kept = "".join(c for c in folded if _pdflatex_native(c) and not unicodedata.combining(c))
+            if not kept:
+                dropped.append(char)
+            out.append(kept)
+    return "".join(out), dropped
 
 
 def normalize_title(title: str) -> str:

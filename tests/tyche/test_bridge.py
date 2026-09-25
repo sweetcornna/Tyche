@@ -80,3 +80,45 @@ async def test_openjiuwen_engine_drives_manager_runtime_and_harvests(tmp_path, m
     assert captured["arun"]["constraints"] == ["small"]
     assert captured["config"]["manager"]["modules"]["reporting"] is False
     assert (tmp_path / "exp" / "inputs" / "research_summary.md").exists()
+
+
+async def test_openjiuwen_engine_ignores_stale_variants_and_uses_fresh_run_ids(tmp_path, monkeypatch):
+    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common import workspace as arw
+    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_design import agent as design_mod
+    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager import agent as manager_mod
+    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.schemas import TerminalReport
+    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reflection import agent as reflection_mod
+    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.pipeline import manager as runtime_mod
+
+    from tyche.experiments import bridge
+
+    run_ids = []
+
+    class FakeRuntime:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def arun(self, **kwargs):
+            run_ids.append(kwargs["run_id"])
+            results = arw.results_dir(kwargs["run_id"])
+            results.mkdir(parents=True, exist_ok=True)
+            for name in ("proposed", "baseline", "dropped_old_variant"):
+                (results / f"{name}.metrics.json").write_text(json.dumps({"status": "completed", "accuracy": 0.5}))
+            return TerminalReport(status="complete", run_id=kwargs["run_id"], completion_satisfied=True)
+
+    Dummy = type("Dummy", (), {"__init__": lambda self, *a, **k: None})
+    monkeypatch.setattr(manager_mod, "ManagerAgent", Dummy)
+    monkeypatch.setattr(design_mod, "ExperimentDesignAgent", Dummy)
+    monkeypatch.setattr(reflection_mod, "ReflectionAgent", Dummy)
+    monkeypatch.setattr(runtime_mod, "ManagerRuntime", FakeRuntime)
+    monkeypatch.setattr(bridge, "_latest_execution_variants", lambda run_id: {"proposed", "baseline"})
+    monkeypatch.setenv("API_KEY", "test-key")
+    spec = TycheConfig.load(env={"MODEL_NAME": "m"}).model("experiments")
+    summary = tmp_path / "summary.md"
+    summary.write_text("## Short Summary\nx\n")
+    engine = OpenJiuwenEngine(object(), spec, {})
+    plan = ResearchPlan.model_validate(PLAN)
+    first = await engine.run(plan, summary_path=summary, work_dir=tmp_path / "exp", run_id="r1")
+    second = await engine.run(plan, summary_path=summary, work_dir=tmp_path / "exp", run_id="r1")
+    assert set(first.variants) == {"proposed", "baseline"} and "dropped_old_variant" in first.notes
+    assert run_ids == ["tyche-r1-a1", "tyche-r1-a2"] and second.status == "completed"

@@ -97,6 +97,14 @@ def _status(meta: dict[str, Any], policy: EvolutionPolicy) -> str:
     return "candidate"
 
 
+def _fold_runs(meta: dict[str, Any]) -> None:
+    """Derive the counters from the per-run records, so rerunning evolve for a run is idempotent."""
+    runs = meta.get("runs", {})
+    meta["support_runs"] = sorted(runs)
+    meta["helped"] = sum(int(r.get("helped", 0)) for r in runs.values())
+    meta["misses"] = sum(1 for r in runs.values() if r.get("missed"))
+
+
 def update_lessons(
     memory: MemoryStore,
     lessons: list[Lesson],
@@ -106,25 +114,26 @@ def update_lessons(
     injected_ids: set[str],
     policy: EvolutionPolicy,
 ) -> list[dict[str, Any]]:
-    """Merge this run's lessons into global memory and apply promotion/retirement."""
+    """Merge this run's lessons into global memory and apply promotion/retirement.
+
+    Each lesson keeps one record per run ({"helped": n, "missed": bool}); a rerun of the same run
+    replaces its record instead of counting again.
+    """
     existing = {item.meta.get("category"): item for item in memory.list(kinds=["lesson"], scopes=["global"])}
     changes = []
-    seen_categories = set()
     for lesson in lessons:
         category = _slug(lesson.category)
-        seen_categories.add(category)
         helped = _helped(ledger, lesson.finding_ids)
         item = existing.get(category)
         if item is None:
-            meta = {
+            meta: dict[str, Any] = {
                 "category": category,
-                "support_runs": [run_id],
-                "helped": helped,
-                "misses": 0,
+                "runs": {run_id: {"helped": helped, "missed": False}},
                 "sections": lesson.sections,
                 "status": "candidate",
                 "created_run": run_id,
             }
+            _fold_runs(meta)
             meta["status"] = _status(meta, policy)
             new_id = memory.add(
                 "lesson",
@@ -138,14 +147,12 @@ def update_lessons(
             changes.append({"id": new_id, "category": category, "status": meta["status"], "change": "created"})
             continue
         meta = dict(item.meta)
-        runs = list(meta.get("support_runs", []))
-        if run_id not in runs:
-            runs.append(run_id)
-        meta["support_runs"] = runs
-        meta["helped"] = int(meta.get("helped", 0)) + helped
-        if item.id in injected_ids and meta.get("status") == "active":
-            # The lesson was in the writer's context and the same problem still surfaced.
-            meta["misses"] = int(meta.get("misses", 0)) + 1
+        runs = dict(meta.get("runs") or {})
+        # Only active lessons are injected; if one was in the writer's context and the same
+        # problem still surfaced in this run, the guidance missed.
+        runs[run_id] = {"helped": helped, "missed": item.id in injected_ids}
+        meta["runs"] = runs
+        _fold_runs(meta)
         before = meta.get("status", "candidate")
         meta["status"] = _status(meta, policy)
         body_changed = lesson.lesson.strip() != item.body.strip() and before != "active"
@@ -181,7 +188,16 @@ def export_evolutions(memory: MemoryStore, skill_dir: Path, skill_id: str = "tyc
     """Write active lessons as a JiuwenSwarm skill evolutions.json."""
     from openjiuwen.agent_evolving.checkpointing.types import EvolutionLog, EvolutionPatch, EvolutionRecord
 
+    target = skill_dir / "evolutions.json"
     log = EvolutionLog.empty(skill_id)
+    if target.exists():
+        # Keep evolution records that JiuwenSwarm (or a person) added; replace only Tyche's own.
+        try:
+            previous = EvolutionLog.from_dict(json.loads(target.read_text(encoding="utf-8")))
+            log.entries = [e for e in previous.entries if e.source != "tyche-review-ledger"]
+            log.version = previous.version
+        except (ValueError, KeyError, TypeError):
+            pass
     for item in memory.list(kinds=["lesson"], scopes=["global"]):
         if item.meta.get("status") != "active":
             continue
@@ -197,6 +213,5 @@ def export_evolutions(memory: MemoryStore, skill_dir: Path, skill_id: str = "tyc
         log.entries.append(record)
     log.updated_at = utcnow()
     skill_dir.mkdir(parents=True, exist_ok=True)
-    target = skill_dir / "evolutions.json"
     target.write_text(json.dumps(log.to_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return target

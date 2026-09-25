@@ -29,13 +29,15 @@ package an existing Tyche run. Tyche is installed with this repository (`tyche` 
    ```
 
 3. Show the user the plan (`workspace/runs/<run-id>/artifacts/plan_md/`) and ask whether to continue. To change it,
-   rerun the plan stage with notes: `tyche run --resume --run-id <run-id> --stage plan --notes "<notes>"`.
+   rerun the plan stage with notes: `tyche run --resume --run-id <run-id> --stage plan --notes "<notes>"`
+   (rerunning a stage marks every later stage pending).
 4. Continue to the end: `tyche run --resume --run-id <run-id>`. Experiments can take hours; report progress from
    `tyche status --run-id <run-id>`.
 5. When the user already has experiment outputs, use them instead of the automatic experiment loop:
    `tyche run --resume --run-id <run-id> --engine imported --results-dir <dir-with-metrics-json>`.
-6. Report the paper path (`workspace/runs/<run-id>/package/paper.pdf`), the gate status, and the review composite
-   from `run_report.md`. Remind the user that the composite is Tyche's own signal, not a paperreview.ai score.
+6. Report the paper path (`package/paper.pdf` in the run directory, or `paper_UNVERIFIED.pdf` if the user chose
+   `--allow-gate-failures`), the gate status, and the review composite from `run_report.md`. Remind the user that the
+   composite is Tyche's own signal, not a paperreview.ai score.
 
 To keep the cross-run writing lessons visible in JiuwenSwarm's `/evolve_list`, pass
 `--export-skill-dir ~/.jiuwenswarm/agent/workspace/skills/tyche-paper` to `tyche run`.

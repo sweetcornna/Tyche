@@ -27,6 +27,7 @@ from tyche.literature.survey import Surveyor, prerank, write_survey_outputs
 from tyche.llm import LLMClient, UsageMeter
 from tyche.memory import MemoryStore
 from tyche.paper.compose import PaperComposer
+from tyche.paper.latex import compile_pdf
 from tyche.paper.statements import ai_use_statement, reproducibility_statement
 from tyche.paper.writer import SectionWriter, WritingContext
 from tyche.planning import ResearchPlan, make_plan, plan_markdown
@@ -130,6 +131,7 @@ class Pipeline:
 
     # -- S0 plan -------------------------------------------------------
     async def stage_plan(self) -> dict[str, Any]:
+        self.memory.retire_run_items(self.run_id, ["plan"])
         plan, manifest = await make_plan(
             self.svc.planner,
             topic=self.ws.state["topic"],
@@ -146,6 +148,7 @@ class Pipeline:
 
     # -- S1 survey -----------------------------------------------------
     async def stage_survey(self) -> dict[str, Any]:
+        self.memory.retire_run_items(self.run_id, ["survey", "abstract", "reviewer-requested"])
         plan = self.plan()
         surveyor = Surveyor(
             self.svc.planner,
@@ -197,17 +200,21 @@ class Pipeline:
         from tyche.experiments import read_metrics_dir
 
         plan = self.plan()
+        self.memory.retire_run_items(self.run_id, ["result"])
         variants = read_metrics_dir(self.ws.latest_path("experiment_results"))
         seed = int(self.cfg.get("analysis.seed", 0))
-        analysis = analyze(
-            variants,
-            plan_metrics=plan.metrics,
-            method_name=plan.method_name,
-            resamples=int(self.cfg.get("analysis.bootstrap_resamples", 2000)),
-            permutations=int(self.cfg.get("analysis.permutation_resamples", 5000)),
-            confidence=float(self.cfg.get("analysis.confidence", 0.95)),
-            seed=seed,
-        )
+        try:
+            analysis = analyze(
+                variants,
+                plan_metrics=plan.metrics,
+                method_name=plan.method_name,
+                resamples=int(self.cfg.get("analysis.bootstrap_resamples", 2000)),
+                permutations=int(self.cfg.get("analysis.permutation_resamples", 5000)),
+                confidence=float(self.cfg.get("analysis.confidence", 0.95)),
+                seed=seed,
+            )
+        except ValueError as exc:
+            raise StageError(f"analysis failed: {exc}") from exc
         design = self._design_text()
         # Numbers quoted verbatim from verified abstracts (evidence cards) may be restated about prior work.
         quotes = " ".join(card.get("quote", "") for card in self._manifest().get("evidence_cards", []))
@@ -218,7 +225,11 @@ class Pipeline:
         n_items = max((s.n for ms in analysis.variants.values() for s in ms.values()), default=0)
         caption = (
             "Main results. Each cell is the mean"
-            + (" with the 95\\% bootstrap confidence-interval half-width over evaluation items" if n_items else "")
+            + (
+                f" with the {analysis.confidence_percent}\\% bootstrap confidence-interval half-width over evaluation items"
+                if n_items
+                else ""
+            )
             + "; the best value per column is bold, and arrows mark whether higher or lower is better."
         )
         (out / "table_main.tex").write_text(results_table(analysis, caption=caption), encoding="utf-8")
@@ -266,7 +277,11 @@ class Pipeline:
             }
             for p in manifest.get("papers", [])
         ]
-        labels = {"tab:main": "main results table (all variants, all metrics)", "fig:results": "bar chart of the main results with 95% CIs"}
+        conf = f"{float(self.ws.load_json('analysis').get('confidence', 0.95)) * 100:g}"
+        labels = {
+            "tab:main": "main results table (all variants, all metrics)",
+            "fig:results": f"bar chart of the main results with {conf}% confidence intervals",
+        }
         paired = self.ws.latest_path("table_paired").read_text(encoding="utf-8") if self.ws.latest("table_paired") else ""
         if paired.strip():
             labels["tab:paired"] = "paired comparisons of the proposed method against each baseline"
@@ -281,7 +296,29 @@ class Pipeline:
         )
         return ctx, manifest
 
-    def _composer(self, ctx: WritingContext) -> PaperComposer:
+    def _statement_meta(self) -> dict[str, Any]:
+        """Facts for the generated statements, read from what this run actually did."""
+        models = set(self.svc.model_names)
+        usage = self.ws.run_dir / "usage.jsonl"
+        if usage.exists():
+            for line in usage.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    model = json.loads(line).get("model")
+                    if model:
+                        models.add(model)
+        return {
+            "models": sorted(models),
+            "experiment_engine": self.ws.meta("experiment_engine", "openjiuwen"),
+            "analysis_seed": self.ws.meta("analysis_seed"),
+            "sources": list(self.cfg.get("literature.sources") or ["arxiv", "semantic_scholar", "openalex"]),
+        }
+
+    def _composer(self, ctx: WritingContext, stage: str) -> PaperComposer:
+        """Build a composer whose bibliography and context manifests belong to ``stage`` alone.
+
+        The bibliography is copied fresh from the survey's ``refs_bib`` on every call, so a rerun
+        never reuses a stale file or duplicates reviewer-admitted entries.
+        """
         paper_cfg = dict(self.cfg.get("paper") or {})
         contracts = dict(paper_cfg.get("sections") or {})
         writer = SectionWriter(
@@ -291,7 +328,7 @@ class Pipeline:
             budget=int(self.cfg.get("memory.context_budgets.section", 9000)),
             evidence_limit=int(self.cfg.get("memory.evidence_per_section", 12)),
             lessons_limit=int(self.cfg.get("memory.lessons_per_section", 5)),
-            manifest_dir=self.ws.stage_dir("write") / "context_manifests",
+            manifest_dir=self.ws.stage_dir(stage) / "context_manifests",
         )
         figure = self.ws.latest_path("fig_results") if self.ws.latest("fig_results") else None
         floats = self.ws.latest_path("table_main").read_text(encoding="utf-8")
@@ -299,23 +336,20 @@ class Pipeline:
             floats += (
                 "\n\\begin{figure}[t]\n\\centering\n\\includegraphics[width=\\linewidth]{figures/"
                 + figure.name
-                + "}\n\\caption{Mean performance of each variant with 95\\% bootstrap confidence intervals; the "
+                + "}\n\\caption{Mean performance of each variant with "
+                + f"{float(self.ws.load_json('analysis').get('confidence', 0.95)) * 100:g}"
+                + "\\% bootstrap confidence intervals; the "
                 "proposed method is shown in red.}\n\\label{fig:results}\n\\end{figure}\n"
             )
         if "tab:paired" in ctx.labels:
             floats += "\n" + self.ws.latest_path("table_paired").read_text(encoding="utf-8")
-        meta = {
-            "models": self.svc.model_names,
-            "experiment_engine": self.ws.meta("experiment_engine", "openjiuwen"),
-            "analysis_seed": self.ws.meta("analysis_seed"),
-        }
-        bib = self.ws.stage_dir("write") / "refs.bib"
-        if not bib.exists():
-            shutil.copy2(self.ws.latest_path("refs_bib"), bib)
+        meta = self._statement_meta()
+        bib = self.ws.stage_dir(stage) / "refs.bib"
+        shutil.copy2(self.ws.latest_path("refs_bib"), bib)
         figures = [figure] if figure is not None else []
         if figure is not None:
             # write_build copies figures by file name; keep the canonical name.
-            named = self.ws.stage_dir("write") / "fig_results.pdf"
+            named = self.ws.stage_dir(stage) / "fig_results.pdf"
             shutil.copy2(figure, named)
             figures = [named]
             floats = floats.replace(f"figures/{figure.name}", "figures/fig_results.pdf")
@@ -342,8 +376,9 @@ class Pipeline:
 
     # -- S4 write --------------------------------------------------------
     async def stage_write(self) -> dict[str, Any]:
+        shutil.rmtree(self.ws.stage_dir("write") / "context_manifests", ignore_errors=True)
         ctx, _ = self._writing_context()
-        composer = self._composer(ctx)
+        composer = self._composer(ctx, "write")
         await composer.draft()
         inputs = [self.ws.latest(n).id for n in ("plan", "refs_bib", "results_brief", "numbers") if self.ws.latest(n)]
         self.ws.save_json(
@@ -356,8 +391,9 @@ class Pipeline:
 
     # -- S5 review -------------------------------------------------------
     async def stage_review(self) -> dict[str, Any]:
+        shutil.rmtree(self.ws.stage_dir("review") / "context_manifests", ignore_errors=True)
         ctx, manifest = self._writing_context()
-        composer = self._composer(ctx)
+        composer = self._composer(ctx, "review")
         draft = self.ws.load_json("draft")
         composer.load(draft["title"], draft["sections"])
         composer.removed = {k: list(v) for k, v in (draft.get("removed_citations") or {}).items()}
@@ -403,16 +439,26 @@ class Pipeline:
         self.ws.save_json("paper", {"title": result.best_title, "sections": result.best_sections}, stage="review", inputs=inputs)
         self.ws.save_json("ledger", ledger.to_dict(), stage="review", inputs=inputs)
         self.ws.save_json("review_rounds", result.rounds, stage="review", inputs=inputs)
-        self.ws.save_json("gates", best.gates.to_dict(), stage="review", inputs=inputs)
+        gates_rec = self.ws.save_json("gates", best.gates.to_dict(), stage="review", inputs=inputs)
+        pdf_rec = None
+        source_rec = None
         if best.compile.ok and best.pdf is not None:
-            self.ws.save_file("paper_pdf", best.pdf, stage="review", inputs=inputs)
+            pdf_rec = self.ws.save_file("paper_pdf", best.pdf, stage="review", inputs=inputs)
             src = self.ws.stage_dir("review") / "best_source"
             if src.exists():
                 shutil.rmtree(src)
             shutil.copytree(
                 best.build_dir, src, ignore=shutil.ignore_patterns("*.aux", "*.log", "*.fls", "*.fdb_latexmk", "*.blg", "*.out")
             )
-            self.ws.save_tree("paper_source", src, stage="review", inputs=inputs)
+            source_rec = self.ws.save_tree("paper_source", src, stage="review", inputs=inputs)
+        # Package uses exactly these versions, never a PDF left over from an earlier review run.
+        self.ws.set_meta(
+            review_outputs={
+                "gates": gates_rec.id,
+                "paper_pdf": pdf_rec.id if pdf_rec else None,
+                "paper_source": source_rec.id if source_rec else None,
+            }
+        )
         if result.best_review is not None:
             self.ws.save_json("review_scores", result.best_review.to_dict(), stage="review", inputs=inputs)
         injected = self._injected_lesson_ids()
@@ -484,8 +530,11 @@ class Pipeline:
         composer.bib_path.write_text(bib_text, encoding="utf-8")
 
     def _injected_lesson_ids(self) -> set[str]:
+        """Lessons that were in a writer's context during this run's write and review stages."""
         ids: set[str] = set()
-        for manifest in (self.ws.stage_dir("write") / "context_manifests").glob("*.json"):
+        manifests = list((self.ws.stage_dir("write") / "context_manifests").glob("*.json"))
+        manifests += list((self.ws.stage_dir("review") / "context_manifests").glob("*.json"))
+        for manifest in manifests:
             data = json.loads(manifest.read_text(encoding="utf-8"))
             for row in data.get("included", []):
                 if row.get("name") == "lessons":
@@ -519,10 +568,17 @@ class Pipeline:
 
     # -- S7 package ------------------------------------------------------
     async def stage_package(self) -> dict[str, Any]:
-        gates = self.ws.load_json("gates")
-        if self.ws.latest("paper_pdf") is None:
-            raise StageError("no compiled paper to package")
-        if not gates.get("passed") and not self.allow_gate_failures:
+        outputs = self.ws.meta("review_outputs") or {}
+        gates_rec = self.ws.record(outputs.get("gates") or "")
+        pdf_rec = self.ws.record(outputs.get("paper_pdf") or "")
+        source_rec = self.ws.record(outputs.get("paper_source") or "")
+        if gates_rec is None:
+            raise StageError("no gate results from the review stage; run review first")
+        if pdf_rec is None or source_rec is None:
+            raise StageError("the latest review run produced no compiled paper; nothing to package")
+        gates = json.loads((self.ws.run_dir / gates_rec.path).read_text(encoding="utf-8"))
+        verified = bool(gates.get("passed"))
+        if not verified and not self.allow_gate_failures:
             blockers = [f for f in gates.get("findings", []) if f["severity"] == "blocker"]
             raise StageError(
                 f"{len(blockers)} gate blocker(s) remain; refusing to package an unverified paper. First: "
@@ -533,17 +589,37 @@ class Pipeline:
         if out.exists():
             shutil.rmtree(out)
         out.mkdir(parents=True)
-        pdf = out / "paper.pdf"
-        shutil.copy2(self.ws.latest_path("paper_pdf"), pdf)
-        shutil.copytree(self.ws.latest_path("paper_source"), out / "paper_source")
+        source = out / "paper_source"
+        shutil.copytree(self.ws.run_dir / source_rec.path, source)
+        if verified:
+            pdf = out / "paper.pdf"
+            shutil.copy2(self.ws.run_dir / pdf_rec.path, pdf)
+        else:
+            # The released PDF must say it is unverified: regenerate the AI use statement and recompile.
+            statement = ai_use_statement(
+                self._statement_meta(), str(self.cfg.get("paper.human_review_statement", "")), verified=False
+            )
+            (source / "sections" / "ai_statement.tex").write_text(statement, encoding="utf-8")
+            result = compile_pdf(source / "main.tex", timeout=int(self.cfg.get("paper.latex_timeout", 180)))
+            if not result.ok or result.pdf is None:
+                raise StageError("could not recompile the UNVERIFIED paper: " + "; ".join(e.message for e in result.errors[:2]))
+            pdf = out / "paper_UNVERIFIED.pdf"
+            shutil.copy2(result.pdf, pdf)
+            for leftover in source.glob("main.*"):
+                if leftover.suffix != ".tex":
+                    leftover.unlink()
         shutil.copy2(self.ws.latest_path("ledger"), out / "review_ledger.json")
-        shutil.copy2(self.ws.latest_path("gates"), out / "gates.json")
+        shutil.copy2(self.ws.run_dir / gates_rec.path, out / "gates.json")
+        self._copy_run_record(out / "run_record")
         drift = self.ws.verify_provenance()
         provenance = {
             "tyche_version": __version__,
             "run_id": self.run_id,
             "created_at": utcnow(),
-            "config_digest": self.ws.state.get("config_digest"),
+            "config_digest_at_creation": self.ws.state.get("config_digest"),
+            "config_digest": self.cfg.digest(),
+            "verified": verified,
+            "released_from": {"paper_pdf": pdf_rec.id, "paper_source": source_rec.id, "gates": gates_rec.id},
             "artifacts": [r.__dict__ for r in self.ws.records()],
             "drifted_artifacts": drift,
             "paper_pdf_sha256": sha256_file(pdf),
@@ -551,7 +627,25 @@ class Pipeline:
         write_json_atomic(out / "provenance.json", provenance)
         report = self._run_report(gates)
         (out / "run_report.md").write_text(report, encoding="utf-8")
-        return {"pdf": str(pdf), "verified": bool(gates.get("passed")), "drifted": len(drift)}
+        return {"pdf": str(pdf), "verified": verified, "drifted": len(drift)}
+
+    def _copy_run_record(self, target: Path) -> None:
+        """The run record promised by the reproducibility statement: every artifact version plus
+        the plan/write/review context manifests, review rounds, events, usage, state, and config."""
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(self.ws.run_dir / "artifacts", target / "artifacts")
+        for stage in ("plan", "write", "review"):
+            stage_dir = self.ws.run_dir / stage
+            manifests = stage_dir / "context_manifests"
+            if manifests.is_dir():
+                shutil.copytree(manifests, target / stage / "context_manifests")
+            for extra in list(stage_dir.glob("*.json")):
+                (target / stage).mkdir(parents=True, exist_ok=True)
+                shutil.copy2(extra, target / stage / extra.name)
+        for name in ("state.json", "events.jsonl", "usage.jsonl", "provenance.jsonl", "config.json"):
+            path = self.ws.run_dir / name
+            if path.exists():
+                shutil.copy2(path, target / name)
 
     def _run_report(self, gates: dict[str, Any]) -> str:
         state = self.ws.state

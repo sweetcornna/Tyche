@@ -78,3 +78,111 @@ async def test_panel_aggregates_seven_dimensions():
     }
     assert len(result.findings) == 3 and all(f["quote_verified"] for f in result.findings)
     assert [c[0] for c in llm.calls].count("review:auditor") == 1
+
+
+def test_distinct_gate_findings_stay_separate_and_are_not_reflagged():
+    ledger = FindingsLedger(reflag_cap=1)
+    gate = gate_findings_as_review([
+        {"gate": "number", "severity": "blocker", "section": "analysis", "message": f"number {n} does not match any "
+         "computed result or setup value", "evidence": f"ctx {n}"} for n in ("0.83", "0.91", "12.5")
+    ])
+    for round_no in range(4):  # the gate keeps reporting the same three problems
+        ledger.sync_gate_findings(gate, round_no)
+    open_ids = [e.id for e in ledger.open()]
+    assert len(open_ids) == 3
+    assert all(e.reflags == 0 and e.status == "open" for e in ledger.entries)
+
+
+def test_gate_sections_map_from_file_paths_and_page_limit_gets_shortening_fix():
+    [compile_err, page] = gate_findings_as_review([
+        {"gate": "compile", "severity": "blocker", "section": "sections/related_work.tex", "message": "LaTeX error"},
+        {"gate": "structure", "severity": "blocker", "section": "main", "message": "main text is 7 pages; the limit is 5"},
+    ])
+    assert compile_err["section"] == "related_work"
+    assert page["section"] == "general" and page["fix"].startswith("Shorten")
+
+
+class _FakeWriter:
+    async def revise(self, name, ctx, previous, current, findings):
+        from tyche.paper.sanitize import SanitizeReport
+        from tyche.paper.writer import SectionDraft
+
+        return SectionDraft(name, current + " revised", SanitizeReport(), 3,
+                            responses=[{"id": f["id"], "action": "fixed", "note": "done"} for f in findings])
+
+
+class _FakeComposer:
+    def __init__(self, builds):
+        self.sections = {"analysis": "draft 0.83"}
+        self.removed = {"analysis": []}
+        self.title = "t"
+        self.ctx = None
+        self.writer = _FakeWriter()
+        self._builds = iter(builds)
+
+    async def build(self, build_dir):
+        return next(self._builds)
+
+
+def _build(compiled, blockers):
+    from pathlib import Path
+
+    from tyche.gates import GateFinding, GateReport
+    from tyche.paper.compose import BuildResult
+    from tyche.paper.latex import CompileResult
+
+    findings = [GateFinding("number", "blocker", "analysis", f"number {n} does not match", f"ctx {n}") for n in blockers]
+    if not compiled:
+        findings.append(GateFinding("compile", "blocker", "sections/analysis.tex", "LaTeX error: Missing $", "line 3"))
+    return BuildResult(Path("."), CompileResult(compiled, Path("p.pdf") if compiled else None, [], [], [], 0, 1),
+                       GateReport(findings), 1, "The gains concentrate on questions whose answer changed.")
+
+
+def _round(composite, findings=(), rulings=()):
+    from tyche.review.panel import PanelRound
+
+    return PanelRound({}, {}, composite, composite, list(findings), list(rulings))
+
+
+async def test_rejected_revision_rolls_back_text_and_ledger(tmp_path):
+    from tyche.review import RevisionLoop
+
+    reviewer_finding = dict(section="analysis", severity="major", dimension="claims_supported", source="rigor",
+                            quote="gains concentrate on questions", problem="Overclaims.", fix="Narrow.",
+                            close_criterion="Narrowed.")
+    reviews = iter([
+        _round(6.0, [reviewer_finding]),
+        _round(4.0, rulings=[{"id": "F002", "status": "resolved", "reviewer": "rigor"}]),  # worse: must be rejected
+    ])
+
+    async def review_fn(build, prior):
+        return next(reviews)
+
+    composer = _FakeComposer([_build(True, ["0.83"]), _build(True, [])])
+    ledger = FindingsLedger()
+    loop = RevisionLoop(composer, ledger, review_fn, out_dir=tmp_path, max_rounds=1, target=9.0, tolerance=0.15,
+                        plateau_rounds=3, max_findings=8)
+    result = await loop.run()
+    assert result.rounds[1]["accepted"] is False
+    assert composer.sections == {"analysis": "draft 0.83"}
+    statuses = {e.id: e.status for e in ledger.entries}
+    assert statuses == {"G001": "open", "F002": "open"}  # neither the gate fix nor the ruling survives rejection
+    assert all(e.response == "" for e in ledger.entries)
+    assert all(e.revision_accepted is False for e in ledger.entries)
+
+
+async def test_compiling_candidate_beats_a_non_compiling_draft(tmp_path):
+    from tyche.review import RevisionLoop
+
+    async def review_fn(build, prior):
+        return _round(5.0)
+
+    # Round 0 does not compile (one compile blocker); the revision compiles but the now-visible
+    # number gate reports two blockers. The compiling draft must still win.
+    composer = _FakeComposer([_build(False, []), _build(True, ["1.5", "2.5"])])
+    ledger = FindingsLedger()
+    loop = RevisionLoop(composer, ledger, review_fn, out_dir=tmp_path, max_rounds=1, target=9.0, tolerance=0.15,
+                        plateau_rounds=3, max_findings=8)
+    result = await loop.run()
+    assert result.rounds[1]["accepted"] is True and result.best.compile.ok
+    assert [e.section for e in ledger.entries if e.source == "gate:compile"] == ["analysis"]

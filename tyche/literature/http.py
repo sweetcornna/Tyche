@@ -14,7 +14,7 @@ import hashlib
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlencode, urlsplit
 
 import httpx
@@ -54,6 +54,12 @@ class ResponseCache:
         if row and (time.time() - row[1]) <= self.ttl:
             return row[0]
         return None
+
+    def delete(self, url: str) -> None:
+        if self._conn is None:
+            return
+        with self._conn:
+            self._conn.execute("DELETE FROM responses WHERE key=?", (self.key(url),))
 
     def put(self, url: str, body: str) -> None:
         if self._conn is None:
@@ -104,12 +110,24 @@ class HttpClient:
                 await asyncio.sleep(wait)
             self._last[host] = time.monotonic()
 
-    async def get_text(self, url: str, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> str:
+    async def get_text(
+        self,
+        url: str,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        validate: Callable[[str], None] | None = None,
+    ) -> str:
+        """GET a URL. ``validate`` must raise ValueError for an unusable body; such bodies are never cached."""
         full = url + ("?" + urlencode(params, doseq=True) if params else "")
         cached = self.cache.get(full)
         if cached is not None:
-            self.cache_hits += 1
-            return cached
+            try:
+                if validate is not None:
+                    validate(cached)
+                self.cache_hits += 1
+                return cached
+            except ValueError:
+                self.cache.delete(full)
         host = urlsplit(full).hostname or ""
         delay = 1.5
         last_detail = ""
@@ -125,6 +143,8 @@ class HttpClient:
                 status = response.status_code
                 if status == 200:
                     body = response.text
+                    if validate is not None:
+                        validate(body)  # ValueError propagates: a malformed 200 is not retried or cached
                     self.cache.put(full, body)
                     return body
                 if status == 404:

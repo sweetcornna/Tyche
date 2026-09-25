@@ -44,3 +44,38 @@ def test_brief_tables_and_formatting(results_dir):
     assert fmt(2351.2) == "2,351" and fmt(2351.2, latex=True) == "2{,}351"
     assert p_phrase(0.0001) == "p < 0.001" and p_phrase(0.2) == "p = 0.200"
     assert lower_is_better("prompt_tokens_per_query") and not lower_is_better("accuracy")
+
+
+def test_metric_direction_uses_whole_tokens():
+    assert not lower_is_better("token_f1") and not lower_is_better("sentiment_accuracy")
+    assert not lower_is_better("tool_calls_success_rate")
+    assert lower_is_better("stale_fact_rate") and lower_is_better("recovery_episodes")
+
+
+def test_proposed_variant_selection_is_explicit():
+    import pytest
+
+    from tyche.analysis.stats import pick_proposed
+
+    assert pick_proposed(["cot", "ours_full", "react"], "Self-Verifying CoT") == "ours_full"
+    assert pick_proposed(["rag", "ledgermem"], "LedgerMem") == "ledgermem"
+    with pytest.raises(ValueError, match="proposed"):
+        pick_proposed(["cot", "react"], "Something New")
+
+
+def test_repeated_trials_are_averaged_per_item_before_pairing():
+    def variant(values):
+        items = [{"id": f"q{i // 2}", "correct": v} for i, v in enumerate(values)]
+        return {"accuracy": sum(values) / len(values), "per_question": items}
+
+    variants = {"proposed": variant([1, 1, 1, 0]), "base": variant([0, 1, 0, 0])}
+    analysis = analyze(variants, plan_metrics=["accuracy"], seed=0)
+    [comp] = analysis.comparisons
+    assert comp.n == 2 and abs(comp.diff - 0.5) < 1e-9
+
+
+def test_confidence_level_flows_into_brief_and_tables(results_dir):
+    analysis = analyze(read_metrics_dir(results_dir), plan_metrics=["accuracy"], confidence=0.8, seed=1)
+    assert "80% CI" in results_brief(analysis) and "95% CI" not in results_brief(analysis)
+    assert "80\\% CI" in comparison_table(analysis)
+    assert build_registry(analysis).match("80") is not None

@@ -113,12 +113,14 @@ class ImportedEngine:
 
     name = "imported"
 
-    def __init__(self, results_dir: Path, *, synthetic: bool = False, label: str = "imported"):
-        self.results_dir = Path(results_dir)
+    def __init__(self, results_dir: Path | None, *, synthetic: bool = False, label: str = "imported"):
+        self.results_dir = Path(results_dir) if results_dir else None
         self.synthetic = synthetic
         self.name = label
 
     async def run(self, plan: ResearchPlan, *, summary_path: Path, work_dir: Path, run_id: str) -> ExperimentOutcome:
+        if self.results_dir is None:
+            return ExperimentOutcome("failed", self.name, {}, notes="no results directory configured; pass --results-dir")
         if not self.results_dir.is_dir():
             return ExperimentOutcome("failed", self.name, {}, notes=f"results directory {self.results_dir} not found")
         target = work_dir / "results"
@@ -237,7 +239,10 @@ class OpenJiuwenEngine:
             experiment_design=ExperimentDesignAgent(config, model=self.model, project_root_path=root),
             reflection=ReflectionAgent(config, model=self.model),
         )
-        manager_run_id = f"tyche-{run_id}"
+        # A fresh manager run per attempt: a rerun must never mix in metrics or reflections
+        # from an earlier attempt's variants.
+        attempt = 1 + sum(1 for _ in (root / "experiments").glob(f"tyche-{run_id}-a*")) if (root / "experiments").is_dir() else 1
+        manager_run_id = f"tyche-{run_id}-a{attempt}"
         with model_environment(self.spec):
             arw.set_project_root(root)
             terminal = await runtime.arun(
@@ -251,6 +256,13 @@ class OpenJiuwenEngine:
             )
         results = arw.results_dir(manager_run_id)
         variants = read_metrics_dir(results) if results.is_dir() else {}
+        current = _latest_execution_variants(manager_run_id)
+        if current is not None:
+            # results/ can still hold metrics of variants dropped by a later design revision.
+            stale = sorted(set(variants) - current)
+            variants = {name: data for name, data in variants.items() if name in current}
+        else:
+            stale = []
         design = arw.experiment_design_path(manager_run_id)
         code = arw.generated_code_dir(manager_run_id)
         reflections = sorted(arw.reflection_dir(manager_run_id).glob("revision-*.md"))
@@ -263,6 +275,18 @@ class OpenJiuwenEngine:
             design_path=design if design.exists() else None,
             code_dir=code if code.is_dir() else None,
             reflections=reflections,
-            notes=f"manager terminal status={getattr(terminal, 'status', '?')} "
-            f"reason={getattr(terminal, 'failure_reason', '') or getattr(terminal, 'abort_reason', '')}",
+            notes=f"manager run {manager_run_id}: terminal status={getattr(terminal, 'status', '?')} "
+            f"reason={getattr(terminal, 'failure_reason', '') or getattr(terminal, 'abort_reason', '')}"
+            + (f"; ignored stale variants: {', '.join(stale)}" if stale else ""),
         )
+
+
+def _latest_execution_variants(manager_run_id: str) -> set[str] | None:
+    """Variant names that completed in the manager's latest execution, or None if unknown."""
+    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.artifacts import try_load_state
+
+    state = try_load_state(manager_run_id)
+    execution = getattr(state, "latest_execution", None) if state is not None else None
+    if execution is None:
+        return None
+    return {v.name for v in execution.variants if getattr(v, "process_status", "") == "completed"}

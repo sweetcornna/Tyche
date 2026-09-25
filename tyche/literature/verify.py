@@ -71,7 +71,7 @@ class Verifier:
                 try:
                     for rec in await self.arxiv.by_ids(need_arxiv[start : start + 20]):
                         arxiv_records[rec.arxiv_id] = rec
-                except HttpError:
+                except (HttpError, ValueError):
                     pass
         for paper in papers:
             key = paper.identity_keys()[0]
@@ -95,11 +95,12 @@ class Verifier:
             if paper.doi and not paper.doi.startswith("10.48550/") and self.crossref is not None and not contradicted:
                 try:
                     rec = await self.crossref.by_doi(paper.doi)
-                except HttpError:
+                except (HttpError, ValueError):
                     rec = None
                     check.notes.append("Crossref cross-check unavailable")
                 if rec is not None:
-                    if title_similarity(rec.title, paper.title) >= TITLE_MATCH:
+                    main_title = rec.title.split(": ")[0]
+                    if max(title_similarity(rec.title, paper.title), title_similarity(main_title, paper.title)) >= TITLE_MATCH:
                         check.verified_by.append("crossref")
                         if not paper.venue and rec.venue:
                             paper.venue = rec.venue
@@ -117,12 +118,12 @@ class Verifier:
         if self.s2 is not None:
             try:
                 candidates += await self.s2.search(title, 5)
-            except HttpError:
+            except (HttpError, ValueError):
                 pass
         if self.arxiv is not None and not candidates:
             try:
                 candidates += await self.arxiv.search(title, 5)
-            except HttpError:
+            except (HttpError, ValueError):
                 pass
         best = max(candidates, key=lambda p: title_similarity(p.title, title), default=None)
         if best is not None and title_similarity(best.title, title) >= TITLE_MATCH:

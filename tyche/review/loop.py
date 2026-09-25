@@ -99,8 +99,14 @@ class RevisionLoop:
         for entry in self.ledger.open():
             section = entry.section
             if section == "general":
-                # Paper-level critiques are handled where the framing lives.
-                section = "introduction" if entry.dimension in ("importance", "originality", "contextualization") else "analysis"
+                if entry.source == "gate:structure" and "page" in entry.problem and "limit" in entry.problem:
+                    # Over the page limit: shorten the longest body section.
+                    body = [n for n in self.composer.sections if n not in ("abstract", "conclusion")]
+                    section = max(body, key=lambda n: len(self.composer.sections[n].split()), default="analysis")
+                else:
+                    # Paper-level critiques are handled where the framing lives.
+                    framing = ("importance", "originality", "contextualization")
+                    section = "introduction" if entry.dimension in framing else "analysis"
             if section not in self.composer.sections:
                 continue
             chosen.setdefault(section, []).append(entry)
@@ -141,7 +147,12 @@ class RevisionLoop:
             if not selected:
                 self.log("review.stop", reason="no open findings")
                 break
+            # Everything a rejected revision could have changed is restored on rejection:
+            # section text, removed-citation records, and the ledger (writer responses,
+            # reviewer rulings, and gate findings recorded while judging the candidate).
             snapshot = dict(self.composer.sections)
+            removed_snapshot = {k: list(v) for k, v in self.composer.removed.items()}
+            ledger_snapshot = self.ledger.snapshot()
             touched_ids: list[str] = []
             for section, entries in selected.items():
                 draft = await self.composer.writer.revise(
@@ -157,7 +168,11 @@ class RevisionLoop:
                 self.ledger.record_responses(draft.responses, round_no)
                 touched_ids += [e.id for e in entries]
             candidate = await self.composer.build(self.out_dir / f"build_r{round_no}")
-            accepted = candidate.compile.ok and len(candidate.gates.blockers) <= len(current.gates.blockers)
+            if candidate.compile.ok and not current.compile.ok:
+                # A compiling draft always beats one that does not; blocker counts are not comparable.
+                accepted = True
+            else:
+                accepted = candidate.compile.ok and len(candidate.gates.blockers) <= len(current.gates.blockers)
             cand_review = None
             if accepted:
                 cand_review = await self._review(candidate, round_no)
@@ -166,6 +181,9 @@ class RevisionLoop:
             delta = None
             if review is not None and cand_review is not None:
                 delta = round(cand_review.composite - review.composite, 3)
+            if not accepted:
+                self.ledger.restore(ledger_snapshot)
+                self.composer.removed = removed_snapshot
             self.ledger.mark_revision(touched_ids, accepted=accepted, score_delta=delta, round_no=round_no)
             if accepted:
                 improved = delta is None or delta > 0.05 or len(candidate.gates.blockers) < len(current.gates.blockers)
