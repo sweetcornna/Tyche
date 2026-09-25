@@ -146,6 +146,7 @@ jiuwenswarm-acp = "jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect:
 jiuwenswarm-acp-chat = "jiuwenswarm.acp.cli:main"
 jiuwenbox = "jiuwenbox.cli.jiuwenbox:main"
 jiuwenbox-server = "jiuwenbox.server.launcher:main"
+tyche = "tyche.cli:main"
 
 [tool.setuptools]
 # 入口脚本现在是 jiuwenswarm 包内的一部分，不需要 py-modules
@@ -156,7 +157,7 @@ package-dir = {"jiuwenbox" = "jiuwenbox/src/jiuwenbox"}
 
 [tool.setuptools.packages.find]
 where = [".", "jiuwenbox/src"]
-include = ["jiuwenswarm*", "jiuwenbox*"]
+include = ["jiuwenswarm*", "jiuwenbox*", "tyche*"]
 exclude = ["jiuwenswarm.web*"]
 namespaces = false
 
@@ -181,6 +182,13 @@ jiuwenswarm = [
 jiuwenbox = [
     "configs/**/*",
     "configs/*",
+]
+tyche = [
+    "configs/*.yaml",
+    "configs/directions/*.yaml",
+    "prompts/*.md",
+    "paper/template/*",
+    "fixtures/experiment_results/*",
 ]
 
 [tool.setuptools.exclude-package-data]
