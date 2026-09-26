@@ -57,7 +57,7 @@ def test_gate_findings_open_and_close_automatically():
 
 async def test_panel_aggregates_seven_dimensions():
     def reviewer(system, user):
-        score = 7 if "empirical rigor" in system else 5
+        score = 7 if "empirical rigor" in user else 5
         return json.dumps({
             "scores": {d: score for d in ("originality", "importance", "claims_supported", "experimental_soundness",
                                           "clarity", "community_value", "contextualization")},
@@ -78,6 +78,12 @@ async def test_panel_aggregates_seven_dimensions():
     }
     assert len(result.findings) == 3 and all(f["quote_verified"] for f in result.findings)
     assert [c[0] for c in llm.calls].count("review:auditor") == 1
+    # Prompt-cache friendliness: the three personas share one system prompt (paper included),
+    # and only the short user message with the lens differs.
+    persona_calls = [c for c in llm.calls if c[0].startswith("review:") and c[0] != "review:auditor"]
+    assert len({system for _, system, _ in persona_calls}) == 1
+    assert "The gains concentrate" in persona_calls[0][1]
+    assert len({user for _, _, user in persona_calls}) == 3
 
 
 def test_distinct_gate_findings_stay_separate_and_are_not_reflagged():

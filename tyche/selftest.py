@@ -220,8 +220,9 @@ def handlers() -> dict[str, Any]:
         )
 
     def write(system: str, user: str) -> str:
+        # Shared context (citations, results brief) is in the system prompt; the contract is in the user message.
         name = json.loads(_block(user, "section_contract"))["section"]
-        return _latex(_section(name, user))
+        return _latex(_section(name, system + "\n" + user))
 
     def title(system: str, user: str) -> str:
         return "Selftest Fixture: Provenance-Tagged Memory Ledgers for LLM Agents"
@@ -238,13 +239,14 @@ def handlers() -> dict[str, Any]:
 
     def review(system: str, user: str) -> str:
         state["reviews"] += 1
-        prior = _json_block(user, "prior_findings") or []
+        # The paper and prior findings are in the shared system prompt; the persona lens is in the user message.
+        prior = _json_block(system, "prior_findings") or []
         bump = 1 if prior else 0
         scores = {d: 5 + bump for d in (
             "originality", "importance", "claims_supported", "experimental_soundness", "clarity",
             "community_value", "contextualization")}
         findings = []
-        if not prior and "empirical rigor" in system:
+        if not prior and "empirical rigor" in user:
             findings.append(
                 {
                     "section": "analysis",

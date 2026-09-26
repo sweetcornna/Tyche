@@ -197,10 +197,12 @@ class ReviewPanel:
         for persona in self.reviewers:
             for sample in range(self.samples):
                 name = persona if self.samples == 1 else f"{persona}#{sample + 1}"
+                # Paper and context sit in the system prompt, identical for every persona, so the
+                # providers' prompt caches serve them after the first reviewer; only the lens varies.
                 out = await complete_json(
                     self.llm,
-                    system=load_prompt("review_system").replace("{persona}", PERSONAS[persona]),
-                    user=base_user,
+                    system=load_prompt("review_system") + "\n\n" + base_user,
+                    user="<reviewer_lens>\n" + PERSONAS[persona] + "\n</reviewer_lens>\nReview the paper through this lens.",
                     schema=ReviewOutput,
                     purpose=f"review:{persona}",
                 )

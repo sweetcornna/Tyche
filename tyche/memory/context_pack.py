@@ -51,8 +51,11 @@ class ContextPack:
         return ids
 
 
-def _wrap(block: Block) -> str:
+def wrap_block(block: Block) -> str:
     return f"<{block.name}>\n{block.text.strip()}\n</{block.name}>"
+
+
+_wrap = wrap_block
 
 
 def pack(blocks: Iterable[Block], budget: int) -> ContextPack:

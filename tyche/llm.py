@@ -38,6 +38,9 @@ class LLMReply:
     output_tokens: int = 0
     model: str = ""
     latency_s: float = 0.0
+    # Input tokens the provider served from its prompt cache (DeepSeek prompt_cache_hit_tokens,
+    # OpenAI cached_tokens, Anthropic cache_read_input_tokens; openjiuwen normalizes them).
+    cached_tokens: int = 0
 
 
 @dataclass
@@ -48,6 +51,7 @@ class UsageRecord:
     input_tokens: int
     output_tokens: int
     latency_s: float
+    cached_tokens: int = 0
 
 
 @dataclass
@@ -66,22 +70,34 @@ class UsageMeter:
                 input_tokens=reply.input_tokens,
                 output_tokens=reply.output_tokens,
                 latency_s=round(reply.latency_s, 3),
+                cached_tokens=reply.cached_tokens,
             )
         )
 
     def summary(self) -> dict[str, Any]:
-        by_stage: dict[str, dict[str, int]] = {}
+        by_stage: dict[str, dict[str, Any]] = {}
         for rec in self.records:
-            row = by_stage.setdefault(rec.stage or "unscoped", {"calls": 0, "input_tokens": 0, "output_tokens": 0})
+            row = by_stage.setdefault(
+                rec.stage or "unscoped", {"calls": 0, "input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
+            )
             row["calls"] += 1
             row["input_tokens"] += rec.input_tokens
+            row["cached_input_tokens"] += rec.cached_tokens
             row["output_tokens"] += rec.output_tokens
+        for row in by_stage.values():
+            row["cache_hit_rate"] = _rate(row["cached_input_tokens"], row["input_tokens"])
         total = {
             "calls": len(self.records),
             "input_tokens": sum(r.input_tokens for r in self.records),
+            "cached_input_tokens": sum(r.cached_tokens for r in self.records),
             "output_tokens": sum(r.output_tokens for r in self.records),
         }
+        total["cache_hit_rate"] = _rate(total["cached_input_tokens"], total["input_tokens"])
         return {"total": total, "by_stage": by_stage}
+
+
+def _rate(part: int, whole: int) -> float:
+    return round(part / whole, 3) if whole else 0.0
 
 
 class LLMClient(Protocol):
@@ -153,6 +169,7 @@ class OpenJiuwenLLM:
             output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
             model=self.spec.model_name,
             latency_s=time.monotonic() - started,
+            cached_tokens=int(getattr(usage, "cache_read_tokens", 0) or 0),
         )
         if self.meter is not None:
             self.meter.add(purpose, reply)
@@ -254,16 +271,22 @@ async def complete_json(
     temperature: float | None = None,
     max_tokens: int | None = None,
 ) -> T:
-    """Ask for a JSON answer matching ``schema``; re-ask with the error on failure."""
-    instruction = (
-        "\n\nReturn only one JSON value that validates against this JSON schema, "
-        "with no commentary:\n" + schema_hint(schema)
+    """Ask for a JSON answer matching ``schema``; re-ask with the error on failure.
+
+    The schema instruction ends the system prompt rather than following the user text, so
+    every call for one purpose shares the same system+schema prefix (prompt-cache friendly);
+    a retry keeps that prefix and the original user text and appends only the rejection.
+    """
+    system_json = (
+        system
+        + "\n\nReturn only one JSON value that validates against this JSON schema, with no commentary:\n"
+        + schema_hint(schema)
     )
-    prompt = user + instruction
+    prompt = user
     last_error = ""
     for attempt in range(retries + 1):
         reply = await llm.complete(
-            system=system,
+            system=system_json,
             user=prompt,
             purpose=purpose if attempt == 0 else f"{purpose}:retry",
             temperature=temperature,
@@ -275,7 +298,6 @@ async def complete_json(
             last_error = str(exc)[:1500]
             prompt = (
                 user
-                + instruction
                 + "\n\nYour previous answer was rejected by the validator:\n"
                 + last_error
                 + "\nFix it and return only the corrected JSON."
