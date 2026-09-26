@@ -19,6 +19,13 @@ models:
     # Extra JSON body fields sent with every request of this role, e.g.
     # {thinking: {type: disabled}} to switch DeepSeek reasoning off.
     extra_body: {}
+    # Prompt-cache adapter (tyche/cache.py). "auto" picks a profile from the
+    # provider, the api_base host, and the model; name a profile (deepseek,
+    # openai, dashscope, explicit, automatic, ...) to force one, or "off".
+    cache: auto
+    # Optional retention hint for providers that take one (OpenAI
+    # prompt_cache_retention, e.g. 24h on models that support it). Empty sends none.
+    cache_retention: ""
   planner: {}
   writer: {}
   # A different model for reviewing reduces self-agreement bias. Leave empty

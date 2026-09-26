@@ -727,6 +727,13 @@ class Pipeline:
         for stage, row in state.get("stages", {}).items():
             lines.append(f"- {stage}: {row.get('status')}")
         lines += ["", "## Model usage", "", f"- Total: {usage['total']}"]
+        profiles = {
+            role: getattr(getattr(self.svc, role), "profile", None) for role in ("planner", "writer", "reviewer")
+        }
+        lines.append(
+            "- Prompt-cache profiles: "
+            + ", ".join(f"{role}={p.name} ({p.mechanism})" for role, p in profiles.items() if p is not None)
+        )
         for stage, row in usage["by_stage"].items():
             lines.append(f"- {stage}: {row}")
         if gates.get("findings"):

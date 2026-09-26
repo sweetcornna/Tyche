@@ -370,6 +370,7 @@ async def run_selftest(
         gates = json.loads((package / "gates.json").read_text(encoding="utf-8"))
         provenance = json.loads((package / "provenance.json").read_text(encoding="utf-8"))
         rounds = json.loads(ws.latest_path("review_rounds").read_text(encoding="utf-8"))
+        usage = pipeline.usage_summary()
         summary = {
             "pdf": str(package / "paper.pdf"),
             "gates_passed": gates["passed"],
@@ -378,6 +379,11 @@ async def run_selftest(
             "review_rounds": [(r["round"], r["accepted"], r["composite"]) for r in rounds],
             "drifted_artifacts": provenance["drifted_artifacts"],
             "lessons": [i.meta.get("status") for i in memory.list(kinds=["lesson"], scopes=["global"])],
+            # Provider-independent prompt-cache check of the request shape (tyche/cache.py).
+            "prefix_reuse_rate": {
+                stage: row["prefix_reuse_rate"] for stage, row in (usage["by_stage"] | {"total": usage["total"]}).items()
+            },
+            "cache_breaks": usage["total"]["cache_breaks"],
         }
         memory.close()
         if keep is not None:
@@ -390,6 +396,7 @@ async def run_selftest(
             and (package / "paper.pdf").exists()
             and not summary["drifted_artifacts"]
             and summary["main_pages"] >= 1
+            and summary["cache_breaks"] == 0
         )
         summary["ok"] = bool(ok)
         return summary

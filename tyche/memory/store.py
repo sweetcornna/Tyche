@@ -15,10 +15,10 @@ index ranked by BM25. Each item records:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -132,7 +132,7 @@ class MemoryStore:
             raise ValueError(f"unknown scope {scope!r}")
         if scope == "run" and not run_id:
             raise ValueError("run-scoped memory needs a run_id")
-        new_id = item_id or f"{kind[:3]}-{uuid.uuid4().hex[:10]}"
+        new_id = item_id or self._content_id(kind, scope, run_id, title, source_ref, body)
         tag_list = sorted({t for t in tags if t})
         with self._conn:
             self._conn.execute(
@@ -157,6 +157,18 @@ class MemoryStore:
                 (new_id, title, body, " ".join(tag_list)),
             )
         return new_id
+
+    def _content_id(self, *fields: str | None) -> str:
+        """An id derived from the item's content, so identical inputs give identical prompts
+        (memory blocks show ids) and prompt caches can match across processes. A counter keeps
+        repeated identical items distinct."""
+        blob = "\x1f".join(f or "" for f in fields)
+        for n in range(10_000):
+            digest = hashlib.sha256(f"{blob}\x1e{n}".encode("utf-8")).hexdigest()[:10]
+            candidate = f"{(fields[0] or '')[:3]}-{digest}"
+            if self._conn.execute("SELECT 1 FROM items WHERE id = ?", (candidate,)).fetchone() is None:
+                return candidate
+        raise RuntimeError("could not allocate a memory item id")
 
     def supersede(self, old_id: str, body: str, **fields: Any) -> str:
         """Record a correction: the old item stays, linked to its replacement."""

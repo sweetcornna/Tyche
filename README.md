@@ -111,12 +111,29 @@ tyche run --resume --run-id <run-id>
 2. **共享内容在前、单次内容在后**：跨调用不变的上下文放在 system（或对话最前面），每次调用才变的内容放在最后一个回合。
 3. **同一对话/前缀组内请求参数恒定**：同一角色的模型、`max_tokens`、`extra_body`（thinking 等）固定，不为个别调用改参数。
 
-| 服务商 | 缓存机制 | 效果 |
-|---|---|---|
-| DeepSeek | 自动前缀缓存（64 token 粒度，参数也是缓存键） | 对话历史与共享前缀直接命中 |
-| OpenAI 及兼容接口（Qwen/DashScope、GLM、Moonshot 等） | 自动前缀缓存（通常 ≥1024 token） | 同上 |
-| Anthropic（原生接口） | 显式 `cache_control` 断点 | openjiuwen 客户端给 system 块和最后一条消息打断点，下一次请求在上一断点处命中 |
-| OpenRouter | 显式 `cache_control` | openjiuwen 默认开启 `openrouter_enable_explicit_prompt_caching` |
+以上三条对所有服务商通用（请求形状由 Tyche 自己控制）。服务商之间的差异由 `tyche/cache.py` 的缓存适配层处理：它根据 `provider`、`api_base` 主机名和（OpenRouter 下的）模型厂商前缀自动识别缓存档案（profile），为需要的服务商加显式断点或路由提示；也可用 `models.<role>.cache` 强制指定档案或设为 `off`。
+
+| 档案 | 识别方式 | 缓存机制 | Tyche 的适配 |
+|---|---|---|---|
+| `deepseek` | `api.deepseek.com` 或 provider `DeepSeek` | 自动前缀缓存，用量字段 `prompt_cache_hit_tokens` | 只保证请求形状 |
+| `openai` | `api.openai.com` | 自动，≥1024 token，按 128 token 递增计 | 按共享 system 前缀发送 `prompt_cache_key`（同前缀路由到同一缓存）；可选 `cache_retention: 24h` → `prompt_cache_retention` |
+| `azure_openai` | `*.openai.azure.com` | 自动，≥1024 token | 只保证请求形状 |
+| `anthropic` | provider `Anthropic` | 显式断点 | openjiuwen 原生客户端给 system、工具与最后一条消息打断点，Tyche 不重复打 |
+| `openrouter_client` | provider `OpenRouter` | Anthropic/Qwen 模型显式，其余自动 | openjiuwen 打断点 |
+| `openrouter_explicit` | `openrouter.ai` + `anthropic/`、`qwen/` 模型 | 显式断点 | Tyche 打断点（见下） |
+| `openrouter` | `openrouter.ai` + 其他模型 | 上游自动缓存，OpenRouter 粘性路由 | 只保证请求形状 |
+| `dashscope` | `dashscope(-intl).aliyuncs.com` 或 provider `DashScope` | 显式缓存（命中 10%、创建 125%，每块 ≥1024 token）与隐式缓存（命中 20%，不保证）二选一 | Tyche 打断点，使用确定命中的显式缓存 |
+| `gemini` | `generativelanguage.googleapis.com` | 隐式缓存（Gemini 2.5+，≥2048–4096 token） | 只保证请求形状 |
+| `xai` | `api.x.ai` | 自动 | 发送 `x-grok-conv-id` 请求头，把同一前缀路由到同一台服务器 |
+| `moonshot`、`zhipu`、`minimax` | 各自官方域名或 provider 名 | 自动 | 只保证请求形状 |
+| `affinity` | provider `AscendAffinity` / `InferenceAffinity` | KV 亲和网关 | 传 `session_id`，由 openjiuwen 生成 `agent_hint` |
+| `self_hosted` | `localhost` / `127.0.0.1` | vLLM/SGLang 自动前缀缓存（需服务端开启） | 只保证请求形状 |
+| `openai_compatible` | 其他网关 | 未知 | 只保证请求形状并测量；网关后面是 Claude/Qwen 时可设 `cache: explicit` |
+
+- **显式断点位置**：system 末尾（同一用途的所有调用共享）、上一次请求的最后一个用户回合（本次请求正好读取上次写入的缓存，不受 20 块回溯窗口限制）、以及对话会继续时本次请求的最后一个用户回合（供下一回合读取）。前缀不足服务商最小长度的断点不打；一次性调用只打 system 断点，避免为不会再读的内容付 125% 的写入费。回复（assistant）保持纯字符串。
+- **失败回退**：服务商若以 400/422 拒绝某个缓存提示（`cache_control`、`prompt_cache_key` 等），该次调用去掉提示重发一次，之后该角色不再发送提示（包括写在模型配置里的按角色路由键）。超时、限流和 5xx 不触发回退。
+- **不依赖服务商的自检**：`PrefixLedger` 按模型路由（端点、模型、温度、`max_tokens`、`extra_body`）记录已发送过的消息前缀，每次调用估算"本可命中"的 token（`prefix_reuse_rate`，按服务商最小长度和粒度折算），并检测对话回合是否改写了已发送的历史（`cache_breaks`，应为 0）。它对不返回缓存用量的服务商同样有效。离线 `tyche selftest` 要求 `cache_breaks == 0`，并输出各阶段的前缀复用率（当前：写作 0.847、评审 0.782、综述 0.371、总计 0.765）。
+- **命中率不是目标**：综述阶段每批候选论文本来就各不相同，只读一次；为了提高命中率把批次拼进一个越来越长的对话，反而会增加总输入。优化目标是未命中 token 数，而不是比率。
 
 具体落实：
 
@@ -125,7 +142,7 @@ tyche run --resume --run-id <run-id>
 - **结构化输出**：JSON schema 放在 system 末尾；重试只在用户回合末尾追加校验错误。
 - **文献筛选/证据卡片**：研究计划与每篇卡片数放在 system 中，逐批候选放在 user 中。
 - **实验**：openjiuwen 实验智能体本身是多轮只追加对话（实测命中率约 97%）；生成的实验代码被约束为"固定指令与共享上下文在前、逐题内容在后"，并记录服务商返回的缓存命中 token。
-- **计量**：每次调用记录缓存命中 token（openjiuwen 统一了 DeepSeek `prompt_cache_hit_tokens`、OpenAI `cached_tokens`、Anthropic `cache_read_input_tokens`），`run_report.md` 按阶段给出 `cached_input_tokens`、`uncached_input_tokens` 与 `cache_hit_rate`。
+- **计量**：每次调用记录缓存命中与写入 token（openjiuwen 统一了 DeepSeek `prompt_cache_hit_tokens`、OpenAI/DashScope `cached_tokens`、Anthropic `cache_read_input_tokens`/`cache_creation_input_tokens`），`run_report.md` 按阶段给出 `cached_input_tokens`、`cache_write_tokens`、`uncached_input_tokens`、`cache_hit_rate`（= 命中 /（命中 + 未命中 + 写入），写入计入分母）、`calls_without_cache_report`（服务商没有返回缓存用量的调用数，这类调用的 0 命中没有意义）、`prefix_reuse_rate` 与 `cache_breaks`，并列出各角色使用的缓存档案。`tyche doctor` 也会打印每个角色识别到的档案。
 
 ### 在 JiuwenSwarm 中使用
 

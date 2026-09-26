@@ -227,8 +227,10 @@ async def _cmd_doctor(args: argparse.Namespace) -> int:
         spec = config.model(role)
         has_key = bool(spec.api_key())
         problems += 0 if has_key else 1
+        profile = spec.cache_profile()
         print(f"model[{role}]: {spec.model_name} via {spec.api_base} ({spec.provider}); "
-              f"{spec.api_key_env} {'set' if has_key else 'NOT SET'}")
+              f"{spec.api_key_env} {'set' if has_key else 'NOT SET'}; "
+              f"prompt cache: {profile.name} ({profile.mechanism}) - {profile.note}")
     probes = {
         "arXiv": "https://export.arxiv.org/api/query?search_query=all:agent&max_results=1",
         "Semantic Scholar": "https://api.semanticscholar.org/graph/v1/paper/search?query=agent&limit=1",
