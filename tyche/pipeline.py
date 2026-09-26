@@ -424,6 +424,11 @@ class Pipeline:
             stage="write",
             inputs=inputs,
         )
+        # The review stage resumes this author conversation, so its revisions extend a prefix
+        # the provider has already cached instead of starting a new one.
+        state = composer.writer.export_state()
+        if state is not None:
+            self.ws.save_json("author_conversation", state, stage="write", inputs=inputs)
         return {"title": composer.title, "words": sum(len(s.split()) for s in composer.sections.values())}
 
     # -- S5 review -------------------------------------------------------
@@ -434,6 +439,9 @@ class Pipeline:
         draft = self.ws.load_json("draft")
         composer.load(draft["title"], draft["sections"])
         composer.removed = {k: list(v) for k, v in (draft.get("removed_citations") or {}).items()}
+        if self.ws.latest("author_conversation") is not None:
+            resumed = composer.writer.import_state(self.ws.load_json("author_conversation"), ctx)
+            self.log("review.author_conversation", resumed=resumed)
         review_cfg = dict(self.cfg.get("review") or {})
         panel = ReviewPanel(
             self.svc.reviewer,

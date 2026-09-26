@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from tyche.llm import LLMClient, extract_latex
+from tyche.llm import Conversation, LLMClient, extract_latex
 from tyche.memory import Block, MemoryStore, memory_block, pack, wrap_block
 from tyche.paper.sanitize import SanitizeReport, sanitize_section
 from tyche.planning import ResearchPlan
@@ -139,6 +139,7 @@ class SectionWriter:
         evidence_limit: int,
         lessons_limit: int,
         manifest_dir: Path,
+        max_history_tokens: int = 200_000,
     ):
         self.llm = llm
         self.memory = memory
@@ -147,7 +148,15 @@ class SectionWriter:
         self.evidence_limit = evidence_limit
         self.lessons_limit = lessons_limit
         self.manifest_dir = manifest_dir
+        self.max_history_tokens = max_history_tokens
         self._calls = 0
+        # One append-only author conversation per writer (per stage): every call extends the
+        # previous request, so the provider prefix cache serves all earlier turns.
+        self.conversation: Conversation | None = None
+        # What the conversation shows as each section's latest text, and which sections'
+        # contract and lessons it already holds; both are rolled back with the history.
+        self._latest: dict[str, str] = {}
+        self._introduced: set[str] = set()
 
     def contract(self, name: str, ctx: WritingContext) -> dict[str, Any]:
         guide = SECTION_GUIDANCE[name]
@@ -165,6 +174,8 @@ class SectionWriter:
             "results": "results_brief",
             "design": "experiment_design",
             "reflection": "experiment_reflection",
+            "survey": "survey_synthesis",
+            "evidence": "evidence",
         }
         context = [shared[u] for u in uses if u in shared]
         if name not in ("abstract", "conclusion"):
@@ -189,47 +200,37 @@ class SectionWriter:
         findings: list[dict[str, Any]] | None,
         current: str | None,
     ) -> list[Block]:
-        uses = SECTION_GUIDANCE[name]["uses"]
-        # Plan, citations, labels, results, design, and reflection are in the shared system
-        # context (see shared_context); only section-specific blocks go into the user message.
-        blocks = [Block("section_contract", json.dumps(self.contract(name, ctx), ensure_ascii=False, indent=1), required=True)]
-        if "survey" in uses:
-            survey = {
-                "gap": ctx.synthesis.get("gap"),
-                "themes": ctx.synthesis.get("themes"),
-                "open_problems": ctx.synthesis.get("open_problems"),
-            }
-            blocks.append(Block("survey_synthesis", json.dumps(survey, ensure_ascii=False, indent=1), priority=15))
-        if "evidence" in uses:
-            query = " ".join([ctx.plan.working_title, ctx.plan.problem, ctx.plan.method_sketch, *ctx.plan.keywords])
+        """Section-specific blocks for one call; shared context lives in the system prompt.
+
+        Within the conversation, a section's contract and lessons are sent once, other
+        sections are summarised only if the history does not already hold their latest text,
+        and the current section is sent only if the history does not hold it verbatim.
+        Blocks come in a stable order (per-section static first, per-call variable last).
+        """
+        blocks: list[Block] = []
+        if name not in self._introduced:
+            blocks.append(
+                Block("section_contract", json.dumps(self.contract(name, ctx), ensure_ascii=False, indent=1), required=True)
+            )
             blocks.append(
                 memory_block(
                     self.memory,
-                    "evidence",
-                    query,
-                    kinds=["evidence"],
+                    "lessons",
+                    f"{name} {ctx.plan.working_title}",
+                    kinds=["lesson"],
                     run_id=ctx.run_id,
-                    limit=self.evidence_limit,
-                    priority=20,
+                    limit=self.lessons_limit,
+                    priority=25,
+                    scopes=["global", "project"],
+                    extra_filter=lambda item: item.meta.get("status") == "active",
                 )
             )
-        blocks.append(
-            memory_block(
-                self.memory,
-                "lessons",
-                f"{name} {ctx.plan.working_title}",
-                kinds=["lesson"],
-                run_id=ctx.run_id,
-                limit=self.lessons_limit,
-                priority=25,
-                scopes=["global", "project"],
-                extra_filter=lambda item: item.meta.get("status") == "active",
-            )
-        )
-        if "digests" in uses and previous:
-            text = "\n".join(f"[{sec}] {digest(body)}" for sec, body in previous.items() if sec != name)
-            blocks.append(Block("previous_sections", text, priority=30))
-        if current is not None:
+        if "digests" in SECTION_GUIDANCE[name]["uses"] and previous:
+            stale = {sec: body for sec, body in previous.items() if sec != name and self._latest.get(sec) != body}
+            if stale:
+                text = "\n".join(f"[{sec}] {digest(body)}" for sec, body in stale.items())
+                blocks.append(Block("other_sections_now", text, priority=30))
+        if current is not None and self._latest.get(name) != current:
             blocks.append(Block("current_section", current, required=True))
         if findings:
             blocks.append(Block("findings_to_address", json.dumps(findings, ensure_ascii=False, indent=1), required=True))
@@ -240,11 +241,10 @@ class SectionWriter:
         write_json_atomic(self.manifest_dir / f"{self._calls:03d}_{purpose}_{name}.json", manifest)
 
     def shared_context(self, ctx: WritingContext) -> list[Block]:
-        """Context identical for every section and every write/revise/shorten/repair call of a run.
+        """Context identical for every section and every call of a run, sent once as the system prompt.
 
-        It is appended to the system prompt so that the whole prefix is byte-identical across
-        calls: providers with automatic prefix caching (DeepSeek, OpenAI-compatible) and those
-        that cache marked system blocks (Anthropic, OpenRouter via openjiuwen) serve it from cache.
+        Evidence retrieval uses a plan-level query (deterministic BM25 over this run's cards),
+        so it is the same for every section and belongs here rather than in each turn.
         """
         blocks = [
             Block("research_plan", ctx.plan.model_dump_json(indent=1)),
@@ -256,7 +256,67 @@ class SectionWriter:
             blocks.append(Block("experiment_design", ctx.design_excerpt))
         if ctx.reflection_excerpt:
             blocks.append(Block("experiment_reflection", ctx.reflection_excerpt))
+        survey = {k: ctx.synthesis.get(k) for k in ("gap", "themes", "open_problems")}
+        blocks.append(Block("survey_synthesis", json.dumps(survey, ensure_ascii=False, indent=1)))
+        query = " ".join([ctx.plan.working_title, ctx.plan.problem, ctx.plan.method_sketch, *ctx.plan.keywords])
+        blocks.append(
+            memory_block(self.memory, "evidence", query, kinds=["evidence"], run_id=ctx.run_id, limit=self.evidence_limit)
+        )
         return blocks
+
+    def _conversation_for(self, ctx: WritingContext) -> tuple[Conversation, list[Block]]:
+        shared = self.shared_context(ctx)
+        system = load_prompt("section_system") + "\n\n" + "\n\n".join(wrap_block(b) for b in shared)
+        conv = self.conversation
+        # A changed shared context (e.g. a citation admitted during review) or an overlong
+        # history starts a new conversation; otherwise every call extends the current one.
+        if conv is None or conv.system != system or conv.tokens() > self.max_history_tokens:
+            conv = self.conversation = Conversation(system)
+            self._latest = {}
+            self._introduced = set()
+        return conv, shared
+
+    def export_state(self) -> dict[str, Any] | None:
+        """The author conversation, for the next stage to resume (as DSH resumes sessions)."""
+        if self.conversation is None:
+            return None
+        return {
+            "system": self.conversation.system,
+            "turns": list(self.conversation.turns),
+            "latest": dict(self._latest),
+            "introduced": sorted(self._introduced),
+        }
+
+    def import_state(self, state: dict[str, Any] | None, ctx: WritingContext) -> bool:
+        """Resume a saved author conversation if its shared context is still current.
+
+        The resumed history is byte-identical to the requests already sent, so the provider
+        serves it from cache; a changed context (the system prompt differs) starts afresh.
+        """
+        if not state:
+            return False
+        conv, _ = self._conversation_for(ctx)
+        if state.get("system") != conv.system:
+            return False
+        conv.turns = [dict(turn) for turn in state.get("turns") or []]
+        self._latest = dict(state.get("latest") or {})
+        self._introduced = set(state.get("introduced") or [])
+        return True
+
+    def checkpoint(self) -> tuple[int, dict[str, str], set[str], Conversation | None]:
+        conv = self.conversation
+        return (conv.checkpoint() if conv else 0, dict(self._latest), set(self._introduced), conv)
+
+    def rollback(self, state: tuple[int, dict[str, str], set[str], Conversation | None]) -> None:
+        """Undo the calls since ``checkpoint`` (a rejected revision): truncate, never edit."""
+        mark, latest, introduced, conv = state
+        if conv is not None and conv is self.conversation:
+            conv.rollback(mark)
+            self._latest, self._introduced = latest, introduced
+        elif conv is not None:
+            # The conversation was replaced after the checkpoint; resume the earlier one.
+            conv.rollback(mark)
+            self.conversation, self._latest, self._introduced = conv, latest, introduced
 
     async def _call(
         self,
@@ -267,19 +327,15 @@ class SectionWriter:
         allowed_keys: set[str],
         instruction: str,
     ) -> SectionDraft:
-        shared = self.shared_context(ctx)
+        conv, shared = self._conversation_for(ctx)
         context = pack(blocks, self.budget)
         manifest = context.manifest()
-        manifest["shared_system_context"] = [
-            {"name": b.name, "tokens": count_tokens(wrap_block(b))} for b in shared
-        ]
+        manifest["shared_system_context"] = [{"name": b.name, "tokens": count_tokens(wrap_block(b))} for b in shared]
+        manifest["history_turns"] = len(conv.turns)
         self._save_manifest(name, purpose, manifest)
-        self.memory.touch(context.item_ids)
-        reply = await self.llm.complete(
-            system=load_prompt("section_system") + "\n\n" + "\n\n".join(wrap_block(b) for b in shared),
-            user=context.text + "\n\n" + instruction,
-            purpose=f"{purpose}:{name}",
-        )
+        self.memory.touch(context.item_ids + [i for b in shared for i in b.item_ids])
+        user = (context.text + "\n\n" + instruction).strip()
+        reply = await conv.ask(self.llm, user, purpose=f"{purpose}:{name}")
         body, report = sanitize_section(extract_latex(reply.text), allowed_keys)
         responses: list[dict[str, Any]] = []
         match = _RESPONSES.search(reply.text)
@@ -289,7 +345,20 @@ class SectionWriter:
                 responses = [r for r in parsed if isinstance(r, dict)] if isinstance(parsed, list) else []
             except json.JSONDecodeError:
                 responses = []
+        if body.strip():
+            # Record the text actually kept, so later turns can refer to it instead of resending it.
+            record = f"<latex>\n{body.strip()}\n</latex>"
+            if match:
+                record += f"\n<responses>{match.group(1)}</responses>"
+            conv.set_last_reply(record)
+            self._latest[name] = body
+        self._introduced.add(name)
         return SectionDraft(name=name, latex=body, report=report, words=word_count(body), responses=responses)
+
+    def _current_note(self, name: str, current: str) -> str:
+        if self._latest.get(name) == current:
+            return f" The current text of the {name.replace('_', ' ')} section is your latest version of it above."
+        return ""
 
     async def write(self, name: str, ctx: WritingContext, previous: dict[str, str]) -> SectionDraft:
         allowed = {c["key"] for c in ctx.citations} if name not in ("abstract", "conclusion") else set()
@@ -304,47 +373,42 @@ class SectionWriter:
         instruction = (
             f"Revise the {name.replace('_', ' ')} section to address every finding in <findings_to_address>. "
             "Change only what the findings require; keep correct content, citations, and numbers intact, and do "
-            "not over-correct. Return the full revised section."
+            "not over-correct. Return the full revised section." + self._current_note(name, current)
         )
         return await self._call(name, "revise", ctx, blocks, allowed, instruction)
 
     async def shorten(self, name: str, ctx: WritingContext, current: str, target_words: int) -> SectionDraft:
         allowed = {c["key"] for c in ctx.citations} if name not in ("abstract", "conclusion") else set()
-        blocks = [
-            Block("section_contract", json.dumps(self.contract(name, ctx), ensure_ascii=False), required=True),
-            Block("current_section", current, required=True),
-        ]
+        blocks = self._blocks(name, ctx, {}, None, current)
         instruction = (
-            f"The paper exceeds its page limit. Shorten this section to at most {target_words} words. Remove "
-            "repetition and secondary detail first; keep every citation that supports a claim, every reported "
-            "number that remains, and all \\ref labels."
+            f"The paper exceeds its page limit. Shorten the {name.replace('_', ' ')} section to at most "
+            f"{target_words} words. Remove repetition and secondary detail first; keep every citation that "
+            "supports a claim, every reported number that remains, and all \\ref labels. Return the full "
+            "shortened section." + self._current_note(name, current)
         )
         return await self._call(name, "shorten", ctx, blocks, allowed, instruction)
 
     async def repair(self, name: str, ctx: WritingContext, current: str, error: str) -> SectionDraft:
         allowed = {c["key"] for c in ctx.citations} if name not in ("abstract", "conclusion") else set()
-        blocks = [
-            Block("section_contract", json.dumps(self.contract(name, ctx), ensure_ascii=False), required=True),
-            Block("latex_error", truncate_tokens(error, 600), required=True),
-            Block("current_section", current, required=True),
-        ]
+        blocks = self._blocks(name, ctx, {}, None, current)
+        blocks.append(Block("latex_error", truncate_tokens(error, 600), required=True))
         instruction = (
-            "This section fails to compile with the error in <latex_error>. Fix only the LaTeX problem; do not "
-            "change the wording or content otherwise. Return the full corrected section."
+            f"The {name.replace('_', ' ')} section fails to compile with the error in <latex_error>. Fix only the "
+            "LaTeX problem; do not change the wording or content otherwise. Return the full corrected section."
+            + self._current_note(name, current)
         )
         return await self._call(name, "repair", ctx, blocks, allowed, instruction)
 
     async def title(self, ctx: WritingContext, abstract: str) -> str:
-        reply = await self.llm.complete(
-            system=(
-                "You title ICLR short papers. Return only the title on one line: specific, at most 14 words, "
-                "naming the mechanism and the finding, no colon-separated clickbait, no quotes."
-            ),
-            user="<research_plan>\n" + ctx.plan.model_dump_json(indent=1) + "\n</research_plan>\n<abstract>\n"
-            + abstract
-            + "\n</abstract>",
+        conv, _ = self._conversation_for(ctx)
+        abstract_block = "" if self._latest.get("abstract") == abstract else f"<abstract>\n{abstract}\n</abstract>\n"
+        reply = await conv.ask(
+            self.llm,
+            abstract_block
+            + "Now title the paper. Return only the title on one line: specific, at most 14 words, naming the "
+            "mechanism and the finding, no colon-separated clickbait, no quotes, no LaTeX.",
             purpose="write:title",
         )
-        title = reply.text.strip().splitlines()[0].strip().strip('"').strip()
+        title = reply.text.strip().splitlines()[0].strip().strip('"').strip() if reply.text.strip() else ""
         title = re.sub(r"[\\{}$^_#&%~]", "", title)
         return title[:180] or ctx.plan.working_title

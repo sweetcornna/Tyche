@@ -105,23 +105,27 @@ tyche run --resume --run-id <run-id>
 
 ### 提示缓存（各模型服务商的缓存命中）
 
-Tyche 的提示布局遵循一条规则：**跨调用不变的内容放在最前面（system 消息），每次调用才变的内容放在最后（user 消息）**，并保证不变部分逐字节相同。这样：
+参照 DeepSeek Harness（dsh）的做法：服务商的前缀缓存要求**逐字节相同的前缀**，且 DeepSeek 把请求参数（`max_tokens`、推理强度、thinking 开关等）也算进缓存键——同一前缀换了参数也会整段未命中。Tyche 因此遵循三条规则：
 
-| 服务商 | 缓存机制 | Tyche 的做法 |
+1. **只追加的多轮对话**：同一角色的连续工作放进一个 `Conversation`，每次请求 = 上一次请求 + 上一次回复 + 一个新回合；从不改写历史。被拒绝的修订通过截断历史回滚（截断后仍是先前请求的前缀）。
+2. **共享内容在前、单次内容在后**：跨调用不变的上下文放在 system（或对话最前面），每次调用才变的内容放在最后一个回合。
+3. **同一对话/前缀组内请求参数恒定**：同一角色的模型、`max_tokens`、`extra_body`（thinking 等）固定，不为个别调用改参数。
+
+| 服务商 | 缓存机制 | 效果 |
 |---|---|---|
-| DeepSeek | 自动前缀缓存（磁盘上下文缓存，按请求前缀命中） | 共享前缀逐字节一致即可命中，无需额外参数 |
+| DeepSeek | 自动前缀缓存（64 token 粒度，参数也是缓存键） | 对话历史与共享前缀直接命中 |
 | OpenAI 及兼容接口（Qwen/DashScope、GLM、Moonshot 等） | 自动前缀缓存（通常 ≥1024 token） | 同上 |
-| Anthropic（原生接口） | 显式 `cache_control` 断点 | openjiuwen 客户端自动给 system 块、工具和最后一条稳定消息打断点；共享上下文放在 system 中即被缓存 |
-| OpenRouter | 显式 `cache_control`（支持的上游模型） | openjiuwen 默认开启 `openrouter_enable_explicit_prompt_caching`，标记首条（system）与末条消息 |
+| Anthropic（原生接口） | 显式 `cache_control` 断点 | openjiuwen 客户端给 system 块和最后一条消息打断点，下一次请求在上一断点处命中 |
+| OpenRouter | 显式 `cache_control` | openjiuwen 默认开启 `openrouter_enable_explicit_prompt_caching` |
 
 具体落实：
 
-- **写作**：研究计划、可引用文献、结果简报、实验设计与实验反思对所有章节相同，放在 system 中；user 中只放章节合同、检索到的证据、前文摘要与待处理的评审意见。整轮写作与所有修订/缩写/修复调用共享一个缓存前缀。
-- **评审**：论文全文、未引用的相关工作与既往意见放在 system 中，三位评审只在 user 中给出各自视角。
-- **结构化输出**：JSON schema 说明放在 system 末尾，同一用途的所有调用（如各批文献筛选）共享前缀；重试只在 user 末尾追加校验错误。
+- **写作（作者对话）**：每个阶段一个只追加的作者对话。system = 写作规则 + 研究计划、可引用文献、结果简报、实验设计、实验反思、综述综合与证据（全文共享）；各章节依次作为新回合写入，后续的修订、缩写、编译修复、起标题都接在同一对话后面。章节的合同与经验只在第一次出现时发送；对话里已有某章节最新文本时不再重发 `current_section`，其他章节只有在当前文本与对话中不同时才附摘要。评审轮被拒绝时，作者对话截断回滚。
+- **评审团**：论文全文、未引用相关工作、既往意见构成整个评审团共用的前缀（system）；三位评审与保真审计员逐字节共享它，各自的角色说明、视角与运行记录放在最后。
+- **结构化输出**：JSON schema 放在 system 末尾；重试只在用户回合末尾追加校验错误。
 - **文献筛选/证据卡片**：研究计划与每篇卡片数放在 system 中，逐批候选放在 user 中。
-- **实验**：openjiuwen 的实验智能体由其多轮上下文管理自动命中缓存；生成的实验代码被约束为“固定指令与共享上下文在前、逐题内容在后”。
-- **计量**：每次调用记录服务商返回的缓存命中 token（openjiuwen 统一了 DeepSeek `prompt_cache_hit_tokens`、OpenAI `cached_tokens`、Anthropic `cache_read_input_tokens`），`run_report.md` 按阶段给出 `cached_input_tokens` 与 `cache_hit_rate`。
+- **实验**：openjiuwen 实验智能体本身是多轮只追加对话（实测命中率约 97%）；生成的实验代码被约束为"固定指令与共享上下文在前、逐题内容在后"，并记录服务商返回的缓存命中 token。
+- **计量**：每次调用记录缓存命中 token（openjiuwen 统一了 DeepSeek `prompt_cache_hit_tokens`、OpenAI `cached_tokens`、Anthropic `cache_read_input_tokens`），`run_report.md` 按阶段给出 `cached_input_tokens`、`uncached_input_tokens` 与 `cache_hit_rate`。
 
 ### 在 JiuwenSwarm 中使用
 

@@ -154,6 +154,10 @@ class RevisionLoop:
             snapshot = dict(self.composer.sections)
             removed_snapshot = {k: list(v) for k, v in self.composer.removed.items()}
             ledger_snapshot = self.ledger.snapshot()
+            # The author conversation is append-only; a rejected round truncates it back so
+            # later turns never build on discarded text (and stay a cached prefix).
+            writer = self.composer.writer
+            writer_state = writer.checkpoint() if hasattr(writer, "checkpoint") else None
             touched_ids: list[str] = []
             for section, entries in selected.items():
                 draft = await self.composer.writer.revise(
@@ -189,6 +193,8 @@ class RevisionLoop:
             if not accepted:
                 self.ledger.restore(ledger_snapshot)
                 self.composer.removed = removed_snapshot
+                if writer_state is not None:
+                    writer.rollback(writer_state)
             self.ledger.mark_revision(touched_ids, accepted=accepted, score_delta=delta, round_no=round_no)
             if accepted:
                 improved = delta is None or delta > 0.05 or len(candidate.gates.blockers) < len(current.gates.blockers)

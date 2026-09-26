@@ -170,14 +170,25 @@ class Surveyor:
         self.log = log or (lambda *args, **kwargs: None)
         self.errors: list[str] = []
 
+    @staticmethod
+    def _shared(plan: ResearchPlan) -> str:
+        """System prefix shared by every survey call (queries, screening, cards, synthesis).
+
+        Each step's instructions and data follow in the user turn, so the preamble and plan are
+        one byte-identical prefix that providers' prompt caches serve after the first call.
+        """
+        return (
+            load_prompt("survey_common") + "\n\n<research_plan>\n" + plan.model_dump_json(indent=1) + "\n</research_plan>"
+        )
+
     async def _queries(self, plan: ResearchPlan, direction: dict[str, Any]) -> list[str]:
         user = (
-            "<research_plan>\n" + plan.model_dump_json(indent=1) + "\n</research_plan>\n"
-            "<seed_queries>\n" + json.dumps(direction.get("seed_queries", []), ensure_ascii=False) + "\n</seed_queries>"
+            load_prompt("survey_queries")
+            + "\n\n<seed_queries>\n"
+            + json.dumps(direction.get("seed_queries", []), ensure_ascii=False)
+            + "\n</seed_queries>"
         )
-        result = await complete_json(
-            self.llm, system=load_prompt("survey_queries"), user=user, schema=QueryPlan, purpose="survey:queries"
-        )
+        result = await complete_json(self.llm, system=self._shared(plan), user=user, schema=QueryPlan, purpose="survey:queries")
         merged: list[str] = []
         for query in [*result.queries, *plan.search_queries, *direction.get("seed_queries", [])]:
             query = sanitize_untrusted(query, 160)
@@ -216,14 +227,10 @@ class Surveyor:
         for start in range(0, len(candidates), batch):
             chunk = list(enumerate(candidates[start : start + batch], start=start))
             items = [(f"C{idx:03d}", paper) for idx, paper in chunk]
-            # The plan is identical for every batch: keep it in the (cacheable) system prefix.
             result = await complete_json(
                 self.llm,
-                system=load_prompt("survey_screen")
-                + "\n\n<research_plan>\n"
-                + plan.model_dump_json(indent=1)
-                + "\n</research_plan>",
-                user="<candidates>\n" + _candidates_block(items) + "\n</candidates>",
+                system=self._shared(plan),
+                user=load_prompt("survey_screen") + "\n\n<candidates>\n" + _candidates_block(items) + "\n</candidates>",
                 schema=ScreenResult,
                 purpose="survey:screen",
             )
@@ -252,7 +259,7 @@ class Surveyor:
             paper.queries.append("citation-graph")
         return fresh
 
-    async def _cards(self, keyed: dict[str, Paper]) -> list[dict[str, Any]]:
+    async def _cards(self, plan: ResearchPlan, keyed: dict[str, Paper]) -> list[dict[str, Any]]:
         per_paper = int(self.cfg.get("evidence_cards_per_paper", 2))
         cards: list[dict[str, Any]] = []
         entries = [(key, p) for key, p in keyed.items() if p.abstract]
@@ -260,8 +267,11 @@ class Surveyor:
             chunk = entries[start : start + 6]
             result = await complete_json(
                 self.llm,
-                system=load_prompt("survey_cards") + f"\n\n<cards_per_paper>{per_paper}</cards_per_paper>",
-                user="<papers>\n" + _candidates_block(chunk, abstract_chars=2500) + "\n</papers>",
+                system=self._shared(plan),
+                user=load_prompt("survey_cards")
+                + f"\n\n<cards_per_paper>{per_paper}</cards_per_paper>\n<papers>\n"
+                + _candidates_block(chunk, abstract_chars=2500)
+                + "\n</papers>",
                 schema=EvidenceResult,
                 purpose="survey:cards",
             )
@@ -293,13 +303,11 @@ class Surveyor:
             for key, p in keyed.items()
         ]
         user = (
-            "<research_plan>\n" + plan.model_dump_json(indent=1) + "\n</research_plan>\n"
-            "<papers>\n" + json.dumps(listing, ensure_ascii=False, indent=1) + "\n</papers>\n"
+            load_prompt("survey_synthesis")
+            + "\n\n<papers>\n" + json.dumps(listing, ensure_ascii=False, indent=1) + "\n</papers>\n"
             "<evidence_cards>\n" + json.dumps(cards, ensure_ascii=False, indent=1) + "\n</evidence_cards>"
         )
-        result = await complete_json(
-            self.llm, system=load_prompt("survey_synthesis"), user=user, schema=Synthesis, purpose="survey:synthesis"
-        )
+        result = await complete_json(self.llm, system=self._shared(plan), user=user, schema=Synthesis, purpose="survey:synthesis")
         for theme in result.themes:
             theme.paper_ids = [pid for pid in theme.paper_ids if pid in keyed]
         result.themes = [t for t in result.themes if t.paper_ids]
@@ -375,7 +383,7 @@ class Surveyor:
                 tags=["abstract", roles[key]],
                 meta={"verified_by": verification[paper.identity_keys()[0]].verified_by},
             )
-        cards = await self._cards(keyed)
+        cards = await self._cards(plan, keyed)
         synthesis = await self._synthesize(plan, keyed, roles, cards)
         stats = {
             "queries": queries,

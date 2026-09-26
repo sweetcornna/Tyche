@@ -37,6 +37,27 @@ def _block(text: str, name: str) -> str:
     return match.group(1) if match else ""
 
 
+_SECTION_IN_TURN = re.compile(r"(?:Write|Revise|Shorten|The) the ([a-z ]+?) section")
+
+
+def _current_section(user: str, history: list[dict[str, str]]) -> str:
+    """The section text a turn works on: sent in the turn, or the latest version in the conversation."""
+    sent = _block(user, "current_section")
+    if sent:
+        return sent
+    match = _SECTION_IN_TURN.search(user)
+    if not match:
+        return ""
+    name = match.group(1)
+    for i in range(len(history) - 1, 0, -1):
+        turn, before = history[i], history[i - 1]
+        if turn["role"] == "assistant" and f"the {name} section" in before["content"]:
+            found = re.search(r"<latex>\n?(.*?)\n?</latex>", turn["content"], re.S)
+            if found:
+                return found.group(1)
+    return ""
+
+
 def _json_block(text: str, name: str) -> Any:
     raw = _block(text, name)
     try:
@@ -227,15 +248,15 @@ def handlers() -> dict[str, Any]:
     def title(system: str, user: str) -> str:
         return "Selftest Fixture: Provenance-Tagged Memory Ledgers for LLM Agents"
 
-    def revise(system: str, user: str) -> str:
-        current = _block(user, "current_section")
+    def revise(system: str, user: str, history: list[dict[str, str]]) -> str:
+        current = _current_section(user, history)
         findings = _json_block(user, "findings_to_address") or []
         addition = " We state explicitly that this pattern is descriptive and was not tested separately."
         responses = [{"id": f["id"], "action": "fixed", "note": "narrowed the claim"} for f in findings]
         return _latex(current.rstrip() + addition, responses)
 
-    def passthrough(system: str, user: str) -> str:
-        return _latex(_block(user, "current_section"))
+    def passthrough(system: str, user: str, history: list[dict[str, str]]) -> str:
+        return _latex(_current_section(user, history))
 
     def review(system: str, user: str) -> str:
         state["reviews"] += 1

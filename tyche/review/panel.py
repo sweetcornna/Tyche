@@ -181,13 +181,19 @@ class ReviewPanel:
             {k: f[k] for k in ("id", "section", "severity", "problem", "fix", "close_criterion", "response") if k in f}
             for f in prior_findings
         ]
+        # Per-run context first (it is the same in every round), then the paper of this round.
         base_user = (
-            "<paper_text>\n" + paper + "\n</paper_text>\n"
             "<retrieved_related_work>\n" + json.dumps(uncited_related[:15], ensure_ascii=False, indent=1)
             + "\n</retrieved_related_work>\n"
+            "<paper_text>\n" + paper + "\n</paper_text>\n"
         )
         if prior:
             base_user += "<prior_findings>\n" + json.dumps(prior, ensure_ascii=False, indent=1) + "\n</prior_findings>\n"
+        # One prefix for the whole panel: a neutral preamble, then the paper and its review context.
+        # Every reviewer and the auditor send it byte-identically (the JSON schema and each role's
+        # instructions come after it), so a provider's prefix cache serves the paper to every call
+        # after the first; request parameters are the same for all of them (one reviewer role).
+        shared = load_prompt("review_common") + "\n\n" + base_user
         reviews: dict[str, dict[str, Any]] = {}
         findings: list[dict[str, Any]] = []
         rulings: list[dict[str, Any]] = []
@@ -197,12 +203,14 @@ class ReviewPanel:
         for persona in self.reviewers:
             for sample in range(self.samples):
                 name = persona if self.samples == 1 else f"{persona}#{sample + 1}"
-                # Paper and context sit in the system prompt, identical for every persona, so the
-                # providers' prompt caches serve them after the first reviewer; only the lens varies.
+                # Instructions precede the lens, so they are cached for every persona after the first.
                 out = await complete_json(
                     self.llm,
-                    system=load_prompt("review_system") + "\n\n" + base_user,
-                    user="<reviewer_lens>\n" + PERSONAS[persona] + "\n</reviewer_lens>\nReview the paper through this lens.",
+                    system=shared,
+                    user=load_prompt("review_system")
+                    + "\n\n<reviewer_lens>\n"
+                    + PERSONAS[persona]
+                    + "\n</reviewer_lens>\nReview the paper through this lens.",
                     schema=ReviewOutput,
                     purpose=f"review:{persona}",
                 )
@@ -216,10 +224,11 @@ class ReviewPanel:
                 rulings += [dict(r.model_dump(), reviewer=name) for r in out.prior_rulings]
         if self.auditor:
             cited = "\n".join(f"[{key}] {text}" for key, text in cited_evidence.items())
+            # The auditor reads the same cached <paper_text> as the reviewers; only its instructions
+            # and the run record (results, evidence, reflection) are new input.
             audit_user = (
-                "<paper_latex>\n"
-                + truncate_tokens("\n\n".join(f"%% {n}\n{b}" for n, b in sections.items()), int(self.budget * 0.5))
-                + "\n</paper_latex>\n<results_brief>\n"
+                load_prompt("auditor_system")
+                + "\n\n<results_brief>\n"
                 + results_brief
                 + "\n</results_brief>\n<cited_evidence>\n"
                 + truncate_tokens(cited, int(self.budget * 0.3))
@@ -228,7 +237,7 @@ class ReviewPanel:
             if experiment_reflection:
                 audit_user += "\n<experiment_reflection>\n" + experiment_reflection + "\n</experiment_reflection>"
             audit = await complete_json(
-                self.llm, system=load_prompt("auditor_system"), user=audit_user, schema=AuditOutput, purpose="review:auditor"
+                self.llm, system=shared, user=audit_user, schema=AuditOutput, purpose="review:auditor"
             )
             kept, lost = normalize_findings(audit.findings, "auditor", squashed)
             findings += kept

@@ -14,6 +14,7 @@ times, before the call fails loudly.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import re
 import time
@@ -85,6 +86,7 @@ class UsageMeter:
             row["cached_input_tokens"] += rec.cached_tokens
             row["output_tokens"] += rec.output_tokens
         for row in by_stage.values():
+            row["uncached_input_tokens"] = row["input_tokens"] - row["cached_input_tokens"]
             row["cache_hit_rate"] = _rate(row["cached_input_tokens"], row["input_tokens"])
         total = {
             "calls": len(self.records),
@@ -92,6 +94,7 @@ class UsageMeter:
             "cached_input_tokens": sum(r.cached_tokens for r in self.records),
             "output_tokens": sum(r.output_tokens for r in self.records),
         }
+        total["uncached_input_tokens"] = total["input_tokens"] - total["cached_input_tokens"]
         total["cache_hit_rate"] = _rate(total["cached_input_tokens"], total["input_tokens"])
         return {"total": total, "by_stage": by_stage}
 
@@ -111,6 +114,7 @@ class LLMClient(Protocol):
         purpose: str,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        history: list[dict[str, str]] | None = None,
     ) -> LLMReply: ...
 
 
@@ -154,10 +158,11 @@ class OpenJiuwenLLM:
         purpose: str,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        history: list[dict[str, str]] | None = None,
     ) -> LLMReply:
         started = time.monotonic()
         message = await self._model.invoke(
-            [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            [{"role": "system", "content": system}, *(history or []), {"role": "user", "content": user}],
             temperature=temperature if temperature is not None else self.spec.temperature,
             max_tokens=max_tokens or self.spec.max_tokens,
         )
@@ -176,7 +181,7 @@ class OpenJiuwenLLM:
         return reply
 
 
-Handler = Callable[[str, str], "str | Awaitable[str]"]
+Handler = Callable[..., "str | Awaitable[str]"]
 
 
 class ScriptedLLM:
@@ -191,6 +196,8 @@ class ScriptedLLM:
         self.name = name
         self.meter = meter
         self.calls: list[tuple[str, str, str]] = []
+        # Earlier turns sent with each call (empty for single-turn calls), parallel to ``calls``.
+        self.histories: list[list[dict[str, str]]] = []
 
     def _handler(self, purpose: str) -> Handler:
         if purpose in self.handlers:
@@ -210,22 +217,73 @@ class ScriptedLLM:
         purpose: str,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        history: list[dict[str, str]] | None = None,
     ) -> LLMReply:
         self.calls.append((purpose, system, user))
-        result = self._handler(purpose)(system, user)
+        self.histories.append(list(history or []))
+        handler = self._handler(purpose)
+        # Handlers take (system, user), or (system, user, history) to see earlier turns.
+        takes_history = len(inspect.signature(handler).parameters) >= 3
+        result = handler(system, user, list(history or [])) if takes_history else handler(system, user)
         if asyncio.iscoroutine(result):
             result = await result
         from tyche.textutil import count_tokens
 
         reply = LLMReply(
             text=str(result),
-            input_tokens=count_tokens(system) + count_tokens(user),
+            input_tokens=count_tokens(system) + sum(count_tokens(m["content"]) for m in history or []) + count_tokens(user),
             output_tokens=count_tokens(str(result)),
             model=self.name,
         )
         if self.meter is not None:
             self.meter.add(purpose, reply)
         return reply
+
+
+@dataclass
+class Conversation:
+    """An append-only multi-turn exchange with one model role.
+
+    Every request is the previous request plus its reply plus one new user turn, so the
+    provider's prefix cache (DeepSeek and OpenAI-compatible automatic caching; Anthropic
+    and OpenRouter through openjiuwen's cache_control on the system block and last
+    message) serves all earlier turns; only the newest turn and the last reply are
+    uncached. Earlier turns are never edited. A rejected step is undone by truncating
+    the history back to a checkpoint, which leaves a prefix of an earlier request.
+    Keep one Conversation per LLMClient role: request parameters (model, max_tokens,
+    reasoning effort) are part of the provider's cache key.
+    """
+
+    system: str
+    turns: list[dict[str, str]] = field(default_factory=list)
+
+    def checkpoint(self) -> int:
+        return len(self.turns)
+
+    def rollback(self, mark: int) -> None:
+        del self.turns[mark:]
+
+    def tokens(self) -> int:
+        from tyche.textutil import count_tokens
+
+        return count_tokens(self.system) + sum(count_tokens(t["content"]) for t in self.turns)
+
+    async def ask(self, llm: LLMClient, user: str, *, purpose: str, record: str | None = None) -> LLMReply:
+        """Send ``user`` after the history and append the exchange.
+
+        ``record`` replaces the reply text in the history (for example with the sanitized
+        section actually kept); the reply itself is never part of a cached prefix, so this
+        does not cost cache hits.
+        """
+        reply = await llm.complete(system=self.system, user=user, purpose=purpose, history=list(self.turns))
+        self.turns.append({"role": "user", "content": user})
+        self.turns.append({"role": "assistant", "content": reply.text if record is None else record})
+        return reply
+
+    def set_last_reply(self, text: str) -> None:
+        """Replace the latest assistant turn (see ``ask``'s ``record``)."""
+        if self.turns and self.turns[-1]["role"] == "assistant":
+            self.turns[-1]["content"] = text
 
 
 _FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.S)

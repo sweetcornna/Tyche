@@ -110,6 +110,7 @@ async def test_openjiuwen_client_round_trip(openai_compatible_server, monkeypatc
         "input_tokens": 12,
         "cached_input_tokens": 8,
         "output_tokens": 5,
+        "uncached_input_tokens": 4,
         "cache_hit_rate": 0.667,
     }
     # The schema instruction is part of the (cacheable) system prompt, not the user text.

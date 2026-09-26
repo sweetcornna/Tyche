@@ -82,6 +82,10 @@ async def test_panel_aggregates_seven_dimensions():
     # and only the short user message with the lens differs.
     persona_calls = [c for c in llm.calls if c[0].startswith("review:") and c[0] != "review:auditor"]
     assert len({system for _, system, _ in persona_calls}) == 1
+    # The auditor reads the same cached paper prefix (its schema follows it).
+    audit_system = next(system for purpose, system, _ in llm.calls if purpose == "review:auditor")
+    shared = persona_calls[0][1].split("Return only one JSON value")[0]
+    assert audit_system.startswith(shared) and "The gains concentrate" in shared
     assert "The gains concentrate" in persona_calls[0][1]
     assert len({user for _, _, user in persona_calls}) == 3
 
