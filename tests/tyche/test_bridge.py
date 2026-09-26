@@ -182,3 +182,12 @@ def test_failed_items_gate_stops_confounded_experiments():
     with pytest.raises(StageError, match="proposed: 5/100 items failed"):
         Pipeline._check_failed_items(fake, {"proposed": {"per_question": bad_rows}})
     assert "model_call_errors" not in numeric_metrics({"model_call_errors": 3, "accuracy": 0.5})
+
+
+def test_metrics_marked_undefined_are_not_results():
+    data = {
+        "accuracy": 0.8,
+        "accuracy_at_matched_budget": 0.0,
+        "metric_defined": {"accuracy": True, "accuracy_at_matched_budget": False},
+    }
+    assert numeric_metrics(data) == {"accuracy": 0.8}

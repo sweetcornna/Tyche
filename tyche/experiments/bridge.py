@@ -52,6 +52,10 @@ _BOOKKEEPING = {
     "n_errors",
 }
 
+# Maps {metric: bool} by which experiment code marks metrics it could not compute
+# (e.g. an empty subset); such a metric's placeholder value is never a result.
+_DEFINED_KEYS = ("metric_defined", "metrics_defined", "defined_metrics", "metric_valid")
+
 # Per-item fields that mark an item whose model call failed (not a wrong answer).
 _ITEM_ERROR_KEYS = ("error", "model_error", "exception")
 
@@ -114,10 +118,17 @@ def failed_items(data: dict[str, Any]) -> tuple[int, int]:
 
 
 def numeric_metrics(data: dict[str, Any]) -> dict[str, float]:
-    """Top-level numeric metrics of one variant, excluding bookkeeping fields."""
+    """Top-level numeric metrics of one variant, excluding bookkeeping and undefined metrics."""
+    undefined = {
+        name
+        for key in _DEFINED_KEYS
+        if isinstance(data.get(key), dict)
+        for name, ok in data[key].items()
+        if ok is False
+    }
     out: dict[str, float] = {}
     for key, value in data.items():
-        if key in _BOOKKEEPING or isinstance(value, bool):
+        if key in _BOOKKEEPING or key in undefined or isinstance(value, bool):
             continue
         if isinstance(value, (int, float)):
             out[key] = float(value)
