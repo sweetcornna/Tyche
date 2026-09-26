@@ -344,3 +344,54 @@ async def test_review_stage_resumes_the_write_stage_conversation(memory, tmp_pat
     assert "<current_section>" not in llm.calls[-1][2]
     changed = replace(ctx, results_brief="- accuracy 0.71")
     assert not make().import_state(state, changed)  # a different shared context starts afresh
+
+
+async def test_title_turn_strips_latex_tags_and_rollback_without_conversation(memory, tmp_path):
+    from tyche.llm import ScriptedLLM
+    from tyche.paper.writer import SectionWriter, WritingContext
+    from tyche.planning import ResearchPlan
+    from tyche.selftest import PLAN
+
+    ctx = WritingContext(
+        plan=ResearchPlan.model_validate(PLAN), citations=[], synthesis={}, results_brief="- accuracy 0.70",
+        design_excerpt="design", labels={}, run_id="r1",
+    )
+    llm = ScriptedLLM({
+        "write": lambda s, u: "<latex>Draft.</latex>",
+        "revise": lambda s, u: "<latex>Better.</latex>",
+        # The author conversation asks for <latex> blocks, and a model may wrap the title too.
+        "write:title": lambda s, u: "<latex>\nProvenance Ledgers Keep Agent Memory Current\n</latex>",
+    })
+    writer = SectionWriter(
+        llm, memory=memory, contracts={}, budget=9000, evidence_limit=4, lessons_limit=2,
+        manifest_dir=tmp_path / "manifests",
+    )
+    # A checkpoint taken before any conversation exists (a review stage with nothing to resume).
+    state = writer.checkpoint()
+    await writer.revise("method", ctx, {}, "Old.", [{"id": "F1", "problem": "p", "fix": "f"}])
+    writer.rollback(state)
+    assert writer.conversation is None and writer._latest == {}
+    assert await writer.title(ctx, "An abstract.") == "Provenance Ledgers Keep Agent Memory Current"
+    # The rejected revision is not part of the conversation the title extended.
+    assert llm.histories[-1] == []
+
+
+async def test_author_conversation_restarts_before_exceeding_the_history_budget(memory, tmp_path):
+    from tyche.llm import ScriptedLLM
+    from tyche.paper.writer import SectionWriter, WritingContext
+    from tyche.planning import ResearchPlan
+    from tyche.selftest import PLAN
+
+    ctx = WritingContext(
+        plan=ResearchPlan.model_validate(PLAN), citations=[], synthesis={}, results_brief="- accuracy 0.70",
+        design_excerpt="design", labels={}, run_id="r1",
+    )
+    llm = ScriptedLLM({"write": lambda s, u: "<latex>" + "Long section text. " * 400 + "</latex>"})
+    writer = SectionWriter(
+        llm, memory=memory, contracts={}, budget=9000, evidence_limit=4, lessons_limit=2,
+        manifest_dir=tmp_path / "manifests", max_history_tokens=6000,
+    )
+    for name in ("method", "experiments", "analysis", "conclusion"):
+        await writer.write(name, ctx, {})
+    assert max(len(h) for h in llm.histories) < 8  # restarted instead of growing without bound
+    assert writer.conversation.tokens() <= 6000 + 2 * 3000

@@ -1,7 +1,7 @@
 import pytest
 
 from tyche import cache
-from tyche.cache import PROFILES, PrefixLedger, build_messages, detect_profile, hint_rejected, request_hints
+from tyche.cache import PROFILES, PrefixLedger, build_messages, detect_profile, request_hints
 from tyche.config import ConfigError, TycheConfig
 from tyche.textutil import count_tokens
 
@@ -132,19 +132,19 @@ class _RateLimited(Exception):
     status_code = 429
 
 
-def test_hint_rejected_only_for_request_validation_errors_naming_a_hint():
-    assert hint_rejected(_BadRequest("Unrecognized request argument supplied: prompt_cache_key"))
-    assert hint_rejected(TypeError("create() got an unexpected keyword argument 'prompt_cache_retention'"))
-    assert not hint_rejected(_BadRequest("messages must not be empty"))
-    assert not hint_rejected(_RateLimited("prompt_cache_key rate limited"))
-    assert not hint_rejected(TimeoutError("cache_control"))
+def test_request_rejected_only_for_request_validation_errors():
+    assert cache.request_rejected(_BadRequest("Unrecognized request argument supplied: prompt_cache_key"))
+    assert cache.request_rejected(_BadRequest("messages[0].content: expected a string"))
+    assert cache.request_rejected(TypeError("create() got an unexpected keyword argument 'prompt_cache_retention'"))
+    assert not cache.request_rejected(_RateLimited("prompt_cache_key rate limited"))
+    assert not cache.request_rejected(TimeoutError("cache_control"))
     try:
         try:
             raise _BadRequest("unknown field cache_control")
         except _BadRequest as inner:
             raise RuntimeError("openAI API async invoke error") from inner
     except RuntimeError as wrapped:
-        assert hint_rejected(wrapped)
+        assert cache.request_rejected(wrapped)
 
 
 def _conversation(ledger, profile, turns, route="r"):

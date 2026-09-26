@@ -359,11 +359,17 @@ class Pipeline:
         """
         paper_cfg = dict(self.cfg.get("paper") or {})
         contracts = dict(paper_cfg.get("sections") or {})
+        budget = int(self.cfg.get("memory.context_budgets.section", 9000))
+        spec = self.cfg.model("writer")
+        # The author conversation (system prompt and history) must leave room for one more
+        # turn of up to ``budget`` tokens, instructions, and the reply.
+        history = spec.context_window - (spec.max_tokens or 8192) - budget - 4000
         writer = SectionWriter(
             self.svc.writer,
             memory=self.memory,
             contracts=contracts,
-            budget=int(self.cfg.get("memory.context_budgets.section", 9000)),
+            budget=budget,
+            max_history_tokens=max(16000, history),
             evidence_limit=int(self.cfg.get("memory.evidence_per_section", 12)),
             lessons_limit=int(self.cfg.get("memory.lessons_per_section", 5)),
             manifest_dir=self.ws.stage_dir(stage) / "context_manifests",

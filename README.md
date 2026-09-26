@@ -100,6 +100,7 @@ tyche run --resume --run-id <run-id>
 - `--set review.max_rounds=4`、`--set paper.max_main_pages=6`：覆盖任意配置项（默认值见 `tyche/configs/tyche.default.yaml`）。
 - 模型分角色配置（`models.<role>`，未设置的字段继承 `models.default`）：`planner`、`writer`、`reviewer`、`experiments`（openjiuwen 实验智能体）、`subject`（生成的实验代码通过 `API_KEY/API_BASE/MODEL_NAME` 调用的被测模型）。`TYCHE_REVIEW_MODEL_NAME`、`TYCHE_EXPERIMENT_MODEL_NAME` 可分别为评审与实验智能体指定更强的模型，DeepSeek 下默认所有角色都用最新的 `deepseek-flash`（DeepSeek-V4.1-Flash）；也可让评审改用 `deepseek-v4-pro`，用不同模型评审能降低自我认同偏差。
 - DeepSeek V4/V4.1 是推理模型，隐藏推理会计入 `max_tokens`，默认上限为 32768；如需关闭推理，可设 `--set 'models.default.extra_body={"thinking":{"type":"disabled"}}'`。
+- `context_window`（默认 131072，环境变量 `MODEL_CONTEXT_WINDOW`）是模型可接受的输入加输出上限；作者对话在即将超出时重新开始。DeepSeek-V4.1-Flash 支持 1M，可设 `MODEL_CONTEXT_WINDOW=1000000`。
 - `tyche review paper.pdf`：用本地 7 维评审团评审任意论文 PDF。
 - `tyche lessons`：查看跨运行写作经验及其状态。
 
@@ -131,15 +132,15 @@ tyche run --resume --run-id <run-id>
 | `openai_compatible` | 其他网关 | 未知 | 只保证请求形状并测量；网关后面是 Claude/Qwen 时可设 `cache: explicit` |
 
 - **显式断点位置**：system 末尾（同一用途的所有调用共享）、上一次请求的最后一个用户回合（本次请求正好读取上次写入的缓存，不受 20 块回溯窗口限制）、以及对话会继续时本次请求的最后一个用户回合（供下一回合读取）。前缀不足服务商最小长度的断点不打；一次性调用只打 system 断点，避免为不会再读的内容付 125% 的写入费。回复（assistant）保持纯字符串。
-- **失败回退**：服务商若以 400/422 拒绝某个缓存提示（`cache_control`、`prompt_cache_key` 等），该次调用去掉提示重发一次，之后该角色不再发送提示（包括写在模型配置里的按角色路由键）。超时、限流和 5xx 不触发回退。
-- **不依赖服务商的自检**：`PrefixLedger` 按模型路由（端点、模型、温度、`max_tokens`、`extra_body`）记录已发送过的消息前缀，每次调用估算"本可命中"的 token（`prefix_reuse_rate`，按服务商最小长度和粒度折算），并检测对话回合是否改写了已发送的历史（`cache_breaks`，应为 0）。它对不返回缓存用量的服务商同样有效。离线 `tyche selftest` 要求 `cache_breaks == 0`，并输出各阶段的前缀复用率（当前：写作 0.847、评审 0.782、综述 0.371、总计 0.765）。
+- **失败回退**：带缓存适配（断点、路由提示）的请求若被服务商以 400/422 拒绝，就去掉全部适配原样重发一次：重发成功说明是适配导致的，此后该角色不再适配（包括写在模型配置里的按角色路由键）；重发也失败则说明与缓存无关，抛出重发的错误，适配保持开启。超时、限流和 5xx 不触发回退。
+- **不依赖服务商的自检**：`PrefixLedger` 按模型路由（端点、模型、温度、`max_tokens`、`extra_body`）记录已发送过的消息前缀，每次调用估算"本可命中"的 token（`prefix_reuse_rate`，按服务商最小长度和粒度折算），并检测对话回合是否改写了已发送的历史（`cache_breaks`，应为 0）。它对不返回缓存用量的服务商同样有效。离线 `tyche selftest` 要求 `cache_breaks == 0`，并输出各阶段的前缀复用率（当前：写作 0.847、评审 0.734、综述 0.374、总计 0.740；评审阶段的审计员需额外读取 LaTeX 章节以核对引用键）。
 - **命中率不是目标**：综述阶段每批候选论文本来就各不相同，只读一次；为了提高命中率把批次拼进一个越来越长的对话，反而会增加总输入。优化目标是未命中 token 数，而不是比率。
 
 具体落实：
 
-- **写作（作者对话）**：每个阶段一个只追加的作者对话。system = 写作规则 + 研究计划、可引用文献、结果简报、实验设计、实验反思、综述综合与证据（全文共享）；各章节依次作为新回合写入，后续的修订、缩写、编译修复、起标题都接在同一对话后面。章节的合同与经验只在第一次出现时发送；对话里已有某章节最新文本时不再重发 `current_section`，其他章节只有在当前文本与对话中不同时才附摘要。评审轮被拒绝时，作者对话截断回滚。
-- **评审团**：论文全文、未引用相关工作、既往意见构成整个评审团共用的前缀（system）；三位评审与保真审计员逐字节共享它，各自的角色说明、视角与运行记录放在最后。
-- **结构化输出**：JSON schema 放在 system 末尾；重试只在用户回合末尾追加校验错误。
+- **写作（作者对话）**：每个阶段一个只追加的作者对话。system = 写作规则 + 研究计划、可引用文献、结果简报、实验设计、实验反思、综述综合与证据（全文共享）；各章节依次作为新回合写入，后续的修订、缩写、编译修复、起标题都接在同一对话后面。对话超出 `context_window` 预算前会重新开始。章节的合同与经验只在第一次出现时发送；对话里已有某章节最新文本时不再重发 `current_section`，其他章节只有在当前文本与对话中不同时才附摘要。评审轮被拒绝时，作者对话截断回滚。
+- **评审团**：论文全文、未引用相关工作、既往意见构成整个评审团共用的前缀（system）；三位评审与保真审计员逐字节共享它，各自的角色说明、视角与运行记录放在最后。审计员另外读取 LaTeX 章节，因为只有那里的 `\citep` 键能与证据卡片对上。
+- **结构化输出**：system 原样发送，JSON schema 放在用户回合开头。这样不同 schema 的调用（评审与审计员、综述各步骤）共享整段 system，显式缓存的 system 断点也能共用；同一用途的调用仍共享 schema 前缀。重试只在用户回合末尾追加校验错误。
 - **文献筛选/证据卡片**：研究计划与每篇卡片数放在 system 中，逐批候选放在 user 中。
 - **实验**：openjiuwen 实验智能体本身是多轮只追加对话（实测命中率约 97%）；生成的实验代码被约束为"固定指令与共享上下文在前、逐题内容在后"，并记录服务商返回的缓存命中 token。
 - **计量**：每次调用记录缓存命中与写入 token（openjiuwen 统一了 DeepSeek `prompt_cache_hit_tokens`、OpenAI/DashScope `cached_tokens`、Anthropic `cache_read_input_tokens`/`cache_creation_input_tokens`），`run_report.md` 按阶段给出 `cached_input_tokens`、`cache_write_tokens`、`uncached_input_tokens`、`cache_hit_rate`（= 命中 /（命中 + 未命中 + 写入），写入计入分母）、`calls_without_cache_report`（服务商没有返回缓存用量的调用数，这类调用的 0 命中没有意义）、`prefix_reuse_rate` 与 `cache_breaks`，并列出各角色使用的缓存档案。`tyche doctor` 也会打印每个角色识别到的档案。

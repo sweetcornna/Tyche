@@ -16,6 +16,10 @@ models:
     # Reasoning models (DeepSeek V4, ...) spend part of max_tokens on hidden
     # reasoning; a small cap returns empty answers.
     max_tokens: 32768
+    # Largest prompt plus completion the model accepts. Multi-turn author
+    # conversations restart before they would exceed it. The default suits
+    # 128k-context models; DeepSeek-V4.1-Flash accepts 1M (MODEL_CONTEXT_WINDOW=1000000).
+    context_window: ${MODEL_CONTEXT_WINDOW:-131072}
     # Extra JSON body fields sent with every request of this role, e.g.
     # {thinking: {type: disabled}} to switch DeepSeek reasoning off.
     extra_body: {}

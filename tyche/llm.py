@@ -204,8 +204,8 @@ class OpenJiuwenLLM:
         """The underlying openjiuwen Model, shared with the experiment engine."""
         return self._model
 
-    async def _invoke(self, messages: list[dict[str, Any]], hints: dict[str, Any], temperature, max_tokens):
-        return await self._model.invoke(
+    async def _invoke(self, model: Any, messages: list[dict[str, Any]], hints: dict[str, Any], temperature, max_tokens):
+        return await model.invoke(
             messages,
             temperature=temperature if temperature is not None else self.spec.temperature,
             max_tokens=max_tokens or self.spec.max_tokens,
@@ -230,22 +230,27 @@ class OpenJiuwenLLM:
             profile, key=cache.routing_key(self.route, system), retention=self.spec.cache_retention
         )
         check = self._ledger.observe(self.route, messages, self.profile)
+        plain = cache.plain_messages(messages)
+        adapted = self.hints_enabled and bool(hints or self._static or messages != plain)
         try:
-            message = await self._invoke(messages, hints, temperature, max_tokens)
+            message = await self._invoke(self._model, messages, hints, temperature, max_tokens)
         except Exception as exc:
-            if not (self.hints_enabled and (hints or messages != _plain(messages)) and cache.hint_rejected(exc)):
+            if not (adapted and cache.request_rejected(exc)):
                 raise
+            # Repeat the request with no cache adaptation at all: no breakpoints, no hints, and a
+            # model without the per-role key. If that fails too, the adaptation was not the cause
+            # and the plain request's error propagates.
+            from openjiuwen.core.foundation.llm import init_model
+
+            model = self._build_model(init_model, self.spec.api_key(), {}) if self._static else self._model
+            message = await self._invoke(model, plain, {}, temperature, max_tokens)
             log.warning(
-                "%s (%s) refused a prompt-cache hint of profile %s; continuing without cache hints: %s",
+                "%s (%s) refused the prompt-cache adaptation of profile %s; continuing without it: %s",
                 self.spec.role, self.spec.model_name, self.profile.name, str(exc)[:300],
             )
-            self.hints_enabled = False
-            if self._static:
-                from openjiuwen.core.foundation.llm import init_model
-
-                self._static = {}
-                self._model = self._build_model(init_model, self.spec.api_key(), {})
-            message = await self._invoke(_plain(messages), {}, temperature, max_tokens)
+            # Tyche's own calls stop adapting. openjiuwen's experiment agents keep the model object
+            # they were given; the per-role key is only set for OpenAI, which documents it.
+            self.hints_enabled, self._model, self._static = False, model, {}
         content = message.content if isinstance(message.content, str) else json.dumps(message.content)
         usage = message.usage_metadata
         reported = usage is not None and (
@@ -272,17 +277,6 @@ class OpenJiuwenLLM:
         if self.meter is not None:
             self.meter.add(purpose, reply)
         return reply
-
-
-def _plain(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The messages with cache breakpoints removed (content blocks back to strings)."""
-    out = []
-    for message in messages:
-        content = message.get("content")
-        if isinstance(content, list):
-            content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
-        out.append({**message, "content": content})
-    return out
 
 
 Handler = Callable[..., "str | Awaitable[str]"]
@@ -382,22 +376,18 @@ class Conversation:
 
         return count_tokens(self.system) + sum(count_tokens(t["content"]) for t in self.turns)
 
-    async def ask(self, llm: LLMClient, user: str, *, purpose: str, record: str | None = None) -> LLMReply:
-        """Send ``user`` after the history and append the exchange.
-
-        ``record`` replaces the reply text in the history (for example with the sanitized
-        section actually kept); the reply itself is never part of a cached prefix, so this
-        does not cost cache hits.
-        """
+    async def ask(self, llm: LLMClient, user: str, *, purpose: str) -> LLMReply:
+        """Send ``user`` after the history and append the exchange."""
         reply = await llm.complete(
             system=self.system, user=user, purpose=purpose, history=list(self.turns), continues=True
         )
         self.turns.append({"role": "user", "content": user})
-        self.turns.append({"role": "assistant", "content": reply.text if record is None else record})
+        self.turns.append({"role": "assistant", "content": reply.text})
         return reply
 
     def set_last_reply(self, text: str) -> None:
-        """Replace the latest assistant turn (see ``ask``'s ``record``)."""
+        """Replace the latest assistant turn, for example with the sanitized section actually
+        kept. The reply is not yet part of any sent prefix, so this costs no cache hits."""
         if self.turns and self.turns[-1]["role"] == "assistant":
             self.turns[-1]["content"] = text
 
@@ -447,20 +437,21 @@ async def complete_json(
 ) -> T:
     """Ask for a JSON answer matching ``schema``; re-ask with the error on failure.
 
-    The schema instruction ends the system prompt rather than following the user text, so
-    every call for one purpose shares the same system+schema prefix (prompt-cache friendly);
-    a retry keeps that prefix and the original user text and appends only the rejection.
+    The system prompt stays exactly as given, so calls with different schemas (a review panel's
+    reviewers and auditor, the survey's steps) share it whole, including under explicit caches
+    whose breakpoint sits at its end. The schema opens the user turn, where calls for one purpose
+    still share it as a prefix; a retry keeps that and the original user text and appends only
+    the rejection.
     """
-    system_json = (
-        system
-        + "\n\nReturn only one JSON value that validates against this JSON schema, with no commentary:\n"
-        + schema_hint(schema)
+    prompt_head = (
+        "Return only one JSON value that validates against the JSON schema in <output_schema>, "
+        "with no commentary.\n<output_schema>\n" + schema_hint(schema) + "\n</output_schema>\n\n"
     )
-    prompt = user
+    prompt = prompt_head + user
     last_error = ""
     for attempt in range(retries + 1):
         reply = await llm.complete(
-            system=system_json,
+            system=system,
             user=prompt,
             purpose=purpose if attempt == 0 else f"{purpose}:retry",
             temperature=temperature,
@@ -471,7 +462,8 @@ async def complete_json(
         except (ValueError, ValidationError) as exc:
             last_error = str(exc)[:1500]
             prompt = (
-                user
+                prompt_head
+                + user
                 + "\n\nYour previous answer was rejected by the validator:\n"
                 + last_error
                 + "\nFix it and return only the corrected JSON."

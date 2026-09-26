@@ -250,7 +250,7 @@ def build_messages(
         marks.append(len(messages) - 1)
     cumulative, prefix_tokens = 0, []
     for message in messages:
-        cumulative += count_tokens(str(message["content"]))
+        cumulative += count_tokens(message_text(message["content"]))
         prefix_tokens.append(cumulative)
     keep = [i for i in sorted(set(marks)) if prefix_tokens[i] >= profile.min_prefix_tokens]
     for i in keep[-profile.max_breakpoints:]:
@@ -290,24 +290,30 @@ def static_hints(profile: CacheProfile, *, key: str) -> dict[str, Any]:
     return hints
 
 
-_HINT_WORDS = ("cache_control", "prompt_cache_key", "prompt_cache_retention", "x-grok-conv-id", "session_id")
-
-
-def hint_rejected(exc: BaseException) -> bool:
-    """Whether a call failed because the provider refused one of the cache hints Tyche sent.
-
-    Only a request-validation failure (HTTP 400/422, or a client-side TypeError for an unknown
-    keyword) that names a hint counts; timeouts, rate limits, and server errors never do.
-    openjiuwen wraps provider errors, so the cause chain is searched.
-    """
+def request_rejected(exc: BaseException) -> bool:
+    """Whether a call failed because the provider refused the request as sent (HTTP 400/422, or
+    a client-side TypeError for an unknown keyword), as opposed to a timeout, a rate limit, or a
+    server error. openjiuwen wraps provider errors, so the cause chain is searched."""
     current: BaseException | None = exc
     for _ in range(8):
         if current is None:
             break
         if isinstance(current, TypeError) or getattr(current, "status_code", None) in (400, 422):
-            return any(word in str(current).lower() for word in _HINT_WORDS)
+            return True
         current = current.__cause__ or current.__context__
     return False
+
+
+def message_text(content: Any) -> str:
+    """The text of a message's content, whether a string or a list of content blocks."""
+    if isinstance(content, str):
+        return content
+    return "".join(part.get("text", "") for part in content or [] if isinstance(part, dict))
+
+
+def plain_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The messages with cache breakpoints removed (content blocks back to strings)."""
+    return [{**m, "content": message_text(m.get("content"))} for m in messages]
 
 
 def _common_prefix(a: str, b: str) -> int:
@@ -348,33 +354,21 @@ class PrefixLedger:
         self.limit = limit
         self.followers = followers
         self._seen: OrderedDict[tuple[str, str], None] = OrderedDict()
-        self._tokens: dict[str, int] = {}
         # Recent messages that followed each sent prefix, for the partial match inside the first
         # message that differs (automatic caches match token by token, not message by message).
         self._next: OrderedDict[tuple[str, str], list[tuple[str, str]]] = OrderedDict()
-
-    def _count(self, text: str) -> int:
-        digest = hashlib.sha1(text.encode("utf-8")).hexdigest()
-        if digest not in self._tokens:
-            if len(self._tokens) >= self.limit:
-                self._tokens.clear()
-            self._tokens[digest] = count_tokens(text)
-        return self._tokens[digest]
 
     def observe(self, route: str, messages: list[dict[str, Any]], profile: CacheProfile) -> PrefixCheck:
         chain = hashlib.sha256(route.encode("utf-8"))
         parents, digests, tokens, texts = [chain.hexdigest()], [], [], []
         running = 0
         for message in messages:
-            content = message.get("content")
-            text = content if isinstance(content, str) else "".join(
-                part.get("text", "") for part in content or [] if isinstance(part, dict)
-            )
+            text = message_text(message.get("content"))
             texts.append((str(message.get("role")), text))
             chain.update(f"\x1e{message.get('role')}\x1f{text}".encode("utf-8"))
             digests.append(chain.hexdigest())
             parents.append(digests[-1])
-            running += self._count(text)
+            running += count_tokens(text)
             tokens.append(running)
         longest = 0
         for i, digest in enumerate(digests):

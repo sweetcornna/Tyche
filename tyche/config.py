@@ -97,6 +97,8 @@ class ModelSpec:
     cache: str = "auto"
     # Optional provider cache-retention hint (OpenAI prompt_cache_retention); "" sends none.
     cache_retention: str = ""
+    # Largest prompt plus completion the model accepts, in tokens; bounds multi-turn histories.
+    context_window: int = 131072
 
     def api_key(self, env: Mapping[str, str] | None = None) -> str:
         source = os.environ if env is None else env
@@ -115,6 +117,7 @@ class ModelSpec:
             "extra_body": self.extra_body,
             "cache": self.cache,
             "cache_retention": self.cache_retention,
+            "context_window": self.context_window,
         }
 
     def route(self) -> str:
@@ -209,6 +212,7 @@ class TycheConfig:
             extra_body=dict(base.get("extra_body") or {}),
             cache=_cache_setting(base.get("cache")),
             cache_retention=str(base.get("cache_retention") or ""),
+            context_window=_opt_int(base.get("context_window")) or 131072,
         )
         try:
             spec.cache_profile()

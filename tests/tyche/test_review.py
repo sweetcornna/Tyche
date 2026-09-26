@@ -82,11 +82,12 @@ async def test_panel_aggregates_seven_dimensions():
     # and only the short user message with the lens differs.
     persona_calls = [c for c in llm.calls if c[0].startswith("review:") and c[0] != "review:auditor"]
     assert len({system for _, system, _ in persona_calls}) == 1
-    # The auditor reads the same cached paper prefix (its schema follows it).
-    audit_system = next(system for purpose, system, _ in llm.calls if purpose == "review:auditor")
-    shared = persona_calls[0][1].split("Return only one JSON value")[0]
-    assert audit_system.startswith(shared) and "The gains concentrate" in shared
-    assert "The gains concentrate" in persona_calls[0][1]
+    # The auditor sends the identical system prompt (schemas travel in the user turn), so even an
+    # explicit cache with its breakpoint at the end of the system prompt is shared.
+    _, audit_system, audit_user = next(c for c in llm.calls if c[0] == "review:auditor")
+    assert audit_system == persona_calls[0][1] and "The gains concentrate" in audit_system
+    # It also gets the LaTeX, the only place where \citep keys match its evidence keys.
+    assert "<paper_latex>\n%% analysis\nx\n</paper_latex>" in audit_user
     assert len({user for _, _, user in persona_calls}) == 3
 
 

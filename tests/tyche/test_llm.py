@@ -136,9 +136,11 @@ async def test_openjiuwen_client_round_trip(openai_compatible_server, monkeypatc
     # A local endpoint gets the self-hosted profile: no hints, plain string messages.
     assert llm.profile.name == "self_hosted"
     assert "prompt_cache_key" not in seen["body"]
-    # The schema instruction is part of the (cacheable) system prompt, not the user text.
+    # The system prompt is sent unchanged, so calls with different schemas share it whole; the
+    # schema opens the user turn, ahead of the per-call text.
     system, user = (m["content"] for m in seen["body"]["messages"])
-    assert "JSON schema" in system and user == "usr"
+    assert system == "sys"
+    assert user.startswith("Return only one JSON value") and user.endswith("</output_schema>\n\nusr")
 
 
 def _client(base, monkeypatch, **model):
@@ -207,13 +209,25 @@ async def test_refused_routing_key_is_dropped_from_every_later_request(openai_co
     assert all("prompt_cache_key" not in b for b in seen["bodies"][1:])
 
 
-async def test_other_bad_requests_are_not_retried(openai_compatible_server, monkeypatch):
+async def test_refused_content_blocks_fall_back_even_when_no_hint_is_named(openai_compatible_server, monkeypatch):
+    """A gateway that only takes string content rejects the block shape without naming a hint."""
+    base, seen = openai_compatible_server
+    seen["refuse"] = "ephemeral"
+    llm, _ = _client(base, monkeypatch, cache="explicit")
+    reply = await llm.complete(system="s " * 50, user="u", purpose="a")
+    assert reply.text == '{"value": 42}' and llm.hints_enabled is False
+    assert all(isinstance(m["content"], str) for m in seen["bodies"][-1]["messages"])
+
+
+async def test_bad_requests_unrelated_to_caching_still_fail_and_keep_hints(openai_compatible_server, monkeypatch):
     base, seen = openai_compatible_server
     seen["refuse"] = "mock-model"
     llm, _ = _client(base, monkeypatch, cache="explicit")
-    with pytest.raises(Exception):
+    with pytest.raises(Exception, match="mock-model"):
         await llm.complete(system="s " * 50, user="u", purpose="a")
-    assert len(seen["bodies"]) == 1 and llm.hints_enabled is True
+    # One plain retry showed the adaptation was not the cause, so it stays on.
+    assert len(seen["bodies"]) == 2 and llm.hints_enabled is True
+    assert all(isinstance(m["content"], str) for m in seen["bodies"][1]["messages"])
 
 
 async def test_xai_profile_routes_with_a_conversation_header(openai_compatible_server, monkeypatch):

@@ -139,7 +139,7 @@ class SectionWriter:
         evidence_limit: int,
         lessons_limit: int,
         manifest_dir: Path,
-        max_history_tokens: int = 200_000,
+        max_history_tokens: int = 80_000,
     ):
         self.llm = llm
         self.memory = memory
@@ -268,8 +268,9 @@ class SectionWriter:
         shared = self.shared_context(ctx)
         system = load_prompt("section_system") + "\n\n" + "\n\n".join(wrap_block(b) for b in shared)
         conv = self.conversation
-        # A changed shared context (e.g. a citation admitted during review) or an overlong
-        # history starts a new conversation; otherwise every call extends the current one.
+        # A changed shared context (e.g. a citation admitted during review) or a history that would
+        # no longer fit the model's context window (``max_history_tokens`` counts the system prompt
+        # too) starts a new conversation; otherwise every call extends the current one.
         if conv is None or conv.system != system or conv.tokens() > self.max_history_tokens:
             conv = self.conversation = Conversation(system)
             self._latest = {}
@@ -308,15 +309,15 @@ class SectionWriter:
         return (conv.checkpoint() if conv else 0, dict(self._latest), set(self._introduced), conv)
 
     def rollback(self, state: tuple[int, dict[str, str], set[str], Conversation | None]) -> None:
-        """Undo the calls since ``checkpoint`` (a rejected revision): truncate, never edit."""
+        """Undo the calls since ``checkpoint`` (a rejected revision): truncate, never edit.
+
+        The conversation current at the checkpoint is restored even if a later call replaced it;
+        with none at the checkpoint, the conversation started since is dropped.
+        """
         mark, latest, introduced, conv = state
-        if conv is not None and conv is self.conversation:
+        if conv is not None:
             conv.rollback(mark)
-            self._latest, self._introduced = latest, introduced
-        elif conv is not None:
-            # The conversation was replaced after the checkpoint; resume the earlier one.
-            conv.rollback(mark)
-            self.conversation, self._latest, self._introduced = conv, latest, introduced
+        self.conversation, self._latest, self._introduced = conv, latest, introduced
 
     async def _call(
         self,
@@ -409,6 +410,8 @@ class SectionWriter:
             "mechanism and the finding, no colon-separated clickbait, no quotes, no LaTeX.",
             purpose="write:title",
         )
-        title = reply.text.strip().splitlines()[0].strip().strip('"').strip() if reply.text.strip() else ""
+        # The author conversation asks for <latex> blocks, so a title may arrive wrapped in one.
+        lines = [line.strip() for line in extract_latex(reply.text).splitlines() if line.strip()]
+        title = lines[0].strip('"').strip() if lines else ""
         title = re.sub(r"[\\{}$^_#&%~]", "", title)
         return title[:180] or ctx.plan.working_title

@@ -37,7 +37,9 @@ def _block(text: str, name: str) -> str:
     return match.group(1) if match else ""
 
 
-_SECTION_IN_TURN = re.compile(r"(?:Write|Revise|Shorten|The) the ([a-z ]+?) section")
+# Section named by a write/revise/shorten turn ("Revise the method section") or a repair turn
+# ("The method section fails to compile").
+_SECTION_IN_TURN = re.compile(r"(?:(?:Write|Revise|Shorten) the|The) ([a-z ]+?) section")
 
 
 def _current_section(user: str, history: list[dict[str, str]]) -> str:
@@ -51,7 +53,7 @@ def _current_section(user: str, history: list[dict[str, str]]) -> str:
     name = match.group(1)
     for i in range(len(history) - 1, 0, -1):
         turn, before = history[i], history[i - 1]
-        if turn["role"] == "assistant" and f"the {name} section" in before["content"]:
+        if turn["role"] == "assistant" and f"the {name} section" in before["content"].lower():
             found = re.search(r"<latex>\n?(.*?)\n?</latex>", turn["content"], re.S)
             if found:
                 return found.group(1)

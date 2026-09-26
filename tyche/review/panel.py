@@ -190,9 +190,10 @@ class ReviewPanel:
         if prior:
             base_user += "<prior_findings>\n" + json.dumps(prior, ensure_ascii=False, indent=1) + "\n</prior_findings>\n"
         # One prefix for the whole panel: a neutral preamble, then the paper and its review context.
-        # Every reviewer and the auditor send it byte-identically (the JSON schema and each role's
-        # instructions come after it), so a provider's prefix cache serves the paper to every call
-        # after the first; request parameters are the same for all of them (one reviewer role).
+        # Every reviewer and the auditor send it byte-identically as the system prompt (the JSON
+        # schema and each role's instructions come in the user turn), so a provider's prefix cache
+        # serves the paper to every call after the first; request parameters are the same for all
+        # of them (one reviewer role).
         shared = load_prompt("review_common") + "\n\n" + base_user
         reviews: dict[str, dict[str, Any]] = {}
         findings: list[dict[str, Any]] = []
@@ -224,11 +225,13 @@ class ReviewPanel:
                 rulings += [dict(r.model_dump(), reviewer=name) for r in out.prior_rulings]
         if self.auditor:
             cited = "\n".join(f"[{key}] {text}" for key, text in cited_evidence.items())
-            # The auditor reads the same cached <paper_text> as the reviewers; only its instructions
-            # and the run record (results, evidence, reflection) are new input.
+            # The auditor shares the reviewers' cached prefix. It also needs the LaTeX: only there do
+            # \citep keys appear, and it matches them against the evidence for each key.
             audit_user = (
                 load_prompt("auditor_system")
-                + "\n\n<results_brief>\n"
+                + "\n\n<paper_latex>\n"
+                + truncate_tokens("\n\n".join(f"%% {n}\n{b}" for n, b in sections.items()), int(self.budget * 0.5))
+                + "\n</paper_latex>\n<results_brief>\n"
                 + results_brief
                 + "\n</results_brief>\n<cited_evidence>\n"
                 + truncate_tokens(cited, int(self.budget * 0.3))

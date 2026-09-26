@@ -75,3 +75,20 @@ def test_item_ids_derive_from_content_so_prompts_repeat_exactly(memory, tmp_path
     again = memory.add("evidence", "Quoted claim.", provenance="retrieved", run_id="r1", source_ref="k")
     assert again != first and again.startswith("evi-")
     assert memory.add("evidence", "Another claim.", provenance="retrieved", run_id="r1", source_ref="k") != first
+
+
+def test_content_ids_are_claimed_by_the_insert_not_a_prior_check(memory, tmp_path):
+    """Two stores on one database (two processes) never collide on a content-derived id."""
+    from tyche.memory import MemoryStore
+
+    path = tmp_path / "shared.db"
+    first, second = MemoryStore(path), MemoryStore(path)
+    try:
+        a = first.add("lesson", "Same lesson.", provenance="inferred", scope="global")
+        b = second.add("lesson", "Same lesson.", provenance="inferred", scope="global")
+        assert a != b and a.startswith("les-") and b.startswith("les-")
+        with pytest.raises(Exception):
+            second.add("lesson", "Other.", provenance="inferred", scope="global", item_id=a)
+    finally:
+        first.close()
+        second.close()
