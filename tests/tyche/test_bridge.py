@@ -2,7 +2,13 @@ import json
 
 from tyche.config import TycheConfig
 from tyche.experiments import ImportedEngine, fixture_engine
-from tyche.experiments.bridge import OpenJiuwenEngine, build_openjiuwen_config, numeric_metrics, objective_text
+from tyche.experiments.bridge import (
+    OpenJiuwenEngine,
+    build_openjiuwen_config,
+    code_implementation_agent,
+    numeric_metrics,
+    objective_text,
+)
 from tyche.planning import ResearchPlan
 from tyche.selftest import PLAN
 
@@ -79,6 +85,7 @@ async def test_openjiuwen_engine_drives_manager_runtime_and_harvests(tmp_path, m
     assert captured["arun"]["research_paths"][0] == "inputs/research_summary.md"
     assert captured["arun"]["constraints"] == ["small"]
     assert captured["config"]["manager"]["modules"]["reporting"] is False
+    assert "code_implementation" in captured["kwargs"]
     assert (tmp_path / "exp" / "inputs" / "research_summary.md").exists()
 
 
@@ -122,3 +129,36 @@ async def test_openjiuwen_engine_ignores_stale_variants_and_uses_fresh_run_ids(t
     second = await engine.run(plan, summary_path=summary, work_dir=tmp_path / "exp", run_id="r1")
     assert set(first.variants) == {"proposed", "baseline"} and "dropped_old_variant" in first.notes
     assert run_ids == ["tyche-r1-a1", "tyche-r1-a2"] and second.status == "completed"
+
+
+async def test_code_agent_gets_turn_budget_and_readable_inputs(tmp_path):
+    from openjiuwen.core.foundation.llm import init_model
+    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common import workspace as arw
+
+    import openjiuwen.harness.subagents as subagents
+
+    (tmp_path / "inputs").mkdir()
+    (tmp_path / "inputs" / "research_plan.md").write_text("plan")
+    manager = tmp_path / "experiments" / "r1" / "manager"
+    manager.mkdir(parents=True)
+    (manager / "original_task.md").write_text("task")
+    arw.set_project_root(tmp_path)
+    try:
+        spec = TycheConfig.load(env={"MODEL_NAME": "m", "API_BASE": "http://127.0.0.1:9"}).model("experiments")
+        model = init_model("OpenAI", "m", "offline-key", "http://127.0.0.1:9", timeout=5)
+        agent = code_implementation_agent(build_openjiuwen_config({}, spec), model, 42)
+        workspace = arw.agent_workspace_dir("r1").resolve()
+        workspace.mkdir(parents=True)
+        factory = subagents.create_code_agent
+        built = agent._build_coding_agent(workspace, run_id="r1")
+        try:
+            # openjiuwen's factory default is 15 inner iterations; ours must reach the agent.
+            assert built.deep_config.max_iterations == 42
+            assert subagents.create_code_agent is factory
+            assert (workspace / "inputs" / "research_plan.md").read_text() == "plan"
+            assert (workspace / "experiments" / "r1" / "manager" / "original_task.md").read_text() == "task"
+            assert not (workspace / "output" / "inputs").exists()
+        finally:
+            await agent._cleanup_coding_agent(built)
+    finally:
+        arw.set_project_root(None)

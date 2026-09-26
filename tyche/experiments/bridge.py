@@ -19,6 +19,7 @@ Two other engines exist for honest alternatives:
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import os
 import shutil
@@ -208,6 +209,58 @@ def objective_text(plan: ResearchPlan, settings: dict[str, Any]) -> str:
     )
 
 
+def mirror_read_first_inputs(project_root: Path, agent_workspace: Path, run_id: str) -> list[Path]:
+    """Copy the files a code-agent instruction lists under "Read First" into its sandbox.
+
+    openjiuwen confines the coding agent's file tools to ``agent_workspace``, but the
+    design agent's instruction points it at project-relative paths (``inputs/...`` and
+    ``experiments/<run>/manager/...``). Mirroring them at the same relative paths lets
+    those reads succeed instead of burning the agent's turns on "access denied".
+    Only ``agent_workspace/output`` is promoted to generated code, so copies stay out of it.
+    """
+    sources = [
+        *sorted((project_root / "inputs").glob("*.md")),
+        *sorted((project_root / "experiments" / run_id / "manager").glob("*.md")),
+        *sorted((project_root / "experiments" / run_id / "design").glob("*.md")),
+    ]
+    copied = []
+    for source in sources:
+        target = agent_workspace / source.relative_to(project_root)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        copied.append(target)
+    return copied
+
+
+def code_implementation_agent(config: dict[str, Any], model: Any, max_iterations: int) -> Any:
+    """openjiuwen's CodeImplementationAgent with a usable inner turn budget.
+
+    ``create_code_agent`` defaults to 15 ReAct iterations per invoke, and without a
+    completion promise the outer task loop never starts a second round, so one
+    validation cycle ends after 15 model calls -- too few to write and smoke-test a
+    multi-file experiment. This subclass passes ``max_iterations`` explicitly through
+    the factory's public parameter and mirrors the "Read First" inputs into the sandbox.
+    """
+    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common import workspace as arw
+    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.agent import (
+        CodeImplementationAgent,
+    )
+
+    class TycheCodeImplementationAgent(CodeImplementationAgent):
+        def _build_coding_agent(self, agent_workspace: Path, *, run_id: str, cycle: int = 1):
+            import openjiuwen.harness.subagents as subagents
+
+            mirror_read_first_inputs(arw.project_root(), Path(agent_workspace), run_id)
+            original = subagents.create_code_agent
+            subagents.create_code_agent = functools.partial(original, max_iterations=max_iterations)
+            try:
+                return super()._build_coding_agent(agent_workspace, run_id=run_id, cycle=cycle)
+            finally:
+                subagents.create_code_agent = original
+
+    return TycheCodeImplementationAgent(config, model=model)
+
+
 class OpenJiuwenEngine:
     name = "openjiuwen"
 
@@ -239,6 +292,9 @@ class OpenJiuwenEngine:
             manager=manager,
             model=self.model,
             experiment_design=ExperimentDesignAgent(config, model=self.model, project_root_path=root),
+            code_implementation=code_implementation_agent(
+                config, self.model, int(self.settings.get("code_agent_max_iterations", 80))
+            ),
             reflection=ReflectionAgent(config, model=self.model),
         )
         # A fresh manager run per attempt: a rerun must never mix in metrics or reflections
