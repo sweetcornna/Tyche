@@ -37,6 +37,29 @@ def _block(text: str, name: str) -> str:
     return match.group(1) if match else ""
 
 
+# Section named by a write/revise/shorten turn ("Revise the method section") or a repair turn
+# ("The method section fails to compile").
+_SECTION_IN_TURN = re.compile(r"(?:(?:Write|Revise|Shorten) the|The) ([a-z ]+?) section")
+
+
+def _current_section(user: str, history: list[dict[str, str]]) -> str:
+    """The section text a turn works on: sent in the turn, or the latest version in the conversation."""
+    sent = _block(user, "current_section")
+    if sent:
+        return sent
+    match = _SECTION_IN_TURN.search(user)
+    if not match:
+        return ""
+    name = match.group(1)
+    for i in range(len(history) - 1, 0, -1):
+        turn, before = history[i], history[i - 1]
+        if turn["role"] == "assistant" and f"the {name} section" in before["content"].lower():
+            found = re.search(r"<latex>\n?(.*?)\n?</latex>", turn["content"], re.S)
+            if found:
+                return found.group(1)
+    return ""
+
+
 def _json_block(text: str, name: str) -> Any:
     raw = _block(text, name)
     try:
@@ -227,15 +250,15 @@ def handlers() -> dict[str, Any]:
     def title(system: str, user: str) -> str:
         return "Selftest Fixture: Provenance-Tagged Memory Ledgers for LLM Agents"
 
-    def revise(system: str, user: str) -> str:
-        current = _block(user, "current_section")
+    def revise(system: str, user: str, history: list[dict[str, str]]) -> str:
+        current = _current_section(user, history)
         findings = _json_block(user, "findings_to_address") or []
         addition = " We state explicitly that this pattern is descriptive and was not tested separately."
         responses = [{"id": f["id"], "action": "fixed", "note": "narrowed the claim"} for f in findings]
         return _latex(current.rstrip() + addition, responses)
 
-    def passthrough(system: str, user: str) -> str:
-        return _latex(_block(user, "current_section"))
+    def passthrough(system: str, user: str, history: list[dict[str, str]]) -> str:
+        return _latex(_current_section(user, history))
 
     def review(system: str, user: str) -> str:
         state["reviews"] += 1
@@ -349,6 +372,7 @@ async def run_selftest(
         gates = json.loads((package / "gates.json").read_text(encoding="utf-8"))
         provenance = json.loads((package / "provenance.json").read_text(encoding="utf-8"))
         rounds = json.loads(ws.latest_path("review_rounds").read_text(encoding="utf-8"))
+        usage = pipeline.usage_summary()
         summary = {
             "pdf": str(package / "paper.pdf"),
             "gates_passed": gates["passed"],
@@ -357,6 +381,11 @@ async def run_selftest(
             "review_rounds": [(r["round"], r["accepted"], r["composite"]) for r in rounds],
             "drifted_artifacts": provenance["drifted_artifacts"],
             "lessons": [i.meta.get("status") for i in memory.list(kinds=["lesson"], scopes=["global"])],
+            # Provider-independent prompt-cache check of the request shape (tyche/cache.py).
+            "prefix_reuse_rate": {
+                stage: row["prefix_reuse_rate"] for stage, row in (usage["by_stage"] | {"total": usage["total"]}).items()
+            },
+            "cache_breaks": usage["total"]["cache_breaks"],
         }
         memory.close()
         if keep is not None:
@@ -369,6 +398,7 @@ async def run_selftest(
             and (package / "paper.pdf").exists()
             and not summary["drifted_artifacts"]
             and summary["main_pages"] >= 1
+            and summary["cache_breaks"] == 0
         )
         summary["ok"] = bool(ok)
         return summary

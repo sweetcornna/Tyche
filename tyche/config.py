@@ -93,6 +93,12 @@ class ModelSpec:
     temperature: float | None
     max_tokens: int | None
     extra_body: dict[str, Any] = field(default_factory=dict)
+    # Prompt-cache adapter setting (tyche/cache.py): "auto", a profile name, or "off".
+    cache: str = "auto"
+    # Optional provider cache-retention hint (OpenAI prompt_cache_retention); "" sends none.
+    cache_retention: str = ""
+    # Largest prompt plus completion the model accepts, in tokens; bounds multi-turn histories.
+    context_window: int = 131072
 
     def api_key(self, env: Mapping[str, str] | None = None) -> str:
         source = os.environ if env is None else env
@@ -109,7 +115,27 @@ class ModelSpec:
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
             "extra_body": self.extra_body,
+            "cache": self.cache,
+            "cache_retention": self.cache_retention,
+            "context_window": self.context_window,
         }
+
+    def route(self) -> str:
+        """The public identity of this role's prompt cache: provider caches are keyed by the
+        endpoint, the model, and request parameters, never by the credential."""
+        return f"{self.api_base}|{self.model_name}|t={self.temperature}|max={self.max_tokens}|{self.extra_body}"
+
+    def cache_profile(self):
+        from tyche.cache import detect_profile
+
+        return detect_profile(self.provider, self.api_base, self.model_name, self.cache)
+
+
+def _cache_setting(value: Any) -> str:
+    """The ``cache`` model setting; YAML reads a bare ``off`` as false and ``on`` as true."""
+    if isinstance(value, bool):
+        return "auto" if value else "off"
+    return str(value or "auto")
 
 
 class TycheConfig:
@@ -174,7 +200,7 @@ class TycheConfig:
         def _opt_int(value: Any) -> int | None:
             return None if value in (None, "") else int(value)
 
-        return ModelSpec(
+        spec = ModelSpec(
             role=role,
             provider=str(base.get("provider") or "OpenAI"),
             model_name=str(base["model_name"]),
@@ -184,7 +210,15 @@ class TycheConfig:
             temperature=_opt_float(base.get("temperature")),
             max_tokens=_opt_int(base.get("max_tokens")),
             extra_body=dict(base.get("extra_body") or {}),
+            cache=_cache_setting(base.get("cache")),
+            cache_retention=str(base.get("cache_retention") or ""),
+            context_window=_opt_int(base.get("context_window")) or 131072,
         )
+        try:
+            spec.cache_profile()
+        except ValueError as exc:
+            raise ConfigError(f"models.{role}.cache: {exc}") from exc
+        return spec
 
     def workspace_root(self) -> Path:
         return Path(str(self.get("workspace.root") or "workspace")).expanduser().resolve()

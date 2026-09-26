@@ -113,9 +113,17 @@ def _encoder():
 
 
 def count_tokens(text: str) -> int:
-    """Approximate token count, used for context budgets rather than billing."""
+    """Approximate token count, used for context budgets rather than billing.
+
+    Memoized: multi-turn conversations re-count the same earlier turns on every call.
+    """
     if not text:
         return 0
+    return _count_tokens(text)
+
+
+@lru_cache(maxsize=4096)
+def _count_tokens(text: str) -> int:
     encoder = _encoder()
     if encoder is not None:
         try:

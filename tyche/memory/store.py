@@ -15,10 +15,10 @@ index ranked by BM25. Each item records:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -132,31 +132,40 @@ class MemoryStore:
             raise ValueError(f"unknown scope {scope!r}")
         if scope == "run" and not run_id:
             raise ValueError("run-scoped memory needs a run_id")
-        new_id = item_id or f"{kind[:3]}-{uuid.uuid4().hex[:10]}"
         tag_list = sorted({t for t in tags if t})
-        with self._conn:
-            self._conn.execute(
-                "INSERT INTO items (id, kind, scope, run_id, provenance, title, body, source_ref, tags, meta, created_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    new_id,
-                    kind,
-                    scope,
-                    run_id,
-                    provenance,
-                    title,
-                    body,
-                    source_ref,
-                    json.dumps(tag_list),
-                    json.dumps(meta or {}, ensure_ascii=False),
-                    utcnow(),
-                ),
-            )
-            self._conn.execute(
-                "INSERT INTO items_fts (id, title, body, tags) VALUES (?,?,?,?)",
-                (new_id, title, body, " ".join(tag_list)),
-            )
-        return new_id
+        row = (kind, scope, run_id, provenance, title, body, source_ref, json.dumps(tag_list),
+               json.dumps(meta or {}, ensure_ascii=False), utcnow())
+        # An explicit id is used as given. Otherwise the id is derived from the content, with a
+        # counter for repeated identical items; the insert itself claims it, so two processes
+        # sharing the database cannot both take the same id.
+        candidates = [item_id] if item_id else self._content_ids(kind, scope, run_id, title, source_ref, body)
+        for new_id in candidates:
+            try:
+                with self._conn:
+                    self._conn.execute(
+                        "INSERT INTO items (id, kind, scope, run_id, provenance, title, body, source_ref, tags, meta,"
+                        " created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        (new_id, *row),
+                    )
+                    self._conn.execute(
+                        "INSERT INTO items_fts (id, title, body, tags) VALUES (?,?,?,?)",
+                        (new_id, title, body, " ".join(tag_list)),
+                    )
+            except sqlite3.IntegrityError:
+                if item_id:
+                    raise
+                continue
+            return new_id
+        raise RuntimeError("could not allocate a memory item id")
+
+    @staticmethod
+    def _content_ids(*fields: str | None):
+        """Ids derived from the item's content, so identical inputs give identical prompts (memory
+        blocks show ids) and prompt caches can match across processes."""
+        blob = "\x1f".join(f or "" for f in fields)
+        for n in range(10_000):
+            digest = hashlib.sha256(f"{blob}\x1e{n}".encode("utf-8")).hexdigest()[:10]
+            yield f"{(fields[0] or '')[:3]}-{digest}"
 
     def supersede(self, old_id: str, body: str, **fields: Any) -> str:
         """Record a correction: the old item stays, linked to its replacement."""

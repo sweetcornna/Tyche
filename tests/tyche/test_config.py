@@ -47,3 +47,9 @@ def test_direction_presets_load():
         assert preset["seed_queries"] and preset["experiment_families"]
     with pytest.raises(ConfigError):
         load_direction("quantum")
+
+
+def test_context_window_defaults_to_128k_and_follows_the_environment():
+    spec = TycheConfig.load(env={}).model("writer")
+    assert spec.context_window == 131072 and spec.public_dict()["context_window"] == 131072
+    assert TycheConfig.load(env={"MODEL_CONTEXT_WINDOW": "1000000"}).model("writer").context_window == 1_000_000

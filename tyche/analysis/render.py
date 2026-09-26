@@ -14,6 +14,11 @@ def _metric_label(metric: str, lower: bool) -> str:
     return latex_escape(metric.replace("_", " ")) + " " + arrow
 
 
+# Shrink a table to the text width only when it is wider (graphicx; narrow tables keep their size).
+_FIT_OPEN = r"\resizebox{\ifdim\width>\linewidth\linewidth\else\width\fi}{!}{%"
+_FIT_CLOSE = "}"
+
+
 def results_table(analysis: Analysis, *, caption: str, label: str = "tab:main") -> str:
     metrics = analysis.metrics[:5]
     best: dict[str, str] = {}
@@ -34,6 +39,7 @@ def results_table(analysis: Analysis, *, caption: str, label: str = "tab:main") 
         r"\caption{" + caption + "}",
         r"\label{" + label + "}",
         r"\small",
+        _FIT_OPEN,
         r"\begin{tabular}{" + cols + "}",
         r"\toprule",
         "Method & " + " & ".join(_metric_label(m, analysis.lower_is_better.get(m, False)) for m in metrics) + r" \\",
@@ -56,7 +62,7 @@ def results_table(analysis: Analysis, *, caption: str, label: str = "tab:main") 
         lines.append(name + " & " + " & ".join(cells) + r" \\")
         if variant == analysis.proposed:
             lines.append(r"\midrule")
-    lines += [r"\bottomrule", r"\end{tabular}", r"\end{table}"]
+    lines += [r"\bottomrule", r"\end{tabular}", _FIT_CLOSE, r"\end{table}"]
     return "\n".join(lines) + "\n"
 
 
@@ -71,6 +77,7 @@ def comparison_table(analysis: Analysis, *, label: str = "tab:paired") -> str:
         r"sign-flip permutation $p$-value.}",
         r"\label{" + label + "}",
         r"\small",
+        _FIT_OPEN,
         r"\begin{tabular}{llccc}",
         r"\toprule",
         r"Metric & Baseline & $\Delta$ & " + analysis.confidence_percent + r"\% CI & $p$ \\",
@@ -83,7 +90,7 @@ def comparison_table(analysis: Analysis, *, label: str = "tab:paired") -> str:
             f"{fmt(c.ci_high, c.metric, latex=True)}] & "
             f"{fmt_p(c.p_value).replace('<', '$<$')} \\\\"
         )
-    lines += [r"\bottomrule", r"\end{tabular}", r"\end{table}"]
+    lines += [r"\bottomrule", r"\end{tabular}", _FIT_CLOSE, r"\end{table}"]
     return "\n".join(lines) + "\n"
 
 

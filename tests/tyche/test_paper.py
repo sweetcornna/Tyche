@@ -198,7 +198,7 @@ def test_reflection_reaches_result_sections_only(memory, tmp_path):
     shared = [b.name for b in writer.shared_context(ctx)]
     assert shared == [
         "research_plan", "allowed_citations", "available_labels", "results_brief",
-        "experiment_design", "experiment_reflection",
+        "experiment_design", "experiment_reflection", "survey_synthesis", "evidence",
     ]
     # ... and is not repeated in the per-section user message.
     assert "results_brief" not in [b.name for b in writer._blocks("analysis", ctx, {}, None, None)]
@@ -246,3 +246,152 @@ async def test_all_sections_share_one_cacheable_system_prompt(memory, tmp_path):
     assert len(systems) == 1, "every section call must share the same system prefix"
     assert "<results_brief>" in systems.pop()
     assert all("<results_brief>" not in user for _, _, user in llm.calls)
+
+
+@needs_latex
+def test_wide_results_table_fits_the_text_width(tmp_path):
+    import subprocess
+
+    from tyche.analysis import analyze, results_table
+    from tyche.paper.latex import PaperSource, compile_pdf, write_build
+
+    names = [
+        "current_fact_accuracy", "stale_fact_rate", "provenance_query_accuracy",
+        "prompt_tokens_per_query", "historical_fact_accuracy",
+    ]
+    variants = {
+        v: {m: 0.5 + 0.1 * i + (1000 if "tokens" in m else 0) for i, m in enumerate(names)}
+        for v in ("proposed", "full_context_baseline", "retrieval_only_baseline")
+    }
+    variants["proposed"]["historical_fact_accuracy"] = 0.944
+    table = results_table(analyze(variants, plan_metrics=names), caption="Main results.")
+    bib = tmp_path / "refs.bib"
+    bib.write_text("@misc{k1, title={A}, author={B, C}, year={2024}}\n")
+    src = PaperSource(
+        title="Wide", abstract="An abstract.", sections={"experiments": "See Table~\\ref{tab:main}.\n" + table},
+        ai_statement="AI statement.", reproducibility="Repro.",
+    )
+    result = compile_pdf(write_build(src, tmp_path / "b", bib_path=bib, figures=[]))
+    assert result.ok, result.errors
+    log = (tmp_path / "b" / "main.log").read_text(errors="replace")
+    assert "Overfull \\hbox" not in log
+    text = subprocess.run(["pdftotext", "-layout", str(result.pdf), "-"], capture_output=True, text=True).stdout
+    assert "historical fact accuracy" in " ".join(text.split()) and "0.944" in text
+
+
+async def test_author_conversation_is_append_only_and_rolls_back(memory, tmp_path):
+    from tyche.llm import ScriptedLLM
+    from tyche.paper.writer import SectionWriter, WritingContext
+    from tyche.planning import ResearchPlan
+    from tyche.selftest import PLAN
+
+    ctx = WritingContext(
+        plan=ResearchPlan.model_validate(PLAN), citations=[], synthesis={}, results_brief="- accuracy 0.70",
+        design_excerpt="design", labels={}, run_id="r1",
+    )
+    llm = ScriptedLLM({"write": lambda s, u: "<latex>Draft.</latex>", "revise": lambda s, u: "<latex>Better.</latex>"})
+    writer = SectionWriter(
+        llm, memory=memory, contracts={}, budget=9000, evidence_limit=4, lessons_limit=2,
+        manifest_dir=tmp_path / "manifests",
+    )
+    method = (await writer.write("method", ctx, {})).latex
+    await writer.write("experiments", ctx, {"method": method})
+    # Each request carries exactly the earlier turns: the previous request is a prefix of the next.
+    assert [len(h) for h in llm.histories] == [0, 2]
+    assert llm.histories[1][1]["content"] == "<latex>\nDraft.\n</latex>"
+    # The method section is in the history verbatim, so it is neither summarised nor resent.
+    assert "other_sections_now" not in llm.calls[1][2] and "<current_section>" not in llm.calls[1][2]
+
+    findings = [{"id": "F1", "problem": "p", "fix": "f"}]
+    state = writer.checkpoint()
+    await writer.revise("method", ctx, {}, method, findings)
+    first_revise = llm.calls[-1][2]
+    assert "<findings_to_address>" in first_revise
+    assert "<section_contract>" not in first_revise and "<current_section>" not in first_revise
+    writer.rollback(state)  # a rejected revision round
+    await writer.revise("method", ctx, {}, method, findings)
+    assert len(llm.histories[-1]) == 4  # the rejected exchange is gone; the prefix is unchanged
+    assert len({s for _, s, _ in llm.calls}) == 1
+
+
+async def test_review_stage_resumes_the_write_stage_conversation(memory, tmp_path):
+    from dataclasses import replace
+
+    from tyche.llm import ScriptedLLM
+    from tyche.paper.writer import SectionWriter, WritingContext
+    from tyche.planning import ResearchPlan
+    from tyche.selftest import PLAN
+
+    ctx = WritingContext(
+        plan=ResearchPlan.model_validate(PLAN), citations=[], synthesis={}, results_brief="- accuracy 0.70",
+        design_excerpt="design", labels={}, run_id="r1",
+    )
+    llm = ScriptedLLM({"write": lambda s, u: "<latex>Draft.</latex>", "revise": lambda s, u: "<latex>Better.</latex>"})
+
+    def make():
+        return SectionWriter(
+            llm, memory=memory, contracts={}, budget=9000, evidence_limit=4, lessons_limit=2,
+            manifest_dir=tmp_path / "manifests",
+        )
+
+    first = make()
+    method = (await first.write("method", ctx, {})).latex
+    state = first.export_state()
+    second = make()
+    assert second.import_state(state, ctx)
+    await second.revise("method", ctx, {}, method, [{"id": "F1", "problem": "p", "fix": "f"}])
+    assert llm.histories[-1] == state["turns"]  # the saved history is the cached prefix
+    assert "<current_section>" not in llm.calls[-1][2]
+    changed = replace(ctx, results_brief="- accuracy 0.71")
+    assert not make().import_state(state, changed)  # a different shared context starts afresh
+
+
+async def test_title_turn_strips_latex_tags_and_rollback_without_conversation(memory, tmp_path):
+    from tyche.llm import ScriptedLLM
+    from tyche.paper.writer import SectionWriter, WritingContext
+    from tyche.planning import ResearchPlan
+    from tyche.selftest import PLAN
+
+    ctx = WritingContext(
+        plan=ResearchPlan.model_validate(PLAN), citations=[], synthesis={}, results_brief="- accuracy 0.70",
+        design_excerpt="design", labels={}, run_id="r1",
+    )
+    llm = ScriptedLLM({
+        "write": lambda s, u: "<latex>Draft.</latex>",
+        "revise": lambda s, u: "<latex>Better.</latex>",
+        # The author conversation asks for <latex> blocks, and a model may wrap the title too.
+        "write:title": lambda s, u: "<latex>\nProvenance Ledgers Keep Agent Memory Current\n</latex>",
+    })
+    writer = SectionWriter(
+        llm, memory=memory, contracts={}, budget=9000, evidence_limit=4, lessons_limit=2,
+        manifest_dir=tmp_path / "manifests",
+    )
+    # A checkpoint taken before any conversation exists (a review stage with nothing to resume).
+    state = writer.checkpoint()
+    await writer.revise("method", ctx, {}, "Old.", [{"id": "F1", "problem": "p", "fix": "f"}])
+    writer.rollback(state)
+    assert writer.conversation is None and writer._latest == {}
+    assert await writer.title(ctx, "An abstract.") == "Provenance Ledgers Keep Agent Memory Current"
+    # The rejected revision is not part of the conversation the title extended.
+    assert llm.histories[-1] == []
+
+
+async def test_author_conversation_restarts_before_exceeding_the_history_budget(memory, tmp_path):
+    from tyche.llm import ScriptedLLM
+    from tyche.paper.writer import SectionWriter, WritingContext
+    from tyche.planning import ResearchPlan
+    from tyche.selftest import PLAN
+
+    ctx = WritingContext(
+        plan=ResearchPlan.model_validate(PLAN), citations=[], synthesis={}, results_brief="- accuracy 0.70",
+        design_excerpt="design", labels={}, run_id="r1",
+    )
+    llm = ScriptedLLM({"write": lambda s, u: "<latex>" + "Long section text. " * 400 + "</latex>"})
+    writer = SectionWriter(
+        llm, memory=memory, contracts={}, budget=9000, evidence_limit=4, lessons_limit=2,
+        manifest_dir=tmp_path / "manifests", max_history_tokens=6000,
+    )
+    for name in ("method", "experiments", "analysis", "conclusion"):
+        await writer.write(name, ctx, {})
+    assert max(len(h) for h in llm.histories) < 8  # restarted instead of growing without bound
+    assert writer.conversation.tokens() <= 6000 + 2 * 3000

@@ -359,11 +359,17 @@ class Pipeline:
         """
         paper_cfg = dict(self.cfg.get("paper") or {})
         contracts = dict(paper_cfg.get("sections") or {})
+        budget = int(self.cfg.get("memory.context_budgets.section", 9000))
+        spec = self.cfg.model("writer")
+        # The author conversation (system prompt and history) must leave room for one more
+        # turn of up to ``budget`` tokens, instructions, and the reply.
+        history = spec.context_window - (spec.max_tokens or 8192) - budget - 4000
         writer = SectionWriter(
             self.svc.writer,
             memory=self.memory,
             contracts=contracts,
-            budget=int(self.cfg.get("memory.context_budgets.section", 9000)),
+            budget=budget,
+            max_history_tokens=max(16000, history),
             evidence_limit=int(self.cfg.get("memory.evidence_per_section", 12)),
             lessons_limit=int(self.cfg.get("memory.lessons_per_section", 5)),
             manifest_dir=self.ws.stage_dir(stage) / "context_manifests",
@@ -424,6 +430,11 @@ class Pipeline:
             stage="write",
             inputs=inputs,
         )
+        # The review stage resumes this author conversation, so its revisions extend a prefix
+        # the provider has already cached instead of starting a new one.
+        state = composer.writer.export_state()
+        if state is not None:
+            self.ws.save_json("author_conversation", state, stage="write", inputs=inputs)
         return {"title": composer.title, "words": sum(len(s.split()) for s in composer.sections.values())}
 
     # -- S5 review -------------------------------------------------------
@@ -434,6 +445,9 @@ class Pipeline:
         draft = self.ws.load_json("draft")
         composer.load(draft["title"], draft["sections"])
         composer.removed = {k: list(v) for k, v in (draft.get("removed_citations") or {}).items()}
+        if self.ws.latest("author_conversation") is not None:
+            resumed = composer.writer.import_state(self.ws.load_json("author_conversation"), ctx)
+            self.log("review.author_conversation", resumed=resumed)
         review_cfg = dict(self.cfg.get("review") or {})
         panel = ReviewPanel(
             self.svc.reviewer,
@@ -719,6 +733,13 @@ class Pipeline:
         for stage, row in state.get("stages", {}).items():
             lines.append(f"- {stage}: {row.get('status')}")
         lines += ["", "## Model usage", "", f"- Total: {usage['total']}"]
+        profiles = {
+            role: getattr(getattr(self.svc, role), "profile", None) for role in ("planner", "writer", "reviewer")
+        }
+        lines.append(
+            "- Prompt-cache profiles: "
+            + ", ".join(f"{role}={p.name} ({p.mechanism})" for role, p in profiles.items() if p is not None)
+        )
         for stage, row in usage["by_stage"].items():
             lines.append(f"- {stage}: {row}")
         if gates.get("findings"):

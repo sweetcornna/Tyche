@@ -59,3 +59,36 @@ def test_memory_block_records_item_ids(memory):
     block = memory_block(memory, "evidence", "provenance audits", kinds=["evidence"], run_id="r", limit=3)
     assert block.item_ids == [item]
     assert "(evidence/retrieved)" in block.text
+
+
+def test_item_ids_derive_from_content_so_prompts_repeat_exactly(memory, tmp_path):
+    from tyche.memory import MemoryStore
+
+    first = memory.add("evidence", "Quoted claim.", provenance="retrieved", run_id="r1", source_ref="k")
+    # The same content in another store (another process, a rerun) gets the same id ...
+    other = MemoryStore(tmp_path / "other.db")
+    try:
+        assert other.add("evidence", "Quoted claim.", provenance="retrieved", run_id="r1", source_ref="k") == first
+    finally:
+        other.close()
+    # ... a repeated identical item stays distinct, and different content differs.
+    again = memory.add("evidence", "Quoted claim.", provenance="retrieved", run_id="r1", source_ref="k")
+    assert again != first and again.startswith("evi-")
+    assert memory.add("evidence", "Another claim.", provenance="retrieved", run_id="r1", source_ref="k") != first
+
+
+def test_content_ids_are_claimed_by_the_insert_not_a_prior_check(memory, tmp_path):
+    """Two stores on one database (two processes) never collide on a content-derived id."""
+    from tyche.memory import MemoryStore
+
+    path = tmp_path / "shared.db"
+    first, second = MemoryStore(path), MemoryStore(path)
+    try:
+        a = first.add("lesson", "Same lesson.", provenance="inferred", scope="global")
+        b = second.add("lesson", "Same lesson.", provenance="inferred", scope="global")
+        assert a != b and a.startswith("les-") and b.startswith("les-")
+        with pytest.raises(Exception):
+            second.add("lesson", "Other.", provenance="inferred", scope="global", item_id=a)
+    finally:
+        first.close()
+        second.close()
