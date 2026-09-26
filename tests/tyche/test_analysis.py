@@ -122,3 +122,18 @@ def test_ids_reused_across_seeds_name_different_items():
     result = analyze(variants, plan_metrics=["accuracy"], resamples=200, permutations=200)
     # Eight distinct generated items (4 per seed), not four items averaged over seeds.
     assert result.comparisons[0].n == 8
+
+
+
+def test_question_set_is_a_grouping_field():
+    rows_p = [{"id": f"h{i}", "question_set": "historical", "correct": True} for i in range(4)]
+    rows_p += [{"id": f"c{i}", "question_set": "current", "correct": True} for i in range(4)]
+    rows_b = [{"id": f"h{i}", "question_set": "historical", "correct": i == 0} for i in range(4)]
+    rows_b += [{"id": f"c{i}", "question_set": "current", "correct": True} for i in range(4)]
+    variants = {
+        "proposed": {"historical_fact_accuracy": 1.0, "per_question": rows_p},
+        "baseline": {"historical_fact_accuracy": 0.25, "per_question": rows_b},
+    }
+    result = analyze(variants, plan_metrics=["historical_fact_accuracy"], resamples=200, permutations=200)
+    assert result.variants["baseline"]["historical_fact_accuracy"].n == 4
+    assert result.comparisons[0].n == 4 and abs(result.comparisons[0].diff - 0.75) < 1e-9

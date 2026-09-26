@@ -22,6 +22,7 @@ import contextlib
 import functools
 import json
 import os
+import re
 import shutil
 from dataclasses import dataclass, field
 from importlib import resources
@@ -66,7 +67,10 @@ _BOOKKEEPING = {
     "failed_item_fraction",
     "n_items",
     "n_seeds",
+    "call_failure_rate",
 }
+# Top-level keys shaped like settings or counts rather than results (budget_*, max_*, num_*, n_*).
+_SETTING_KEY = re.compile(r"^(budget|max|num|n)_")
 
 # Maps {metric: bool} by which experiment code marks metrics it could not compute
 # (e.g. an empty subset); such a metric's placeholder value is never a result.
@@ -144,7 +148,7 @@ def numeric_metrics(data: dict[str, Any]) -> dict[str, float]:
     }
     out: dict[str, float] = {}
     for key, value in data.items():
-        if key in _BOOKKEEPING or key in undefined or isinstance(value, bool):
+        if key in _BOOKKEEPING or key in undefined or _SETTING_KEY.match(key) or isinstance(value, bool):
             continue
         if isinstance(value, (int, float)):
             out[key] = float(value)

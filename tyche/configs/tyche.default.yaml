@@ -84,6 +84,7 @@ experiments:
     - "Implement every baseline faithfully and competitively, as its proponents would; in the smoke test, check that no variant abstains or answers unknown on most items, and fix the implementation if one does."
     - "Never hard-code or simulate metric values; every number must come from executed runs."
     - "The model behind API_KEY/API_BASE/MODEL_NAME may be a reasoning model whose hidden reasoning counts toward max_tokens and can take several thousand tokens on counting or multi-step questions: request max_tokens of at least 8192 per call, use only the final message content, and if the content is empty retry once with twice the max_tokens."
+    - "Write only result metrics at the top level of each metrics file; put run settings (budgets, concurrency, temperature, token limits) and run diagnostics under a nested settings object."
     - "Report a metric that could not be computed (for example over an empty subset) as null or mark it false in a top-level `metric_defined` map; never write 0 as a placeholder."
     - "Record a call that still fails in that item's `error` field instead of silently scoring it wrong; keep failed items under 1% of every variant, since failed items are not evidence about the method."
     - "While implementing code, validate with the smoke test or a tiny subset only; never launch the full experiment there, because the execution stage runs every variant."

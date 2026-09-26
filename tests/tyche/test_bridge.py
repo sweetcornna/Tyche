@@ -194,5 +194,8 @@ def test_metrics_marked_undefined_are_not_results():
 
 
 def test_run_settings_are_not_metrics():
-    data = {"accuracy": 0.8, "concurrency": 8, "temperature": 0.0, "max_tokens": 8192, "elapsed_s": 12.5}
+    data = {
+        "accuracy": 0.8, "concurrency": 8, "temperature": 0.0, "max_tokens": 8192, "elapsed_s": 12.5,
+        "budget_prompt_tokens": 1500, "n_sessions": 80, "call_failure_rate": 0.0,
+    }
     assert numeric_metrics(data) == {"accuracy": 0.8}

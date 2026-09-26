@@ -94,7 +94,10 @@ class Analysis:
 
 # Per-item fields that split items into groups a metric may be reported over, e.g.
 # stratum="change_count" for change_count_accuracy, or pass="matched_budget".
-_GROUP_KEYS = ("stratum", "category", "question_type", "qtype", "type", "split", "subset", "task_type", "pass", "setting")
+_GROUP_KEYS = (
+    "stratum", "category", "question_set", "question_type", "qtype", "type", "set", "bucket", "slice", "split",
+    "subset", "task_type", "pass", "setting",
+)
 # Group values that stand for the headline evaluation when a metric names no group.
 _DEFAULT_GROUP_VALUES = {"main", "primary", "default", "test", "full"}
 
