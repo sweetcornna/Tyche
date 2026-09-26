@@ -13,7 +13,7 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 from typing import Any, Mapping
@@ -92,6 +92,7 @@ class ModelSpec:
     timeout: float
     temperature: float | None
     max_tokens: int | None
+    extra_body: dict[str, Any] = field(default_factory=dict)
 
     def api_key(self, env: Mapping[str, str] | None = None) -> str:
         source = os.environ if env is None else env
@@ -107,6 +108,7 @@ class ModelSpec:
             "api_key_env": self.api_key_env,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
+            "extra_body": self.extra_body,
         }
 
 
@@ -181,6 +183,7 @@ class TycheConfig:
             timeout=float(base.get("timeout") or 600),
             temperature=_opt_float(base.get("temperature")),
             max_tokens=_opt_int(base.get("max_tokens")),
+            extra_body=dict(base.get("extra_body") or {}),
         )
 
     def workspace_root(self) -> Path:

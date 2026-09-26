@@ -216,14 +216,14 @@ class Surveyor:
         for start in range(0, len(candidates), batch):
             chunk = list(enumerate(candidates[start : start + batch], start=start))
             items = [(f"C{idx:03d}", paper) for idx, paper in chunk]
-            user = (
-                "<research_plan>\n" + plan.model_dump_json(indent=1) + "\n</research_plan>\n"
-                "<candidates>\n" + _candidates_block(items) + "\n</candidates>"
-            )
+            # The plan is identical for every batch: keep it in the (cacheable) system prefix.
             result = await complete_json(
                 self.llm,
-                system=load_prompt("survey_screen"),
-                user=user,
+                system=load_prompt("survey_screen")
+                + "\n\n<research_plan>\n"
+                + plan.model_dump_json(indent=1)
+                + "\n</research_plan>",
+                user="<candidates>\n" + _candidates_block(items) + "\n</candidates>",
                 schema=ScreenResult,
                 purpose="survey:screen",
             )
@@ -258,14 +258,10 @@ class Surveyor:
         entries = [(key, p) for key, p in keyed.items() if p.abstract]
         for start in range(0, len(entries), 6):
             chunk = entries[start : start + 6]
-            user = (
-                f"<cards_per_paper>{per_paper}</cards_per_paper>\n"
-                "<papers>\n" + _candidates_block(chunk, abstract_chars=2500) + "\n</papers>"
-            )
             result = await complete_json(
                 self.llm,
-                system=load_prompt("survey_cards"),
-                user=user,
+                system=load_prompt("survey_cards") + f"\n\n<cards_per_paper>{per_paper}</cards_per_paper>",
+                user="<papers>\n" + _candidates_block(chunk, abstract_chars=2500) + "\n</papers>",
                 schema=EvidenceResult,
                 purpose="survey:cards",
             )

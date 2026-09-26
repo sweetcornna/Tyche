@@ -159,3 +159,90 @@ def test_sanitized_unicode_heavy_section_compiles(tmp_path):
     src = PaperSource(title="U", abstract="A.", sections={"introduction": body}, ai_statement="S.", reproducibility="R.")
     result = compile_pdf(write_build(src, tmp_path / "b", bib_path=bib, figures=[]))
     assert result.ok, result.errors
+
+
+def test_reflection_reaches_result_sections_only(memory, tmp_path):
+    from tyche.llm import ScriptedLLM
+    from tyche.paper.writer import SectionWriter, WritingContext
+    from tyche.planning import ResearchPlan
+    from tyche.selftest import PLAN
+
+    ctx = WritingContext(
+        plan=ResearchPlan.model_validate(PLAN),
+        citations=[],
+        synthesis={},
+        results_brief="- proposed accuracy 0.70",
+        design_excerpt="design",
+        labels={},
+        run_id="r1",
+        reflection_excerpt="Verdict: mixed; the latest-wins baseline was defective.",
+    )
+    writer = SectionWriter(
+        ScriptedLLM({}),
+        memory=memory,
+        contracts={},
+        budget=9000,
+        evidence_limit=4,
+        lessons_limit=2,
+        manifest_dir=tmp_path / "manifests",
+    )
+
+    def use(section):
+        return writer.contract(section, ctx)["shared_context_to_use"]
+
+    assert "experiment_reflection" in use("analysis")
+    assert "experiment_reflection" in use("abstract")
+    assert "experiment_reflection" not in use("method")
+    assert "experiment_reflection" not in use("related_work")
+    # Shared context is identical for every section (one cacheable system prefix per run) ...
+    shared = [b.name for b in writer.shared_context(ctx)]
+    assert shared == [
+        "research_plan", "allowed_citations", "available_labels", "results_brief",
+        "experiment_design", "experiment_reflection",
+    ]
+    # ... and is not repeated in the per-section user message.
+    assert "results_brief" not in [b.name for b in writer._blocks("analysis", ctx, {}, None, None)]
+    assert writer.contract("abstract", ctx)["may_cite"] is False
+
+
+def test_reproducibility_statement_claims_only_computed_statistics():
+    from tyche.paper.statements import reproducibility_statement
+
+    both = reproducibility_statement({"analysis_seed": 7})
+    assert "bootstrap" in both and "permutation" in both
+    none = reproducibility_statement(
+        {"analysis_seed": 7, "has_intervals": False, "has_paired_tests": False, "experiment_engine": "openjiuwen"}
+    )
+    assert "bootstrap" not in none and "permutation" not in none and "point estimates" in none
+    ci_only = reproducibility_statement({"analysis_seed": 7, "has_intervals": True, "has_paired_tests": False})
+    assert "bootstrap" in ci_only and "permutation" not in ci_only
+
+
+async def test_all_sections_share_one_cacheable_system_prompt(memory, tmp_path):
+    from tyche.llm import ScriptedLLM
+    from tyche.paper.writer import SectionWriter, WritingContext
+    from tyche.planning import ResearchPlan
+    from tyche.selftest import PLAN
+
+    ctx = WritingContext(
+        plan=ResearchPlan.model_validate(PLAN),
+        citations=[{"key": "fixture2020memory", "title": "Fixture memory", "year": 2020}],
+        synthesis={"gap": "g", "themes": [], "open_problems": []},
+        results_brief="- proposed accuracy 0.70",
+        design_excerpt="design",
+        labels={"tab:main": "main table"},
+        run_id="r1",
+        reflection_excerpt="Verdict: mixed.",
+    )
+    llm = ScriptedLLM({"write": lambda s, u: "<latex>Text.</latex>", "revise": lambda s, u: "<latex>Text.</latex>"})
+    writer = SectionWriter(
+        llm, memory=memory, contracts={}, budget=9000, evidence_limit=4, lessons_limit=2,
+        manifest_dir=tmp_path / "manifests",
+    )
+    for name in ("method", "experiments", "abstract"):
+        await writer.write(name, ctx, {})
+    await writer.revise("analysis", ctx, {}, "Old text.", [{"id": "F001", "problem": "p", "fix": "f"}])
+    systems = {system for _, system, _ in llm.calls}
+    assert len(systems) == 1, "every section call must share the same system prefix"
+    assert "<results_brief>" in systems.pop()
+    assert all("<results_brief>" not in user for _, _, user in llm.calls)

@@ -79,3 +79,71 @@ def test_confidence_level_flows_into_brief_and_tables(results_dir):
     assert "80% CI" in results_brief(analysis) and "95% CI" not in results_brief(analysis)
     assert "80\\% CI" in comparison_table(analysis)
     assert build_registry(analysis).match("80") is not None
+
+
+def test_stratum_metrics_use_only_their_items():
+    def rows(correct_by_stratum):
+        out = []
+        for stratum, flags in correct_by_stratum.items():
+            for i, ok in enumerate(flags):
+                for pass_name in ("main", "matched_budget"):
+                    out.append({"question_id": f"{stratum}{i}", "stratum": stratum, "pass": pass_name, "correct": ok})
+        return out
+
+    proposed = rows({"count": [1, 1, 1, 0], "current": [1, 1, 1, 1]})
+    baseline = rows({"count": [1, 0, 0, 0], "current": [1, 1, 1, 1]})
+    variants = {
+        "proposed": {"count_accuracy": 0.75, "current_accuracy": 1.0, "combined_accuracy": 0.9, "per_question": proposed},
+        "baseline": {"count_accuracy": 0.25, "current_accuracy": 1.0, "combined_accuracy": 0.6, "per_question": baseline},
+    }
+    result = analyze(variants, plan_metrics=["count_accuracy"], resamples=200, permutations=200)
+    count = result.variants["proposed"]["count_accuracy"]
+    # Only the four main-pass "count" items, not all sixteen rows.
+    assert count.n == 4 and count.mean == 0.75
+    comparison = next(c for c in result.comparisons if c.metric == "count_accuracy")
+    assert comparison.n == 4 and abs(comparison.diff - 0.5) < 1e-9
+    # A reported value the rows cannot reproduce gets no interval rather than a wrong one.
+    assert result.variants["proposed"]["combined_accuracy"].n == 0
+    assert any("combined_accuracy" in note for note in result.notes)
+
+
+def test_ids_reused_across_seeds_name_different_items():
+    def rows(flags, gold_prefix):
+        return [
+            {"seed": seed, "question_id": f"q{i}", "gold": f"{gold_prefix}{seed}-{i}", "correct": ok}
+            for seed in (1, 2)
+            for i, ok in enumerate(flags)
+        ]
+
+    variants = {
+        "proposed": {"accuracy": 0.75, "per_question": rows([1, 1, 1, 0], "g")},
+        "baseline": {"accuracy": 0.25, "per_question": rows([1, 0, 0, 0], "g")},
+    }
+    result = analyze(variants, plan_metrics=["accuracy"], resamples=200, permutations=200)
+    # Eight distinct generated items (4 per seed), not four items averaged over seeds.
+    assert result.comparisons[0].n == 8
+
+
+
+def test_question_set_is_a_grouping_field():
+    rows_p = [{"id": f"h{i}", "question_set": "historical", "correct": True} for i in range(4)]
+    rows_p += [{"id": f"c{i}", "question_set": "current", "correct": True} for i in range(4)]
+    rows_b = [{"id": f"h{i}", "question_set": "historical", "correct": i == 0} for i in range(4)]
+    rows_b += [{"id": f"c{i}", "question_set": "current", "correct": True} for i in range(4)]
+    variants = {
+        "proposed": {"historical_fact_accuracy": 1.0, "per_question": rows_p},
+        "baseline": {"historical_fact_accuracy": 0.25, "per_question": rows_b},
+    }
+    result = analyze(variants, plan_metrics=["historical_fact_accuracy"], resamples=200, permutations=200)
+    assert result.variants["baseline"]["historical_fact_accuracy"].n == 4
+    assert result.comparisons[0].n == 4 and abs(result.comparisons[0].diff - 0.75) < 1e-9
+
+
+
+def test_constant_metrics_are_ordered_after_informative_ones():
+    variants = {
+        "proposed": {"accuracy": 0.8, "call_budget_envelope": 600, "historical_accuracy": 0.9},
+        "baseline": {"accuracy": 0.6, "call_budget_envelope": 600, "historical_accuracy": 0.7},
+    }
+    result = analyze(variants, plan_metrics=["accuracy"], resamples=100, permutations=100)
+    assert result.metrics == ["accuracy", "historical_accuracy", "call_budget_envelope"]

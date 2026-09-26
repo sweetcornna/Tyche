@@ -98,9 +98,30 @@ tyche run --resume --run-id <run-id>
 
 - `--engine imported --results-dir <dir>`：使用团队自己跑出的 `<variant>.metrics.json`（可含逐条目结果 `per_question`），跳过自动实验。
 - `--set review.max_rounds=4`、`--set paper.max_main_pages=6`：覆盖任意配置项（默认值见 `tyche/configs/tyche.default.yaml`）。
-- `TYCHE_REVIEW_MODEL_NAME=...`：评审使用不同于写作的模型，降低自我认同偏差。
+- 模型分角色配置（`models.<role>`，未设置的字段继承 `models.default`）：`planner`、`writer`、`reviewer`、`experiments`（openjiuwen 实验智能体）、`subject`（生成的实验代码通过 `API_KEY/API_BASE/MODEL_NAME` 调用的被测模型）。`TYCHE_REVIEW_MODEL_NAME`、`TYCHE_EXPERIMENT_MODEL_NAME` 可分别为评审与实验智能体指定更强的模型，DeepSeek 下默认所有角色都用最新的 `deepseek-flash`（DeepSeek-V4.1-Flash）；也可让评审改用 `deepseek-v4-pro`，用不同模型评审能降低自我认同偏差。
+- DeepSeek V4/V4.1 是推理模型，隐藏推理会计入 `max_tokens`，默认上限为 32768；如需关闭推理，可设 `--set 'models.default.extra_body={"thinking":{"type":"disabled"}}'`。
 - `tyche review paper.pdf`：用本地 7 维评审团评审任意论文 PDF。
 - `tyche lessons`：查看跨运行写作经验及其状态。
+
+### 提示缓存（各模型服务商的缓存命中）
+
+Tyche 的提示布局遵循一条规则：**跨调用不变的内容放在最前面（system 消息），每次调用才变的内容放在最后（user 消息）**，并保证不变部分逐字节相同。这样：
+
+| 服务商 | 缓存机制 | Tyche 的做法 |
+|---|---|---|
+| DeepSeek | 自动前缀缓存（磁盘上下文缓存，按请求前缀命中） | 共享前缀逐字节一致即可命中，无需额外参数 |
+| OpenAI 及兼容接口（Qwen/DashScope、GLM、Moonshot 等） | 自动前缀缓存（通常 ≥1024 token） | 同上 |
+| Anthropic（原生接口） | 显式 `cache_control` 断点 | openjiuwen 客户端自动给 system 块、工具和最后一条稳定消息打断点；共享上下文放在 system 中即被缓存 |
+| OpenRouter | 显式 `cache_control`（支持的上游模型） | openjiuwen 默认开启 `openrouter_enable_explicit_prompt_caching`，标记首条（system）与末条消息 |
+
+具体落实：
+
+- **写作**：研究计划、可引用文献、结果简报、实验设计与实验反思对所有章节相同，放在 system 中；user 中只放章节合同、检索到的证据、前文摘要与待处理的评审意见。整轮写作与所有修订/缩写/修复调用共享一个缓存前缀。
+- **评审**：论文全文、未引用的相关工作与既往意见放在 system 中，三位评审只在 user 中给出各自视角。
+- **结构化输出**：JSON schema 说明放在 system 末尾，同一用途的所有调用（如各批文献筛选）共享前缀；重试只在 user 末尾追加校验错误。
+- **文献筛选/证据卡片**：研究计划与每篇卡片数放在 system 中，逐批候选放在 user 中。
+- **实验**：openjiuwen 的实验智能体由其多轮上下文管理自动命中缓存；生成的实验代码被约束为“固定指令与共享上下文在前、逐题内容在后”。
+- **计量**：每次调用记录服务商返回的缓存命中 token（openjiuwen 统一了 DeepSeek `prompt_cache_hit_tokens`、OpenAI `cached_tokens`、Anthropic `cache_read_input_tokens`），`run_report.md` 按阶段给出 `cached_input_tokens` 与 `cache_hit_rate`。
 
 ### 在 JiuwenSwarm 中使用
 

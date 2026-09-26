@@ -214,3 +214,32 @@ def test_crossref_subtitle_is_part_of_the_title():
 
     paper = CrossrefClient.to_paper({"title": ["Memory Ledgers"], "subtitle": ["Provenance for Agents"], "DOI": "10.1/x"})
     assert paper.title == "Memory Ledgers: Provenance for Agents"
+
+
+async def test_secret_query_params_stay_out_of_cache_and_errors(tmp_path):
+    import sqlite3
+
+    import pytest
+
+    from tyche.literature.http import HttpClient, HttpError
+
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        if "fail" in request.url.path:
+            return httpx.Response(403, text="bad key sk-openalex-secret")
+        return httpx.Response(200, text='{"results": []}')
+
+    cache = tmp_path / "c.sqlite"
+    http = HttpClient(cache_path=cache, transport=httpx.MockTransport(handler), max_retries=0)
+    try:
+        await http.get_text("https://api.openalex.org/works", {"search": "x"}, secret_params={"api_key": "sk-openalex-secret"})
+        assert "api_key=sk-openalex-secret" in seen[0]  # the service receives the key ...
+        with pytest.raises(HttpError) as err:
+            await http.get_text("https://api.openalex.org/fail", {"q": "y"}, secret_params={"api_key": "sk-openalex-secret"})
+        assert "sk-openalex-secret" not in str(err.value)  # ... errors never show it ...
+    finally:
+        await http.aclose()
+    dump = "\n".join(str(row) for row in sqlite3.connect(cache).iterdump())
+    assert "sk-openalex-secret" not in dump  # ... and neither does the response cache.

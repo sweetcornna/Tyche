@@ -92,34 +92,112 @@ class Analysis:
         }
 
 
-def _item_values(items: list[dict[str, Any]], metric: str) -> list[float] | None:
+# Per-item fields that split items into groups a metric may be reported over, e.g.
+# stratum="change_count" for change_count_accuracy, or pass="matched_budget".
+_GROUP_KEYS = (
+    "stratum", "category", "question_set", "question_type", "qtype", "type", "set", "bucket", "slice", "split",
+    "subset", "task_type", "pass", "setting",
+)
+# Group values that stand for the headline evaluation when a metric names no group.
+_DEFAULT_GROUP_VALUES = {"main", "primary", "default", "test", "full"}
+
+
+def _norm(text: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(text).lower()).strip("_")
+
+
+def _item_subsets(items: list[dict[str, Any]], metric: str) -> list[list[dict[str, Any]]]:
+    """Candidate item sets a metric may be computed over, most specific first.
+
+    For each grouping field present on every item, keep the values the metric's name
+    mentions (change_count_accuracy -> stratum change_count); when it mentions none,
+    keep the default values (pass main) if the field has any, else every value.
+    """
+    name = "_" + _norm(metric) + "_"
+    keep: dict[str, set[str]] = {}
+    for key in _GROUP_KEYS:
+        if not items or not all(isinstance(i, dict) and isinstance(i.get(key), str) for i in items):
+            continue
+        values = {i[key] for i in items}
+        if len(values) < 2:
+            continue
+        named = {v for v in values if _norm(v) and "_" + _norm(v) + "_" in name}
+        default = {v for v in values if _norm(v) in _DEFAULT_GROUP_VALUES}
+        if named or default:
+            keep[key] = named or default
+    subsets = []
+    if keep:
+        subset = [i for i in items if all(i[k] in vals for k, vals in keep.items())]
+        if subset:
+            subsets.append(subset)
+    subsets.append(items)
+    return subsets
+
+
+def _values_for(items: list[dict[str, Any]], key: str) -> list[float] | None:
+    values = []
+    for item in items:
+        if not isinstance(item, dict) or key not in item:
+            return None
+        raw = item[key]
+        if isinstance(raw, bool):
+            values.append(1.0 if raw else 0.0)
+        elif isinstance(raw, (int, float)) and math.isfinite(float(raw)):
+            values.append(float(raw))
+        else:
+            return None
+    return values or None
+
+
+def _reproduces(values: list[float], target: float | None) -> bool:
+    if target is None:
+        return True
+    return abs(float(np.mean(values)) - target) <= 1e-3 * max(1.0, abs(target))
+
+
+def _item_values(
+    items: list[dict[str, Any]], metric: str, target: float | None = None
+) -> tuple[list[dict[str, Any]], list[float]] | None:
+    """Per-item values behind ``metric``: (items used, values), or None.
+
+    Values are accepted only when their mean reproduces the reported ``target``, so
+    a stratum-level metric never inherits the all-items accuracy's interval or test.
+    """
     keys = [metric]
     for stem, aliases in _BOOL_ALIASES.items():
         if stem in metric.lower():
             keys.extend(aliases)
-    for key in keys:
-        values = []
-        for item in items:
-            if not isinstance(item, dict) or key not in item:
-                break
-            raw = item[key]
-            if isinstance(raw, bool):
-                values.append(1.0 if raw else 0.0)
-            elif isinstance(raw, (int, float)) and math.isfinite(float(raw)):
-                values.append(float(raw))
-            else:
-                break
-        else:
-            if values:
-                return values
+    for subset in _item_subsets(items, metric):
+        for key in keys:
+            values = _values_for(subset, key)
+            if values and _reproduces(values, target):
+                return subset, values
     return None
+
+
+_SEED_KEYS = ("seed", "run_seed", "trial_seed")
+# Fields that identify an item's content; if they differ for one id across seeds, the
+# id names different items per seed (generated data), not repeated trials of one item.
+_CONTENT_KEYS = ("gold", "gold_answer", "answer", "target", "question", "question_text", "prompt", "entity", "attribute")
 
 
 def _item_ids(items: list[dict[str, Any]]) -> list[str] | None:
     for key in _ITEM_ID_KEYS:
         if items and all(isinstance(i, dict) and key in i for i in items):
-            return [str(i[key]) for i in items]
+            ids = [str(i[key]) for i in items]
+            seed_key = next((s for s in _SEED_KEYS if all(s in i for i in items)), None)
+            if seed_key and len(set(ids)) < len(ids) and _ids_name_different_items(items, key, seed_key):
+                return [f"{i[seed_key]}:{i[key]}" for i in items]
+            return ids
     return None
+
+
+def _ids_name_different_items(items: list[dict[str, Any]], key: str, seed_key: str) -> bool:
+    content: dict[str, set[str]] = {}
+    for item in items:
+        signature = repr([item.get(k) for k in _CONTENT_KEYS if k in item])
+        content.setdefault(str(item[key]), set()).add(signature)
+    return any(len(signatures) > 1 for signatures in content.values())
 
 
 def _per_id_means(ids: list[str], values: np.ndarray) -> dict[str, float]:
@@ -187,9 +265,13 @@ def analyze(
     names = sorted(variants)
     proposed = pick_proposed(names, method_name)
     names = [proposed] + [n for n in names if n != proposed]
-    numeric = {name: numeric_metrics(variants[name]) for name in names}
+    numeric = {name: numeric_metrics(variants[name], keep=set(plan_metrics)) for name in names}
     shared = set.intersection(*(set(m) for m in numeric.values()))
-    ordered = [m for m in plan_metrics if m in shared] + sorted(shared - set(plan_metrics))
+    # Planned metrics first, then other metrics that differ between variants; metrics identical
+    # for every variant (budgets, conformance flags, ...) carry no comparison and go last.
+    extras = sorted(shared - set(plan_metrics))
+    constant = [m for m in extras if len({round(numeric[n][m], 12) for n in names}) == 1]
+    ordered = [m for m in plan_metrics if m in shared] + [m for m in extras if m not in constant] + constant
     notes = []
     missing = [m for m in plan_metrics if m not in shared]
     if missing:
@@ -199,17 +281,22 @@ def analyze(
     rng = np.random.default_rng(seed)
     summaries: dict[str, dict[str, MetricSummary]] = {}
     per_item: dict[str, dict[str, np.ndarray]] = {}
-    ids: dict[str, list[str] | None] = {}
+    ids: dict[str, dict[str, list[str] | None]] = {}
+    unmatched: set[str] = set()
     for name in names:
         items = variants[name].get("per_question") or []
         items = items if isinstance(items, list) else []
-        ids[name] = _item_ids(items)
         summaries[name] = {}
         per_item[name] = {}
+        ids[name] = {}
         for metric in ordered:
             summary = MetricSummary(value=numeric[name][metric])
-            values = _item_values(items, metric) if items else None
-            if values:
+            found = _item_values(items, metric, numeric[name][metric]) if items else None
+            if items and found is None and _item_values(items, metric) is not None:
+                unmatched.add(metric)
+            if found:
+                used, values = found
+                ids[name][metric] = _item_ids(used)
                 arr = np.asarray(values, dtype=float)
                 per_item[name][metric] = arr
                 lo, hi = bootstrap_ci(arr, rng, resamples, confidence)
@@ -225,7 +312,7 @@ def analyze(
             b = per_item[baseline].get(metric)
             if a is None or b is None:
                 continue
-            ia, ib = ids[proposed], ids[baseline]
+            ia, ib = ids[proposed].get(metric), ids[baseline].get(metric)
             if ia and ib:
                 # Repeated trials of the same item are averaged per item before pairing.
                 mean_a = _per_id_means(ia, a)
@@ -258,6 +345,12 @@ def analyze(
                     better=better,
                 )
             )
+    if unmatched:
+        notes.append(
+            "per-item rows do not reproduce the reported value of "
+            + ", ".join(sorted(unmatched))
+            + "; those metrics are reported without intervals or paired tests"
+        )
     if not comparisons:
         notes.append("no per-item data aligned across variants; paired tests were not computed")
     return Analysis(

@@ -23,7 +23,8 @@ def build_clients(settings: dict[str, Any], cache_path: Path | None, env: dict[s
     s2_key = env.get(str(settings.get("semantic_scholar_api_key_env") or "S2_API_KEY"), "")
     arxiv = ArxivClient(http)
     s2 = SemanticScholarClient(http, s2_key)
-    openalex = OpenAlexClient(http, str(settings.get("contact_email") or ""))
+    openalex_key = env.get(str(settings.get("openalex_api_key_env") or "OPENALEX_API_KEY"), "")
+    openalex = OpenAlexClient(http, str(settings.get("contact_email") or ""), openalex_key)
     crossref = CrossrefClient(http, str(settings.get("contact_email") or ""))
     searchers = []
     if "arxiv" in enabled:

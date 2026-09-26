@@ -8,12 +8,17 @@ models:
   # Shared defaults. Per-role entries below override only the fields they set.
   default:
     provider: ${MODEL_PROVIDER:-OpenAI}
-    model_name: ${MODEL_NAME:-deepseek-v4-flash}
+    model_name: ${MODEL_NAME:-deepseek-flash}
     api_base: ${API_BASE:-https://api.deepseek.com}
     api_key_env: API_KEY
     timeout: 600
     temperature: 0.4
-    max_tokens: 8192
+    # Reasoning models (DeepSeek V4, ...) spend part of max_tokens on hidden
+    # reasoning; a small cap returns empty answers.
+    max_tokens: 32768
+    # Extra JSON body fields sent with every request of this role, e.g.
+    # {thinking: {type: disabled}} to switch DeepSeek reasoning off.
+    extra_body: {}
   planner: {}
   writer: {}
   # A different model for reviewing reduces self-agreement bias. Leave empty
@@ -21,9 +26,12 @@ models:
   reviewer:
     model_name: ${TYCHE_REVIEW_MODEL_NAME:-}
     temperature: 0.0
-  # Model used by openjiuwen's experiment agents and by the generated
-  # experiment code (exported to it as API_KEY/API_BASE/MODEL_NAME).
-  experiments: {}
+  # Model used by openjiuwen's experiment agents (design, coding, reflection).
+  experiments:
+    model_name: ${TYCHE_EXPERIMENT_MODEL_NAME:-}
+  # Model the generated experiment code calls as its subject (exported to it as
+  # API_KEY/API_BASE/MODEL_NAME). Kept separate because experiments make many calls.
+  subject: {}
 
 workspace:
   # Runs, caches, and the cross-run memory database live here.
@@ -33,6 +41,7 @@ literature:
   sources: [arxiv, semantic_scholar, openalex]
   contact_email: ${TYCHE_CONTACT_EMAIL:-}
   semantic_scholar_api_key_env: S2_API_KEY
+  openalex_api_key_env: OPENALEX_API_KEY
   per_query_results: 12
   max_queries: 8
   prerank_pool: 60
@@ -62,11 +71,26 @@ experiments:
   max_design_revisions: 3
   max_execution_retries: 2
   max_variants: 4
+  # Model calls one coding cycle of openjiuwen's code agent may make (its factory
+  # default of 15 is too few to write and smoke-test a multi-file experiment).
+  code_agent_max_iterations: 80
+  # Stop before analysis when more than this fraction of a variant's per_question
+  # items carry an error (failed model calls), since they would be scored as wrong.
+  max_failed_item_rate: 0.01
   constraints:
     - "This is a short paper: implement one proposed method and at most three baselines or ablations."
     - "Use small, controlled, reproducible tasks (synthetic or public benchmark subsets) that finish within the execution timeout."
-    - "Record per-item outcomes in per_question so confidence intervals and paired tests can be computed."
+    - "Record per-item outcomes in per_question so confidence intervals and paired tests can be computed: every row needs an id that is unique across seeds (for example seed:question), the grouping fields the metrics are split by (for example stratum), and the scored outcome of that item (for example a boolean correct, or the per-item value of each metric), so that the mean of the rows reproduces each reported metric."
+    - "Implement every baseline faithfully and competitively, as its proponents would; in the smoke test, check that no variant abstains or answers unknown on most items, and fix the implementation if one does."
     - "Never hard-code or simulate metric values; every number must come from executed runs."
+    - "The model behind API_KEY/API_BASE/MODEL_NAME may be a reasoning model whose hidden reasoning counts toward max_tokens and can take several thousand tokens on counting or multi-step questions: request max_tokens of at least 8192 per call, use only the final message content, and if the content is empty retry once with twice the max_tokens."
+    - "Write only result metrics at the top level of each metrics file; put run settings (budgets, concurrency, temperature, token limits) and run diagnostics under a nested settings object."
+    - "Report a metric that could not be computed (for example over an empty subset) as null or mark it false in a top-level `metric_defined` map; never write 0 as a placeholder."
+    - "Record a call that still fails in that item's `error` field instead of silently scoring it wrong; keep failed items under 1% of every variant, since failed items are not evidence about the method."
+    - "While implementing code, validate with the smoke test or a tiny subset only; never launch the full experiment there, because the execution stage runs every variant."
+    - "Make repeated model calls cache-friendly: put the fixed instructions and any context shared across items first, byte-identical in every call, and the per-item content last, so the provider's prompt cache serves the shared prefix; record the cached prompt tokens the API reports (DeepSeek usage.prompt_cache_hit_tokens, OpenAI usage.prompt_tokens_details.cached_tokens) in the run diagnostics."
+    - "Read credentials only from the environment and never print, log, or write API_KEY (or any part of it) to files or outputs."
+    - "Keep each variant's full run under about 600 model calls and run independent calls concurrently (at most 8 at a time) so it finishes well inside the execution timeout; use identical model settings for every variant."
 
 analysis:
   bootstrap_resamples: 2000
@@ -87,12 +111,12 @@ paper:
   human_review_statement: ""
   sections:
     abstract: {min_words: 120, max_words: 200}
-    introduction: {min_words: 400, max_words: 650}
-    related_work: {min_words: 250, max_words: 450, min_citations: 6}
-    method: {min_words: 400, max_words: 800}
-    experiments: {min_words: 350, max_words: 700}
-    analysis: {min_words: 200, max_words: 420}
-    conclusion: {min_words: 80, max_words: 180}
+    introduction: {min_words: 380, max_words: 550}
+    related_work: {min_words: 250, max_words: 400, min_citations: 6}
+    method: {min_words: 350, max_words: 600}
+    experiments: {min_words: 350, max_words: 600}
+    analysis: {min_words: 200, max_words: 400}
+    conclusion: {min_words: 80, max_words: 150}
   compile_repair_attempts: 3
   trim_attempts: 3
   latex_timeout: 180

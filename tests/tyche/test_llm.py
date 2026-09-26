@@ -67,7 +67,14 @@ def openai_compatible_server():
                 "id": "c1", "object": "chat.completion", "created": 0, "model": seen["body"]["model"],
                 "choices": [{"index": 0, "finish_reason": "stop",
                              "message": {"role": "assistant", "content": '{"value": 42}'}}],
-                "usage": {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17},
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 5,
+                    "total_tokens": 17,
+                    # DeepSeek's context-cache fields.
+                    "prompt_cache_hit_tokens": 8,
+                    "prompt_cache_miss_tokens": 4,
+                },
             }).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -98,4 +105,13 @@ async def test_openjiuwen_client_round_trip(openai_compatible_server, monkeypatc
     assert seen["body"]["model"] == "mock-model"
     assert [m["role"] for m in seen["body"]["messages"]] == ["system", "user"]
     assert seen["auth"] == "Bearer sk-local-test"
-    assert meter.summary()["by_stage"]["plan"] == {"calls": 1, "input_tokens": 12, "output_tokens": 5}
+    assert meter.summary()["by_stage"]["plan"] == {
+        "calls": 1,
+        "input_tokens": 12,
+        "cached_input_tokens": 8,
+        "output_tokens": 5,
+        "cache_hit_rate": 0.667,
+    }
+    # The schema instruction is part of the (cacheable) system prompt, not the user text.
+    system, user = (m["content"] for m in seen["body"]["messages"])
+    assert "JSON schema" in system and user == "usr"

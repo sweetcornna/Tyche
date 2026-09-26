@@ -2,9 +2,10 @@
 
 Each round revises only the sections that open findings point at, rebuilds
 and re-gates the paper, and has the panel re-review it (ruling on the prior
-findings). A candidate replaces the current best only if it compiles, adds no
-gate blockers, and does not lower the composite score by more than the
-tolerance; otherwise the sections are reverted. The loop stops on the target
+findings). A candidate replaces the current best if it compiles and removes
+gate blockers, or if it compiles, adds no gate blockers, and does not lower
+the composite score by more than the tolerance; otherwise the sections are
+reverted. The loop stops on the target
 score, on a plateau, or on the round limit, and always returns the best
 accepted draft.
 """
@@ -173,10 +174,14 @@ class RevisionLoop:
                 accepted = True
             else:
                 accepted = candidate.compile.ok and len(candidate.gates.blockers) <= len(current.gates.blockers)
+            # Fewer gate blockers always wins: a verifiable draft beats a better-scored
+            # unverifiable one, which could never be packaged. Only at equal blocker
+            # counts must the candidate also hold the composite score.
+            fewer_blockers = candidate.compile.ok and len(candidate.gates.blockers) < len(current.gates.blockers)
             cand_review = None
             if accepted:
                 cand_review = await self._review(candidate, round_no)
-                if review is not None and cand_review is not None:
+                if review is not None and cand_review is not None and not fewer_blockers:
                     accepted = cand_review.composite >= review.composite - self.tolerance
             delta = None
             if review is not None and cand_review is not None:

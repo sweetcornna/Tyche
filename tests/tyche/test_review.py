@@ -57,7 +57,7 @@ def test_gate_findings_open_and_close_automatically():
 
 async def test_panel_aggregates_seven_dimensions():
     def reviewer(system, user):
-        score = 7 if "empirical rigor" in system else 5
+        score = 7 if "empirical rigor" in user else 5
         return json.dumps({
             "scores": {d: score for d in ("originality", "importance", "claims_supported", "experimental_soundness",
                                           "clarity", "community_value", "contextualization")},
@@ -78,6 +78,12 @@ async def test_panel_aggregates_seven_dimensions():
     }
     assert len(result.findings) == 3 and all(f["quote_verified"] for f in result.findings)
     assert [c[0] for c in llm.calls].count("review:auditor") == 1
+    # Prompt-cache friendliness: the three personas share one system prompt (paper included),
+    # and only the short user message with the lens differs.
+    persona_calls = [c for c in llm.calls if c[0].startswith("review:") and c[0] != "review:auditor"]
+    assert len({system for _, system, _ in persona_calls}) == 1
+    assert "The gains concentrate" in persona_calls[0][1]
+    assert len({user for _, _, user in persona_calls}) == 3
 
 
 def test_distinct_gate_findings_stay_separate_and_are_not_reflagged():
@@ -158,7 +164,9 @@ async def test_rejected_revision_rolls_back_text_and_ledger(tmp_path):
     async def review_fn(build, prior):
         return next(reviews)
 
-    composer = _FakeComposer([_build(True, ["0.83"]), _build(True, [])])
+    # Same blocker count, lower score: rejected. (A candidate that removes blockers is accepted;
+    # see test_removing_gate_blockers_beats_a_higher_score.)
+    composer = _FakeComposer([_build(True, ["0.83"]), _build(True, ["0.83"])])
     ledger = FindingsLedger()
     loop = RevisionLoop(composer, ledger, review_fn, out_dir=tmp_path, max_rounds=1, target=9.0, tolerance=0.15,
                         plateau_rounds=3, max_findings=8)
@@ -186,3 +194,20 @@ async def test_compiling_candidate_beats_a_non_compiling_draft(tmp_path):
     result = await loop.run()
     assert result.rounds[1]["accepted"] is True and result.best.compile.ok
     assert [e.section for e in ledger.entries if e.source == "gate:compile"] == ["analysis"]
+
+
+async def test_removing_gate_blockers_beats_a_higher_score(tmp_path):
+    from tyche.review import RevisionLoop
+
+    reviews = iter([_round(5.2), _round(4.4)])
+
+    async def review_fn(build, prior):
+        return next(reviews)
+
+    # Round 0 scores higher but fails a gate and could never be packaged; the revision passes.
+    composer = _FakeComposer([_build(True, ["0.25"]), _build(True, [])])
+    loop = RevisionLoop(composer, FindingsLedger(), review_fn, out_dir=tmp_path, max_rounds=1, target=9.0,
+                        tolerance=0.15, plateau_rounds=3, max_findings=8)
+    result = await loop.run()
+    assert result.rounds[1]["accepted"] is True
+    assert result.best.gates.passed

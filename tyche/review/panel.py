@@ -173,6 +173,7 @@ class ReviewPanel:
         prior_findings: list[dict[str, Any]],
         results_brief: str,
         cited_evidence: dict[str, str],
+        experiment_reflection: str = "",
     ) -> PanelRound:
         paper = truncate_tokens(paper_text, int(self.budget * 0.7))
         squashed = _squash(paper_text) + _squash(" ".join(sections.values()))
@@ -196,10 +197,12 @@ class ReviewPanel:
         for persona in self.reviewers:
             for sample in range(self.samples):
                 name = persona if self.samples == 1 else f"{persona}#{sample + 1}"
+                # Paper and context sit in the system prompt, identical for every persona, so the
+                # providers' prompt caches serve them after the first reviewer; only the lens varies.
                 out = await complete_json(
                     self.llm,
-                    system=load_prompt("review_system").replace("{persona}", PERSONAS[persona]),
-                    user=base_user,
+                    system=load_prompt("review_system") + "\n\n" + base_user,
+                    user="<reviewer_lens>\n" + PERSONAS[persona] + "\n</reviewer_lens>\nReview the paper through this lens.",
                     schema=ReviewOutput,
                     purpose=f"review:{persona}",
                 )
@@ -222,6 +225,8 @@ class ReviewPanel:
                 + truncate_tokens(cited, int(self.budget * 0.3))
                 + "\n</cited_evidence>"
             )
+            if experiment_reflection:
+                audit_user += "\n<experiment_reflection>\n" + experiment_reflection + "\n</experiment_reflection>"
             audit = await complete_json(
                 self.llm, system=load_prompt("auditor_system"), user=audit_user, schema=AuditOutput, purpose="review:auditor"
             )

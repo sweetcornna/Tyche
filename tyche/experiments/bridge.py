@@ -19,13 +19,16 @@ Two other engines exist for honest alternatives:
 from __future__ import annotations
 
 import contextlib
+import functools
+import hashlib
 import json
 import os
+import re
 import shutil
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
-from typing import Any, Iterator, Protocol
+from typing import Any, Collection, Iterator, Protocol
 
 import yaml
 
@@ -46,7 +49,36 @@ _BOOKKEEPING = {
     "detail",
     "seed",
     "notes",
+    "model_call_errors",
+    "empty_content_retries",
+    "n_errors",
+    # Run settings and run diagnostics, not results.
+    "temperature",
+    "top_p",
+    "max_tokens",
+    "concurrency",
+    "batch_size",
+    "elapsed_s",
+    "elapsed_seconds",
+    "wall_time_s",
+    "logical_call_count",
+    "retry_count",
+    "failed_call_count",
+    "failed_item_count",
+    "failed_item_fraction",
+    "n_items",
+    "n_seeds",
+    "call_failure_rate",
 }
+# Top-level keys shaped like settings or counts rather than results (budget_*, max_*, num_*, n_*).
+_SETTING_KEY = re.compile(r"^(budget|max|num|n)_")
+
+# Maps {metric: bool} by which experiment code marks metrics it could not compute
+# (e.g. an empty subset); such a metric's placeholder value is never a result.
+_DEFINED_KEYS = ("metric_defined", "metrics_defined", "defined_metrics", "metric_valid")
+
+# Per-item fields that mark an item whose model call failed (not a wrong answer).
+_ITEM_ERROR_KEYS = ("error", "model_error", "exception")
 
 
 @dataclass
@@ -97,11 +129,33 @@ def read_metrics_dir(path: Path) -> dict[str, dict[str, Any]]:
     return variants
 
 
-def numeric_metrics(data: dict[str, Any]) -> dict[str, float]:
-    """Top-level numeric metrics of one variant, excluding bookkeeping fields."""
+def failed_items(data: dict[str, Any]) -> tuple[int, int]:
+    """(failed, total) per-item rows of one variant; failed rows carry a non-empty error field."""
+    items = data.get("per_question")
+    if not isinstance(items, list):
+        return 0, 0
+    failed = sum(1 for item in items if isinstance(item, dict) and any(item.get(k) for k in _ITEM_ERROR_KEYS))
+    return failed, len(items)
+
+
+def numeric_metrics(data: dict[str, Any], keep: Collection[str] = ()) -> dict[str, float]:
+    """Top-level numeric metrics of one variant, excluding bookkeeping and undefined metrics.
+
+    Names in ``keep`` (the research plan's metrics) are never mistaken for settings, even
+    if they look like one (``max_*``, ``n_*``, ...); an undefined metric is still dropped.
+    """
+    undefined = {
+        name
+        for key in _DEFINED_KEYS
+        if isinstance(data.get(key), dict)
+        for name, ok in data[key].items()
+        if ok is False
+    }
     out: dict[str, float] = {}
     for key, value in data.items():
-        if key in _BOOKKEEPING or isinstance(value, bool):
+        if key in undefined or isinstance(value, bool):
+            continue
+        if key not in keep and (key in _BOOKKEEPING or _SETTING_KEY.match(key)):
             continue
         if isinstance(value, (int, float)):
             out[key] = float(value)
@@ -208,13 +262,110 @@ def objective_text(plan: ResearchPlan, settings: dict[str, Any]) -> str:
     )
 
 
+def mirror_read_first_inputs(project_root: Path, agent_workspace: Path, run_id: str) -> list[Path]:
+    """Copy the files a code-agent instruction lists under "Read First" into its sandbox.
+
+    openjiuwen confines the coding agent's file tools to ``agent_workspace``, but the
+    design agent's instruction points it at project-relative paths (``inputs/...`` and
+    ``experiments/<run>/manager/...``). Mirroring them at the same relative paths lets
+    those reads succeed instead of burning the agent's turns on "access denied".
+    Only ``agent_workspace/output`` is promoted to generated code, so copies stay out of it.
+    """
+    sources = [
+        *sorted((project_root / "inputs").glob("*.md")),
+        *sorted((project_root / "experiments" / run_id / "manager").glob("*.md")),
+        *sorted((project_root / "experiments" / run_id / "design").glob("*.md")),
+    ]
+    copied = []
+    for source in sources:
+        target = agent_workspace / source.relative_to(project_root)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        copied.append(target)
+    return copied
+
+
+# Files that make up an implementation (as opposed to outputs a smoke test writes).
+_SOURCE_SUFFIXES = {".py", ".json", ".yaml", ".yml", ".toml", ".cfg", ".ini", ".txt", ".sh"}
+_OUTPUT_DIRS = {"outputs", "output", "runs", "results", "smoke", "logs", "aggregate", "_local", "__pycache__", ".git"}
+
+NOOP_NUDGE = (
+    "## Host check\n\n"
+    "Your previous attempt in this round ended without changing any source file, but this round was dispatched "
+    "because the current experiment design (or a reported failure) requires changes. Read the living experiment "
+    "design with design_read_file and the code agent instruction above, then modify the code to implement every "
+    "change they require and re-run the smoke test. Do not end your turn after only reading files.\n\n"
+)
+
+
+def source_digest(root: Path) -> str:
+    """Digest of an implementation's source files; empty when there are none yet."""
+    files = sorted(
+        path
+        for path in root.rglob("*")
+        if path.is_file()
+        and path.suffix in _SOURCE_SUFFIXES
+        and not (set(path.relative_to(root).parts[:-1]) & _OUTPUT_DIRS)
+    ) if root.is_dir() else []
+    if not files:
+        return ""
+    digest = hashlib.sha256()
+    for path in files:
+        digest.update(path.relative_to(root).as_posix().encode("utf-8") + b"\0" + path.read_bytes() + b"\0")
+    return digest.hexdigest()[:16]
+
+
+def code_implementation_agent(config: dict[str, Any], model: Any, max_iterations: int) -> Any:
+    """openjiuwen's CodeImplementationAgent with a usable turn budget and a no-op guard.
+
+    * ``create_code_agent`` defaults to 15 ReAct iterations per invoke; a validation cycle
+      then ended after 15 model calls, before ``run.py`` existed. ``max_iterations`` is
+      passed through the factory's public parameter instead.
+    * The agent's task loop ends as soon as the model replies without a tool call. On a
+      design revision in a live run it ended after only *reading* the old code, which then
+      passed validation unchanged, so the revised design was never implemented. If a round
+      leaves an existing implementation's source files byte-identical, it is run once more
+      with an explicit host instruction to implement the required changes.
+    * The "Read First" inputs are mirrored into the agent's sandbox.
+    """
+    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common import workspace as arw
+    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.agent import (
+        CodeImplementationAgent,
+    )
+
+    class TycheCodeImplementationAgent(CodeImplementationAgent):
+        async def _run_async(self, inputs: Any) -> Any:
+            output_dir = arw.agent_workspace_dir(inputs.plan.run_id).resolve() / "output"
+            before = source_digest(output_dir)
+            result = await super()._run_async(inputs)
+            if before and source_digest(output_dir) == before:
+                retry = inputs.model_copy(update={"extra_host_instructions": NOOP_NUDGE + inputs.extra_host_instructions})
+                result = await super()._run_async(retry)
+            return result
+
+        def _build_coding_agent(self, agent_workspace: Path, *, run_id: str, cycle: int = 1):
+            import openjiuwen.harness.subagents as subagents
+
+            mirror_read_first_inputs(arw.project_root(), Path(agent_workspace), run_id)
+            original = subagents.create_code_agent
+            subagents.create_code_agent = functools.partial(original, max_iterations=max_iterations)
+            try:
+                return super()._build_coding_agent(agent_workspace, run_id=run_id, cycle=cycle)
+            finally:
+                subagents.create_code_agent = original
+
+    return TycheCodeImplementationAgent(config, model=model)
+
+
 class OpenJiuwenEngine:
     name = "openjiuwen"
 
-    def __init__(self, model: Any, spec: ModelSpec, settings: dict[str, Any]):
+    def __init__(self, model: Any, spec: ModelSpec, settings: dict[str, Any], subject: ModelSpec | None = None):
         self.model = model
         self.spec = spec
         self.settings = settings
+        # The model the generated experiment code calls (via API_* env vars).
+        self.subject = subject or spec
 
     async def run(self, plan: ResearchPlan, *, summary_path: Path, work_dir: Path, run_id: str) -> ExperimentOutcome:
         from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common import workspace as arw
@@ -237,15 +388,24 @@ class OpenJiuwenEngine:
             manager=manager,
             model=self.model,
             experiment_design=ExperimentDesignAgent(config, model=self.model, project_root_path=root),
+            code_implementation=code_implementation_agent(
+                config, self.model, int(self.settings.get("code_agent_max_iterations", 80))
+            ),
             reflection=ReflectionAgent(config, model=self.model),
         )
-        # A fresh manager run per attempt: a rerun must never mix in metrics or reflections
-        # from an earlier attempt's variants.
-        attempt = 1 + sum(1 for _ in (root / "experiments").glob(f"tyche-{run_id}-a*")) if (root / "experiments").is_dir() else 1
-        manager_run_id = f"tyche-{run_id}-a{attempt}"
-        with model_environment(self.spec):
+        # An interrupted attempt (no terminal record) is resumed where it stopped, keeping its
+        # design revisions and results. Otherwise a fresh manager run per attempt: a rerun must
+        # never mix in metrics or reflections from an earlier, finished attempt's variants.
+        arw.set_project_root(root)
+        manager_run_id = _resumable_manager_run(root, run_id)
+        resume = manager_run_id is not None
+        if manager_run_id is None:
+            attempt = 1 + len(_attempt_dirs(root, run_id))
+            manager_run_id = f"tyche-{run_id}-a{attempt}"
+        with model_environment(self.subject):
             arw.set_project_root(root)
             terminal = await runtime.arun(
+                resume=resume,
                 topic=plan.working_title,
                 research_paths=["inputs/research_summary.md", "inputs/research_plan.md"],
                 run_id=manager_run_id,
@@ -279,6 +439,32 @@ class OpenJiuwenEngine:
             f"reason={getattr(terminal, 'failure_reason', '') or getattr(terminal, 'abort_reason', '')}"
             + (f"; ignored stale variants: {', '.join(stale)}" if stale else ""),
         )
+
+
+def _attempt_dirs(root: Path, run_id: str) -> list[Path]:
+    """This run's manager attempts (tyche-<run>-a<N>), oldest first."""
+    folder = root / "experiments"
+    if not folder.is_dir():
+        return []
+    found = []
+    for path in folder.glob(f"tyche-{run_id}-a*"):
+        suffix = path.name.rsplit("-a", 1)[-1]
+        if suffix.isdigit():
+            found.append((int(suffix), path))
+    return [path for _, path in sorted(found)]
+
+
+def _resumable_manager_run(root: Path, run_id: str) -> str | None:
+    """The latest attempt's manager run id if it was interrupted before reaching a terminal state."""
+    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.artifacts import try_load_state
+
+    attempts = _attempt_dirs(root, run_id)
+    if not attempts:
+        return None
+    state = try_load_state(attempts[-1].name)
+    if state is None or getattr(state, "terminal", None) is not None:
+        return None
+    return attempts[-1].name
 
 
 def _latest_execution_variants(manager_run_id: str) -> set[str] | None:

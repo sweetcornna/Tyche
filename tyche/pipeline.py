@@ -183,6 +183,7 @@ class Pipeline:
                 f"experiments did not complete ({outcome.engine}): {outcome.notes}. No paper is written without "
                 "results; fix the experiment or rerun with --engine imported --results-dir <dir>."
             )
+        self._check_failed_items(outcome.variants)
         inputs = [self.ws.latest("plan").id, self.ws.latest("research_summary").id]
         if outcome.metrics_dir:
             self.ws.save_tree("experiment_results", outcome.metrics_dir, stage="experiments", inputs=inputs)
@@ -194,6 +195,23 @@ class Pipeline:
             self.ws.save_file("reflection", path, stage="experiments", inputs=inputs)
         self.ws.set_meta(experiment_engine=outcome.engine, synthetic=outcome.synthetic)
         return {"engine": outcome.engine, "variants": sorted(outcome.variants), "synthetic": outcome.synthetic}
+
+    def _check_failed_items(self, variants: dict[str, dict[str, Any]]) -> None:
+        """Stop when too many items failed to run: their scores would measure failures, not methods."""
+        from tyche.experiments import failed_items
+
+        limit = float(self.cfg.get("experiments.max_failed_item_rate", 0.01))
+        bad = []
+        for name, data in sorted(variants.items()):
+            failed, total = failed_items(data)
+            if total and failed / total > limit:
+                bad.append(f"{name}: {failed}/{total} items failed")
+        if bad:
+            raise StageError(
+                "experiment items failed at a rate above experiments.max_failed_item_rate="
+                f"{limit:g} ({'; '.join(bad)}). Failed calls are scored as wrong answers, so the "
+                "comparison would be confounded; fix the cause (e.g. a reasoning model's max_tokens) and rerun."
+            )
 
     # -- S3 analysis ---------------------------------------------------
     async def stage_analysis(self) -> dict[str, Any]:
@@ -222,14 +240,12 @@ class Pipeline:
             analysis, setup_texts={"design": design, "plan": plan_markdown(plan), "evidence_quotes": quotes}
         )
         out = self.ws.stage_dir("analysis")
-        n_items = max((s.n for ms in analysis.variants.values() for s in ms.values()), default=0)
+        shown = [ms[m] for ms in analysis.variants.values() for m in analysis.metrics[:5]]
+        with_ci = sum(1 for s in shown if s.n)
+        interval = f" with the {analysis.confidence_percent}\\% bootstrap confidence-interval half-width over evaluation items"
         caption = (
             "Main results. Each cell is the mean"
-            + (
-                f" with the {analysis.confidence_percent}\\% bootstrap confidence-interval half-width over evaluation items"
-                if n_items
-                else ""
-            )
+            + (interval if shown and with_ci == len(shown) else (interval + " where per-item outcomes were available" if with_ci else ""))
             + "; the best value per column is bold, and arrows mark whether higher or lower is better."
         )
         (out / "table_main.tex").write_text(results_table(analysis, caption=caption), encoding="utf-8")
@@ -255,6 +271,12 @@ class Pipeline:
             return self.ws.load_text("experiment_design")
         return plan_markdown(self.plan())
 
+    def _reflection_text(self) -> str:
+        """The experiment loop's latest reflection, if the engine produced one."""
+        if self.ws.latest("reflection") is None:
+            return ""
+        return sanitize_untrusted(self.ws.load_text("reflection"))
+
     # -- shared writing context ------------------------------------------
     def _manifest(self) -> dict[str, Any]:
         return json.loads(self.ws.latest_path("source_manifest").read_text(encoding="utf-8"))
@@ -277,10 +299,12 @@ class Pipeline:
             }
             for p in manifest.get("papers", [])
         ]
-        conf = f"{float(self.ws.load_json('analysis').get('confidence', 0.95)) * 100:g}"
+        analysis = self.ws.load_json("analysis")
+        conf = f"{float(analysis.get('confidence', 0.95)) * 100:g}"
         labels = {
             "tab:main": "main results table (all variants, all metrics)",
-            "fig:results": f"bar chart of the main results with {conf}% confidence intervals",
+            "fig:results": "bar chart of the main results"
+            + (f" with {conf}% confidence intervals" if _has_intervals(analysis) else " (point estimates, no intervals)"),
         }
         paired = self.ws.latest_path("table_paired").read_text(encoding="utf-8") if self.ws.latest("table_paired") else ""
         if paired.strip():
@@ -293,6 +317,7 @@ class Pipeline:
             design_excerpt=truncate_tokens(self._design_text(), 2500),
             labels=labels,
             run_id=self.run_id,
+            reflection_excerpt=truncate_tokens(self._reflection_text(), 1800),
         )
         return ctx, manifest
 
@@ -306,12 +331,25 @@ class Pipeline:
                     model = json.loads(line).get("model")
                     if model:
                         models.add(model)
+        analysis = self.ws.load_json("analysis") if self.ws.latest("analysis") is not None else {}
         return {
             "models": sorted(models),
             "experiment_engine": self.ws.meta("experiment_engine", "openjiuwen"),
             "analysis_seed": self.ws.meta("analysis_seed"),
+            "has_intervals": _has_intervals(analysis),
+            "has_paired_tests": bool(analysis.get("comparisons")),
             "sources": list(self.cfg.get("literature.sources") or ["arxiv", "semantic_scholar", "openalex"]),
         }
+
+    def _figure_caption(self) -> str:
+        """Describe the figure's error bars only if the analysis computed intervals."""
+        analysis = self.ws.load_json("analysis")
+        caption = "Mean performance of each variant"
+        if _has_intervals(analysis, analysis.get("metrics", [])[:3]):
+            caption += f" with {float(analysis.get('confidence', 0.95)) * 100:g}\\% bootstrap confidence intervals"
+        else:
+            caption += " (point estimates; no per-item intervals could be computed)"
+        return caption + "; the proposed method is shown in red."
 
     def _composer(self, ctx: WritingContext, stage: str) -> PaperComposer:
         """Build a composer whose bibliography and context manifests belong to ``stage`` alone.
@@ -336,10 +374,9 @@ class Pipeline:
             floats += (
                 "\n\\begin{figure}[t]\n\\centering\n\\includegraphics[width=\\linewidth]{figures/"
                 + figure.name
-                + "}\n\\caption{Mean performance of each variant with "
-                + f"{float(self.ws.load_json('analysis').get('confidence', 0.95)) * 100:g}"
-                + "\\% bootstrap confidence intervals; the "
-                "proposed method is shown in red.}\n\\label{fig:results}\n\\end{figure}\n"
+                + "}\n\\caption{"
+                + self._figure_caption()
+                + "}\n\\label{fig:results}\n\\end{figure}\n"
             )
         if "tab:paired" in ctx.labels:
             floats += "\n" + self.ws.latest_path("table_paired").read_text(encoding="utf-8")
@@ -417,6 +454,7 @@ class Pipeline:
                 prior_findings=prior,
                 results_brief=ctx.results_brief,
                 cited_evidence=evidence,
+                experiment_reflection=ctx.reflection_excerpt,
             )
             await self._admit_requested_citations(round_.findings, uncited, composer, ctx)
             return round_
@@ -688,3 +726,12 @@ class Pipeline:
             for f in gates["findings"]:
                 lines.append(f"- [{f['severity']}] {f['gate']}/{f['section']}: {f['message']}")
         return "\n".join(lines) + "\n"
+
+
+def _has_intervals(analysis: dict[str, Any], metrics: list[str] | None = None) -> bool:
+    """Whether the saved analysis holds a confidence interval for any (of the given) metrics."""
+    for summaries in (analysis.get("variants") or {}).values():
+        for metric, summary in summaries.items():
+            if (metrics is None or metric in metrics) and summary.get("ci_low") is not None:
+                return True
+    return False
