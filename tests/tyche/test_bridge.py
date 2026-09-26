@@ -146,7 +146,7 @@ async def test_code_agent_gets_turn_budget_and_readable_inputs(tmp_path):
     try:
         spec = TycheConfig.load(env={"MODEL_NAME": "m", "API_BASE": "http://127.0.0.1:9"}).model("experiments")
         model = init_model("OpenAI", "m", "offline-key", "http://127.0.0.1:9", timeout=5)
-        agent = code_implementation_agent(build_openjiuwen_config({}, spec), model, 42, 3)
+        agent = code_implementation_agent(build_openjiuwen_config({}, spec), model, 42)
         workspace = arw.agent_workspace_dir("r1").resolve()
         workspace.mkdir(parents=True)
         factory = subagents.create_code_agent
@@ -154,13 +154,6 @@ async def test_code_agent_gets_turn_budget_and_readable_inputs(tmp_path):
         try:
             # openjiuwen's factory default is 15 inner iterations; ours must reach the agent.
             assert built.deep_config.max_iterations == 42
-            from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
-
-            from tyche.experiments.bridge import CODE_DONE_PROMISE
-
-            [rail] = built.find_rails_by_type((TaskCompletionRail,))
-            # The task loop must not end until the agent declares the implementation complete.
-            assert rail.completion_promise == CODE_DONE_PROMISE and rail.max_rounds == 3
             assert subagents.create_code_agent is factory
             assert (workspace / "inputs" / "research_plan.md").read_text() == "plan"
             assert (workspace / "experiments" / "r1" / "manager" / "original_task.md").read_text() == "task"
@@ -225,3 +218,39 @@ def test_interrupted_manager_attempt_is_resumed(tmp_path, monkeypatch):
     states["tyche-r1-a10"] = SimpleNamespace(terminal=object())
     assert _resumable_manager_run(tmp_path, "r1") is None
     assert _resumable_manager_run(tmp_path, "other") is None
+
+
+
+async def test_code_round_that_changes_nothing_is_retried_with_a_host_instruction(tmp_path, monkeypatch):
+    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common import workspace as arw
+    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation import agent as code_mod
+
+    from tyche.experiments.bridge import NOOP_NUDGE, source_digest
+
+    arw.set_project_root(tmp_path)
+    try:
+        output = arw.agent_workspace_dir("r1").resolve() / "output"
+        (output / "outputs").mkdir(parents=True)
+        (output / "run.py").write_text("print('v0')")
+        seen = []
+
+        async def fake_run(self, inputs):
+            seen.append(inputs.extra_host_instructions)
+            (output / "outputs" / "smoke.json").write_text(str(len(seen)))  # outputs do not count
+            if len(seen) == 2:
+                (output / "run.py").write_text("print('v1')")
+            return "result"
+
+        monkeypatch.setattr(code_mod.CodeImplementationAgent, "_run_async", fake_run)
+        agent = code_implementation_agent({}, object(), 10)
+        inputs = type("I", (), {})()
+        inputs.plan = type("P", (), {"run_id": "r1"})()
+        inputs.extra_host_instructions = "prior"
+        inputs.model_copy = lambda update: type("I2", (), {"plan": inputs.plan, **update})()
+        before = source_digest(output)
+        assert await agent._run_async(inputs) == "result"
+        assert seen == ["prior", NOOP_NUDGE + "prior"]
+        assert source_digest(output) != before
+        assert source_digest(tmp_path / "missing") == ""
+    finally:
+        arw.set_project_root(None)
