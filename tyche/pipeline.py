@@ -183,6 +183,7 @@ class Pipeline:
                 f"experiments did not complete ({outcome.engine}): {outcome.notes}. No paper is written without "
                 "results; fix the experiment or rerun with --engine imported --results-dir <dir>."
             )
+        self._check_failed_items(outcome.variants)
         inputs = [self.ws.latest("plan").id, self.ws.latest("research_summary").id]
         if outcome.metrics_dir:
             self.ws.save_tree("experiment_results", outcome.metrics_dir, stage="experiments", inputs=inputs)
@@ -194,6 +195,23 @@ class Pipeline:
             self.ws.save_file("reflection", path, stage="experiments", inputs=inputs)
         self.ws.set_meta(experiment_engine=outcome.engine, synthetic=outcome.synthetic)
         return {"engine": outcome.engine, "variants": sorted(outcome.variants), "synthetic": outcome.synthetic}
+
+    def _check_failed_items(self, variants: dict[str, dict[str, Any]]) -> None:
+        """Stop when too many items failed to run: their scores would measure failures, not methods."""
+        from tyche.experiments import failed_items
+
+        limit = float(self.cfg.get("experiments.max_failed_item_rate", 0.01))
+        bad = []
+        for name, data in sorted(variants.items()):
+            failed, total = failed_items(data)
+            if total and failed / total > limit:
+                bad.append(f"{name}: {failed}/{total} items failed")
+        if bad:
+            raise StageError(
+                "experiment items failed at a rate above experiments.max_failed_item_rate="
+                f"{limit:g} ({'; '.join(bad)}). Failed calls are scored as wrong answers, so the "
+                "comparison would be confounded; fix the cause (e.g. a reasoning model's max_tokens) and rerun."
+            )
 
     # -- S3 analysis ---------------------------------------------------
     async def stage_analysis(self) -> dict[str, Any]:

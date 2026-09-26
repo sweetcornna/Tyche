@@ -47,7 +47,13 @@ _BOOKKEEPING = {
     "detail",
     "seed",
     "notes",
+    "model_call_errors",
+    "empty_content_retries",
+    "n_errors",
 }
+
+# Per-item fields that mark an item whose model call failed (not a wrong answer).
+_ITEM_ERROR_KEYS = ("error", "model_error", "exception")
 
 
 @dataclass
@@ -96,6 +102,15 @@ def read_metrics_dir(path: Path) -> dict[str, dict[str, Any]]:
         name = file.name[: -len(".metrics.json")]
         variants[name] = data
     return variants
+
+
+def failed_items(data: dict[str, Any]) -> tuple[int, int]:
+    """(failed, total) per-item rows of one variant; failed rows carry a non-empty error field."""
+    items = data.get("per_question")
+    if not isinstance(items, list):
+        return 0, 0
+    failed = sum(1 for item in items if isinstance(item, dict) and any(item.get(k) for k in _ITEM_ERROR_KEYS))
+    return failed, len(items)
 
 
 def numeric_metrics(data: dict[str, Any]) -> dict[str, float]:

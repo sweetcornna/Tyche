@@ -162,3 +162,23 @@ async def test_code_agent_gets_turn_budget_and_readable_inputs(tmp_path):
             await agent._cleanup_coding_agent(built)
     finally:
         arw.set_project_root(None)
+
+
+def test_failed_items_gate_stops_confounded_experiments():
+    from types import SimpleNamespace
+
+    import pytest
+
+    from tyche.experiments import failed_items
+    from tyche.pipeline import Pipeline
+    from tyche.workspace import StageError
+
+    ok_rows = [{"correct": True}] * 99 + [{"correct": False, "error": "EmptyContentError"}]
+    bad_rows = [{"correct": True}] * 95 + [{"correct": False, "error": "EmptyContentError"}] * 5
+    assert failed_items({"per_question": ok_rows}) == (1, 100)
+    assert failed_items({"per_question": "n/a"}) == (0, 0)
+    fake = SimpleNamespace(cfg=TycheConfig.load())
+    Pipeline._check_failed_items(fake, {"proposed": {"per_question": ok_rows}, "base": {"accuracy": 0.5}})
+    with pytest.raises(StageError, match="proposed: 5/100 items failed"):
+        Pipeline._check_failed_items(fake, {"proposed": {"per_question": bad_rows}})
+    assert "model_call_errors" not in numeric_metrics({"model_call_errors": 3, "accuracy": 0.5})
