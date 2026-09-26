@@ -122,6 +122,7 @@ class OpenJiuwenLLM:
             max_tokens=spec.max_tokens,
             timeout=spec.timeout,
             verify_ssl=True,
+            extra_body=spec.extra_body or None,
         )
 
     @property

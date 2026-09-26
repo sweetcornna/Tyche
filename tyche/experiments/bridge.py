@@ -211,10 +211,12 @@ def objective_text(plan: ResearchPlan, settings: dict[str, Any]) -> str:
 class OpenJiuwenEngine:
     name = "openjiuwen"
 
-    def __init__(self, model: Any, spec: ModelSpec, settings: dict[str, Any]):
+    def __init__(self, model: Any, spec: ModelSpec, settings: dict[str, Any], subject: ModelSpec | None = None):
         self.model = model
         self.spec = spec
         self.settings = settings
+        # The model the generated experiment code calls (via API_* env vars).
+        self.subject = subject or spec
 
     async def run(self, plan: ResearchPlan, *, summary_path: Path, work_dir: Path, run_id: str) -> ExperimentOutcome:
         from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common import workspace as arw
@@ -243,7 +245,7 @@ class OpenJiuwenEngine:
         # from an earlier attempt's variants.
         attempt = 1 + sum(1 for _ in (root / "experiments").glob(f"tyche-{run_id}-a*")) if (root / "experiments").is_dir() else 1
         manager_run_id = f"tyche-{run_id}-a{attempt}"
-        with model_environment(self.spec):
+        with model_environment(self.subject):
             arw.set_project_root(root)
             terminal = await runtime.arun(
                 topic=plan.working_title,

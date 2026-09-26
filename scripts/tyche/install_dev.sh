@@ -54,4 +54,27 @@ export GIT_LFS_SKIP_SMUDGE=1
 uv pip install --no-deps -r "$REQS"
 uv pip install --no-deps -e .
 uv pip install "ruff>=0.11.2"
+
+# openjiuwen's experiment coding agent reads the SDK reference docs from
+# <site-packages>/docs (agent-core's docs/ tree), which a pip install does not ship.
+# Fetch exactly the pinned commit's docs/ so generated experiment code is grounded.
+SITE="$("$VENV_DIR/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+if [[ ! -d "$SITE/docs/en" ]]; then
+  PIN="$(grep -o 'agent-core.git@[0-9a-f]\{40\}' pyproject.toml | head -1 | cut -d@ -f2)"
+  DOCS_TMP="$(mktemp -d -t tyche-agentcore-docs.XXXXXX)"
+  for REMOTE in https://gitcode.com/openJiuwen/agent-core.git https://github.com/openJiuwen-ai/agent-core.git; do
+    if git -C "$DOCS_TMP" init -q 2>/dev/null \
+      && git -C "$DOCS_TMP" remote add origin "$REMOTE" 2>/dev/null \
+      && timeout 300 git -C "$DOCS_TMP" fetch -q --depth 1 --filter=blob:none origin "$PIN" \
+      && git -C "$DOCS_TMP" sparse-checkout set docs \
+      && git -C "$DOCS_TMP" checkout -q FETCH_HEAD; then
+      rm -rf "$SITE/docs" && mv "$DOCS_TMP/docs" "$SITE/docs"
+      echo "[tyche] installed openjiuwen reference docs ($PIN) from $REMOTE"
+      break
+    fi
+    rm -rf "$DOCS_TMP" && DOCS_TMP="$(mktemp -d -t tyche-agentcore-docs.XXXXXX)"
+  done
+  rm -rf "$DOCS_TMP"
+  [[ -d "$SITE/docs/en" ]] || echo "[tyche] warning: could not fetch openjiuwen reference docs" >&2
+fi
 echo "[tyche] environment ready: source $VENV_DIR/bin/activate"

@@ -121,14 +121,18 @@ class SemanticScholarClient:
         if not item or not item.get("title"):
             return None
         ext = item.get("externalIds") or {}
+        doi = str(ext.get("DOI") or "").lower()
+        arxiv = normalize_arxiv_id(ext.get("ArXiv", ""))
+        if not arxiv and doi.startswith("10.48550/arxiv."):
+            arxiv = doi.split("arxiv.", 1)[1]
         return Paper(
             title=sanitize_untrusted(item["title"]),
             authors=[sanitize_untrusted(a.get("name", "")) for a in item.get("authors") or [] if a.get("name")],
             year=_year(item.get("year")),
             venue=sanitize_untrusted(item.get("venue") or ""),
             abstract=sanitize_untrusted(item.get("abstract") or ""),
-            arxiv_id=normalize_arxiv_id(ext.get("ArXiv", "")),
-            doi=str(ext.get("DOI") or "").lower(),
+            arxiv_id=arxiv,
+            doi=doi,
             s2_id=str(item.get("paperId") or ""),
             url=item.get("url") or "",
             citation_count=item.get("citationCount"),
@@ -171,9 +175,10 @@ class OpenAlexClient:
     name = "openalex"
     base = "https://api.openalex.org"
 
-    def __init__(self, http: HttpClient, mailto: str = ""):
+    def __init__(self, http: HttpClient, mailto: str = "", api_key: str = ""):
         self.http = http
         self.mailto = mailto
+        self.api_key = api_key
 
     @staticmethod
     def rebuild_abstract(index: dict[str, list[int]] | None) -> str:
@@ -223,6 +228,8 @@ class OpenAlexClient:
         params: dict[str, Any] = {"search": query, "per-page": limit}
         if self.mailto:
             params["mailto"] = self.mailto
+        if self.api_key:
+            params["api_key"] = self.api_key
         body = await self.http.get_text(f"{self.base}/works", params, validate=_json_ok)
         return [p for p in (self.to_paper(item, query) for item in json.loads(body).get("results") or []) if p]
 

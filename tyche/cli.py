@@ -43,7 +43,7 @@ def build_services(config: TycheConfig):
     from tyche.pipeline import Services
 
     meter = UsageMeter()
-    specs = {role: config.model(role) for role in ("planner", "writer", "reviewer", "experiments")}
+    specs = {role: config.model(role) for role in ("planner", "writer", "reviewer", "experiments", "subject")}
     planner = OpenJiuwenLLM(specs["planner"], meter=meter)
     writer = OpenJiuwenLLM(specs["writer"], meter=meter)
     reviewer = OpenJiuwenLLM(specs["reviewer"], meter=meter)
@@ -59,7 +59,9 @@ def build_services(config: TycheConfig):
         engine = fixture_engine()
     else:
         exp_llm = OpenJiuwenLLM(specs["experiments"], meter=meter)
-        engine = OpenJiuwenEngine(exp_llm.openjiuwen_model, specs["experiments"], dict(config.get("experiments") or {}))
+        engine = OpenJiuwenEngine(
+            exp_llm.openjiuwen_model, specs["experiments"], dict(config.get("experiments") or {}), specs["subject"]
+        )
     names = sorted({s.model_name for s in specs.values()})
     services = Services(
         planner=planner, writer=writer, reviewer=reviewer, searchers=searchers, verifier=verifier, s2=s2,
@@ -213,7 +215,15 @@ async def _cmd_doctor(args: argparse.Namespace) -> int:
     for tool, path in latex_available().items():
         print(f"{tool}: {path or 'MISSING'}")
         problems += 0 if path else 1
-    for role in ("planner", "writer", "reviewer", "experiments"):
+    try:
+        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails import openjiuwen_reference_rail as ref
+
+        docs = ref._DEFAULT_ASSETS_ROOT
+        print(f"openjiuwen reference docs: {'present' if docs.is_dir() else 'MISSING (run scripts/tyche/install_dev.sh)'}")
+        problems += 0 if docs.is_dir() else 1
+    except Exception as exc:  # noqa: BLE001 - diagnostic only
+        print(f"openjiuwen reference docs: unknown ({type(exc).__name__})")
+    for role in ("planner", "writer", "reviewer", "experiments", "subject"):
         spec = config.model(role)
         has_key = bool(spec.api_key())
         problems += 0 if has_key else 1

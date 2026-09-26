@@ -13,7 +13,12 @@ models:
     api_key_env: API_KEY
     timeout: 600
     temperature: 0.4
-    max_tokens: 8192
+    # Reasoning models (DeepSeek V4, ...) spend part of max_tokens on hidden
+    # reasoning; a small cap returns empty answers.
+    max_tokens: 32768
+    # Extra JSON body fields sent with every request of this role, e.g.
+    # {thinking: {type: disabled}} to switch DeepSeek reasoning off.
+    extra_body: {}
   planner: {}
   writer: {}
   # A different model for reviewing reduces self-agreement bias. Leave empty
@@ -21,9 +26,12 @@ models:
   reviewer:
     model_name: ${TYCHE_REVIEW_MODEL_NAME:-}
     temperature: 0.0
-  # Model used by openjiuwen's experiment agents and by the generated
-  # experiment code (exported to it as API_KEY/API_BASE/MODEL_NAME).
-  experiments: {}
+  # Model used by openjiuwen's experiment agents (design, coding, reflection).
+  experiments:
+    model_name: ${TYCHE_EXPERIMENT_MODEL_NAME:-}
+  # Model the generated experiment code calls as its subject (exported to it as
+  # API_KEY/API_BASE/MODEL_NAME). Kept separate because experiments make many calls.
+  subject: {}
 
 workspace:
   # Runs, caches, and the cross-run memory database live here.
@@ -33,6 +41,7 @@ literature:
   sources: [arxiv, semantic_scholar, openalex]
   contact_email: ${TYCHE_CONTACT_EMAIL:-}
   semantic_scholar_api_key_env: S2_API_KEY
+  openalex_api_key_env: OPENALEX_API_KEY
   per_query_results: 12
   max_queries: 8
   prerank_pool: 60
@@ -67,6 +76,8 @@ experiments:
     - "Use small, controlled, reproducible tasks (synthetic or public benchmark subsets) that finish within the execution timeout."
     - "Record per-item outcomes in per_question so confidence intervals and paired tests can be computed."
     - "Never hard-code or simulate metric values; every number must come from executed runs."
+    - "The model behind API_KEY/API_BASE/MODEL_NAME may be a reasoning model whose hidden reasoning counts toward max_tokens: request max_tokens of at least 2048 per call, use only the final message content, and retry a call once if the content is empty."
+    - "Keep each variant's full run under about 600 model calls and run independent calls concurrently (at most 8 at a time) so it finishes well inside the execution timeout; use identical model settings for every variant."
 
 analysis:
   bootstrap_resamples: 2000
