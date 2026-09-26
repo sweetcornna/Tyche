@@ -172,11 +172,29 @@ def _item_values(
     return None
 
 
+_SEED_KEYS = ("seed", "run_seed", "trial_seed")
+# Fields that identify an item's content; if they differ for one id across seeds, the
+# id names different items per seed (generated data), not repeated trials of one item.
+_CONTENT_KEYS = ("gold", "gold_answer", "answer", "target", "question", "question_text", "prompt", "entity", "attribute")
+
+
 def _item_ids(items: list[dict[str, Any]]) -> list[str] | None:
     for key in _ITEM_ID_KEYS:
         if items and all(isinstance(i, dict) and key in i for i in items):
-            return [str(i[key]) for i in items]
+            ids = [str(i[key]) for i in items]
+            seed_key = next((s for s in _SEED_KEYS if all(s in i for i in items)), None)
+            if seed_key and len(set(ids)) < len(ids) and _ids_name_different_items(items, key, seed_key):
+                return [f"{i[seed_key]}:{i[key]}" for i in items]
+            return ids
     return None
+
+
+def _ids_name_different_items(items: list[dict[str, Any]], key: str, seed_key: str) -> bool:
+    content: dict[str, set[str]] = {}
+    for item in items:
+        signature = repr([item.get(k) for k in _CONTENT_KEYS if k in item])
+        content.setdefault(str(item[key]), set()).add(signature)
+    return any(len(signatures) > 1 for signatures in content.values())
 
 
 def _per_id_means(ids: list[str], values: np.ndarray) -> dict[str, float]:

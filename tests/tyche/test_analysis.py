@@ -105,3 +105,20 @@ def test_stratum_metrics_use_only_their_items():
     # A reported value the rows cannot reproduce gets no interval rather than a wrong one.
     assert result.variants["proposed"]["combined_accuracy"].n == 0
     assert any("combined_accuracy" in note for note in result.notes)
+
+
+def test_ids_reused_across_seeds_name_different_items():
+    def rows(flags, gold_prefix):
+        return [
+            {"seed": seed, "question_id": f"q{i}", "gold": f"{gold_prefix}{seed}-{i}", "correct": ok}
+            for seed in (1, 2)
+            for i, ok in enumerate(flags)
+        ]
+
+    variants = {
+        "proposed": {"accuracy": 0.75, "per_question": rows([1, 1, 1, 0], "g")},
+        "baseline": {"accuracy": 0.25, "per_question": rows([1, 0, 0, 0], "g")},
+    }
+    result = analyze(variants, plan_metrics=["accuracy"], resamples=200, permutations=200)
+    # Eight distinct generated items (4 per seed), not four items averaged over seeds.
+    assert result.comparisons[0].n == 8

@@ -80,7 +80,8 @@ experiments:
   constraints:
     - "This is a short paper: implement one proposed method and at most three baselines or ablations."
     - "Use small, controlled, reproducible tasks (synthetic or public benchmark subsets) that finish within the execution timeout."
-    - "Record per-item outcomes in per_question so confidence intervals and paired tests can be computed."
+    - "Record per-item outcomes in per_question so confidence intervals and paired tests can be computed: every row needs an id that is unique across seeds (for example seed:question), the grouping fields the metrics are split by (for example stratum), and the scored outcome of that item (for example a boolean correct, or the per-item value of each metric), so that the mean of the rows reproduces each reported metric."
+    - "Implement every baseline faithfully and competitively, as its proponents would; in the smoke test, check that no variant abstains or answers unknown on most items, and fix the implementation if one does."
     - "Never hard-code or simulate metric values; every number must come from executed runs."
     - "The model behind API_KEY/API_BASE/MODEL_NAME may be a reasoning model whose hidden reasoning counts toward max_tokens and can take several thousand tokens on counting or multi-step questions: request max_tokens of at least 8192 per call, use only the final message content, and if the content is empty retry once with twice the max_tokens."
     - "Report a metric that could not be computed (for example over an empty subset) as null or mark it false in a top-level `metric_defined` map; never write 0 as a placeholder."
