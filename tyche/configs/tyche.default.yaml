@@ -91,7 +91,7 @@ experiments:
     - "Report a metric that could not be computed (for example over an empty subset) as null or mark it false in a top-level `metric_defined` map; never write 0 as a placeholder."
     - "Record a call that still fails in that item's `error` field instead of silently scoring it wrong; keep failed items under 1% of every variant, since failed items are not evidence about the method."
     - "While implementing code, validate with the smoke test or a tiny subset only; never launch the full experiment there, because the execution stage runs every variant."
-    - "Make repeated model calls cache-friendly: put the fixed instructions and any context shared across items first, byte-identical in every call, and the per-item content last, so the provider's prompt cache serves the shared prefix."
+    - "Make repeated model calls cache-friendly: put the fixed instructions and any context shared across items first, byte-identical in every call, and the per-item content last, so the provider's prompt cache serves the shared prefix; record the cached prompt tokens the API reports (DeepSeek usage.prompt_cache_hit_tokens, OpenAI usage.prompt_tokens_details.cached_tokens) in the run diagnostics."
     - "Read credentials only from the environment and never print, log, or write API_KEY (or any part of it) to files or outputs."
     - "Keep each variant's full run under about 600 model calls and run independent calls concurrently (at most 8 at a time) so it finishes well inside the execution timeout; use identical model settings for every variant."
 
