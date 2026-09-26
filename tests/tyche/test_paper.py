@@ -246,3 +246,34 @@ async def test_all_sections_share_one_cacheable_system_prompt(memory, tmp_path):
     assert len(systems) == 1, "every section call must share the same system prefix"
     assert "<results_brief>" in systems.pop()
     assert all("<results_brief>" not in user for _, _, user in llm.calls)
+
+
+@needs_latex
+def test_wide_results_table_fits_the_text_width(tmp_path):
+    import subprocess
+
+    from tyche.analysis import analyze, results_table
+    from tyche.paper.latex import PaperSource, compile_pdf, write_build
+
+    names = [
+        "current_fact_accuracy", "stale_fact_rate", "provenance_query_accuracy",
+        "prompt_tokens_per_query", "historical_fact_accuracy",
+    ]
+    variants = {
+        v: {m: 0.5 + 0.1 * i + (1000 if "tokens" in m else 0) for i, m in enumerate(names)}
+        for v in ("proposed", "full_context_baseline", "retrieval_only_baseline")
+    }
+    variants["proposed"]["historical_fact_accuracy"] = 0.944
+    table = results_table(analyze(variants, plan_metrics=names), caption="Main results.")
+    bib = tmp_path / "refs.bib"
+    bib.write_text("@misc{k1, title={A}, author={B, C}, year={2024}}\n")
+    src = PaperSource(
+        title="Wide", abstract="An abstract.", sections={"experiments": "See Table~\\ref{tab:main}.\n" + table},
+        ai_statement="AI statement.", reproducibility="Repro.",
+    )
+    result = compile_pdf(write_build(src, tmp_path / "b", bib_path=bib, figures=[]))
+    assert result.ok, result.errors
+    log = (tmp_path / "b" / "main.log").read_text(errors="replace")
+    assert "Overfull \\hbox" not in log
+    text = subprocess.run(["pdftotext", "-layout", str(result.pdf), "-"], capture_output=True, text=True).stdout
+    assert "historical fact accuracy" in " ".join(text.split()) and "0.944" in text
