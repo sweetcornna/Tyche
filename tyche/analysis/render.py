@@ -15,7 +15,7 @@ def _metric_label(metric: str, lower: bool) -> str:
 
 
 def results_table(analysis: Analysis, *, caption: str, label: str = "tab:main") -> str:
-    metrics = analysis.metrics[:4]
+    metrics = analysis.metrics[:5]
     best: dict[str, str] = {}
     for metric in metrics:
         scored = []

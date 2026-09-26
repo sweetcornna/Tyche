@@ -267,7 +267,11 @@ def analyze(
     names = [proposed] + [n for n in names if n != proposed]
     numeric = {name: numeric_metrics(variants[name]) for name in names}
     shared = set.intersection(*(set(m) for m in numeric.values()))
-    ordered = [m for m in plan_metrics if m in shared] + sorted(shared - set(plan_metrics))
+    # Planned metrics first, then other metrics that differ between variants; metrics identical
+    # for every variant (budgets, conformance flags, ...) carry no comparison and go last.
+    extras = sorted(shared - set(plan_metrics))
+    constant = [m for m in extras if len({round(numeric[n][m], 12) for n in names}) == 1]
+    ordered = [m for m in plan_metrics if m in shared] + [m for m in extras if m not in constant] + constant
     notes = []
     missing = [m for m in plan_metrics if m not in shared]
     if missing:

@@ -137,3 +137,13 @@ def test_question_set_is_a_grouping_field():
     result = analyze(variants, plan_metrics=["historical_fact_accuracy"], resamples=200, permutations=200)
     assert result.variants["baseline"]["historical_fact_accuracy"].n == 4
     assert result.comparisons[0].n == 4 and abs(result.comparisons[0].diff - 0.75) < 1e-9
+
+
+
+def test_constant_metrics_are_ordered_after_informative_ones():
+    variants = {
+        "proposed": {"accuracy": 0.8, "call_budget_envelope": 600, "historical_accuracy": 0.9},
+        "baseline": {"accuracy": 0.6, "call_budget_envelope": 600, "historical_accuracy": 0.7},
+    }
+    result = analyze(variants, plan_metrics=["accuracy"], resamples=100, permutations=100)
+    assert result.metrics == ["accuracy", "historical_accuracy", "call_budget_envelope"]
