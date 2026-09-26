@@ -158,7 +158,9 @@ async def test_rejected_revision_rolls_back_text_and_ledger(tmp_path):
     async def review_fn(build, prior):
         return next(reviews)
 
-    composer = _FakeComposer([_build(True, ["0.83"]), _build(True, [])])
+    # Same blocker count, lower score: rejected. (A candidate that removes blockers is accepted;
+    # see test_removing_gate_blockers_beats_a_higher_score.)
+    composer = _FakeComposer([_build(True, ["0.83"]), _build(True, ["0.83"])])
     ledger = FindingsLedger()
     loop = RevisionLoop(composer, ledger, review_fn, out_dir=tmp_path, max_rounds=1, target=9.0, tolerance=0.15,
                         plateau_rounds=3, max_findings=8)
@@ -186,3 +188,20 @@ async def test_compiling_candidate_beats_a_non_compiling_draft(tmp_path):
     result = await loop.run()
     assert result.rounds[1]["accepted"] is True and result.best.compile.ok
     assert [e.section for e in ledger.entries if e.source == "gate:compile"] == ["analysis"]
+
+
+async def test_removing_gate_blockers_beats_a_higher_score(tmp_path):
+    from tyche.review import RevisionLoop
+
+    reviews = iter([_round(5.2), _round(4.4)])
+
+    async def review_fn(build, prior):
+        return next(reviews)
+
+    # Round 0 scores higher but fails a gate and could never be packaged; the revision passes.
+    composer = _FakeComposer([_build(True, ["0.25"]), _build(True, [])])
+    loop = RevisionLoop(composer, FindingsLedger(), review_fn, out_dir=tmp_path, max_rounds=1, target=9.0,
+                        tolerance=0.15, plateau_rounds=3, max_findings=8)
+    result = await loop.run()
+    assert result.rounds[1]["accepted"] is True
+    assert result.best.gates.passed

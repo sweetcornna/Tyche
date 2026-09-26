@@ -109,12 +109,12 @@ paper:
   human_review_statement: ""
   sections:
     abstract: {min_words: 120, max_words: 200}
-    introduction: {min_words: 400, max_words: 650}
-    related_work: {min_words: 250, max_words: 450, min_citations: 6}
-    method: {min_words: 400, max_words: 800}
-    experiments: {min_words: 350, max_words: 700}
-    analysis: {min_words: 200, max_words: 420}
-    conclusion: {min_words: 80, max_words: 180}
+    introduction: {min_words: 380, max_words: 550}
+    related_work: {min_words: 250, max_words: 400, min_citations: 6}
+    method: {min_words: 350, max_words: 600}
+    experiments: {min_words: 350, max_words: 600}
+    analysis: {min_words: 200, max_words: 400}
+    conclusion: {min_words: 80, max_words: 150}
   compile_repair_attempts: 3
   trim_attempts: 3
   latex_timeout: 180
