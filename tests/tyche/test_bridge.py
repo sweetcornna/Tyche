@@ -254,3 +254,12 @@ async def test_code_round_that_changes_nothing_is_retried_with_a_host_instructio
         assert source_digest(tmp_path / "missing") == ""
     finally:
         arw.set_project_root(None)
+
+
+def test_planned_metrics_are_never_mistaken_for_settings():
+    data = {"max_context_tokens": 512.0, "n_hallucinations": 3, "max_tokens": 8192, "metric_defined": {"n_hallucinations": True}}
+    assert numeric_metrics(data) == {}
+    assert numeric_metrics(data, keep={"max_context_tokens", "n_hallucinations"}) == {
+        "max_context_tokens": 512.0,
+        "n_hallucinations": 3.0,
+    }

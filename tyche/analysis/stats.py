@@ -265,7 +265,7 @@ def analyze(
     names = sorted(variants)
     proposed = pick_proposed(names, method_name)
     names = [proposed] + [n for n in names if n != proposed]
-    numeric = {name: numeric_metrics(variants[name]) for name in names}
+    numeric = {name: numeric_metrics(variants[name], keep=set(plan_metrics)) for name in names}
     shared = set.intersection(*(set(m) for m in numeric.values()))
     # Planned metrics first, then other metrics that differ between variants; metrics identical
     # for every variant (budgets, conformance flags, ...) carry no comparison and go last.

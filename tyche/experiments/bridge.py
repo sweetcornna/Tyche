@@ -28,7 +28,7 @@ import shutil
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
-from typing import Any, Iterator, Protocol
+from typing import Any, Collection, Iterator, Protocol
 
 import yaml
 
@@ -138,8 +138,12 @@ def failed_items(data: dict[str, Any]) -> tuple[int, int]:
     return failed, len(items)
 
 
-def numeric_metrics(data: dict[str, Any]) -> dict[str, float]:
-    """Top-level numeric metrics of one variant, excluding bookkeeping and undefined metrics."""
+def numeric_metrics(data: dict[str, Any], keep: Collection[str] = ()) -> dict[str, float]:
+    """Top-level numeric metrics of one variant, excluding bookkeeping and undefined metrics.
+
+    Names in ``keep`` (the research plan's metrics) are never mistaken for settings, even
+    if they look like one (``max_*``, ``n_*``, ...); an undefined metric is still dropped.
+    """
     undefined = {
         name
         for key in _DEFINED_KEYS
@@ -149,7 +153,9 @@ def numeric_metrics(data: dict[str, Any]) -> dict[str, float]:
     }
     out: dict[str, float] = {}
     for key, value in data.items():
-        if key in _BOOKKEEPING or key in undefined or _SETTING_KEY.match(key) or isinstance(value, bool):
+        if key in undefined or isinstance(value, bool):
+            continue
+        if key not in keep and (key in _BOOKKEEPING or _SETTING_KEY.match(key)):
             continue
         if isinstance(value, (int, float)):
             out[key] = float(value)

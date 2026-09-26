@@ -116,10 +116,17 @@ class HttpClient:
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         validate: Callable[[str], None] | None = None,
+        secret_params: dict[str, str] | None = None,
     ) -> str:
-        """GET a URL. ``validate`` must raise ValueError for an unusable body; such bodies are never cached."""
-        full = url + ("?" + urlencode(params, doseq=True) if params else "")
-        cached = self.cache.get(full)
+        """GET a URL. ``validate`` must raise ValueError for an unusable body; such bodies are never cached.
+
+        ``secret_params`` (API keys a service only accepts in the query string) are sent with
+        the request but never enter the cache key, error messages, or anything that is logged.
+        """
+        public = url + ("?" + urlencode(params, doseq=True) if params else "")
+        secrets = {k: v for k, v in (secret_params or {}).items() if v}
+        full = url + "?" + urlencode({**(params or {}), **secrets}, doseq=True) if secrets else public
+        cached = self.cache.get(public)
         if cached is not None:
             try:
                 if validate is not None:
@@ -127,7 +134,7 @@ class HttpClient:
                 self.cache_hits += 1
                 return cached
             except ValueError:
-                self.cache.delete(full)
+                self.cache.delete(public)
         host = urlsplit(full).hostname or ""
         delay = 1.5
         last_detail = ""
@@ -136,7 +143,7 @@ class HttpClient:
             try:
                 response = await self._client.get(full, headers=headers)
             except httpx.HTTPError as exc:
-                last_detail = f"{type(exc).__name__}: {exc}"
+                last_detail = _redact(f"{type(exc).__name__}: {exc}", secrets)
                 status = None
             else:
                 self.requests_made += 1
@@ -145,14 +152,20 @@ class HttpClient:
                     body = response.text
                     if validate is not None:
                         validate(body)  # ValueError propagates: a malformed 200 is not retried or cached
-                    self.cache.put(full, body)
+                    self.cache.put(public, body)
                     return body
                 if status == 404:
-                    raise HttpError(full, status, "not found")
-                last_detail = response.text[:200]
+                    raise HttpError(public, status, "not found")
+                last_detail = _redact(response.text[:200], secrets)
                 if status not in (429, 500, 502, 503, 504):
-                    raise HttpError(full, status, last_detail)
+                    raise HttpError(public, status, last_detail)
             if attempt < self.max_retries:
                 await asyncio.sleep(delay)
                 delay *= 2
-        raise HttpError(full, None, f"gave up after retries: {last_detail}")
+        raise HttpError(public, None, f"gave up after retries: {last_detail}")
+
+
+def _redact(text: str, secrets: dict[str, str]) -> str:
+    for value in secrets.values():
+        text = text.replace(value, "***")
+    return text

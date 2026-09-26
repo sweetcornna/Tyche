@@ -228,9 +228,11 @@ class OpenAlexClient:
         params: dict[str, Any] = {"search": query, "per-page": limit}
         if self.mailto:
             params["mailto"] = self.mailto
-        if self.api_key:
-            params["api_key"] = self.api_key
-        body = await self.http.get_text(f"{self.base}/works", params, validate=_json_ok)
+        # The key rides in the query string (OpenAlex accepts no header) but is kept out of
+        # cache keys and error messages.
+        body = await self.http.get_text(
+            f"{self.base}/works", params, validate=_json_ok, secret_params={"api_key": self.api_key}
+        )
         return [p for p in (self.to_paper(item, query) for item in json.loads(body).get("results") or []) if p]
 
 

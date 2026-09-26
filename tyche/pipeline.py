@@ -240,14 +240,12 @@ class Pipeline:
             analysis, setup_texts={"design": design, "plan": plan_markdown(plan), "evidence_quotes": quotes}
         )
         out = self.ws.stage_dir("analysis")
-        n_items = max((s.n for ms in analysis.variants.values() for s in ms.values()), default=0)
+        shown = [ms[m] for ms in analysis.variants.values() for m in analysis.metrics[:5]]
+        with_ci = sum(1 for s in shown if s.n)
+        interval = f" with the {analysis.confidence_percent}\\% bootstrap confidence-interval half-width over evaluation items"
         caption = (
             "Main results. Each cell is the mean"
-            + (
-                f" with the {analysis.confidence_percent}\\% bootstrap confidence-interval half-width over evaluation items"
-                if n_items
-                else ""
-            )
+            + (interval if shown and with_ci == len(shown) else (interval + " where per-item outcomes were available" if with_ci else ""))
             + "; the best value per column is bold, and arrows mark whether higher or lower is better."
         )
         (out / "table_main.tex").write_text(results_table(analysis, caption=caption), encoding="utf-8")
