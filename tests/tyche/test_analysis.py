@@ -79,3 +79,29 @@ def test_confidence_level_flows_into_brief_and_tables(results_dir):
     assert "80% CI" in results_brief(analysis) and "95% CI" not in results_brief(analysis)
     assert "80\\% CI" in comparison_table(analysis)
     assert build_registry(analysis).match("80") is not None
+
+
+def test_stratum_metrics_use_only_their_items():
+    def rows(correct_by_stratum):
+        out = []
+        for stratum, flags in correct_by_stratum.items():
+            for i, ok in enumerate(flags):
+                for pass_name in ("main", "matched_budget"):
+                    out.append({"question_id": f"{stratum}{i}", "stratum": stratum, "pass": pass_name, "correct": ok})
+        return out
+
+    proposed = rows({"count": [1, 1, 1, 0], "current": [1, 1, 1, 1]})
+    baseline = rows({"count": [1, 0, 0, 0], "current": [1, 1, 1, 1]})
+    variants = {
+        "proposed": {"count_accuracy": 0.75, "current_accuracy": 1.0, "combined_accuracy": 0.9, "per_question": proposed},
+        "baseline": {"count_accuracy": 0.25, "current_accuracy": 1.0, "combined_accuracy": 0.6, "per_question": baseline},
+    }
+    result = analyze(variants, plan_metrics=["count_accuracy"], resamples=200, permutations=200)
+    count = result.variants["proposed"]["count_accuracy"]
+    # Only the four main-pass "count" items, not all sixteen rows.
+    assert count.n == 4 and count.mean == 0.75
+    comparison = next(c for c in result.comparisons if c.metric == "count_accuracy")
+    assert comparison.n == 4 and abs(comparison.diff - 0.5) < 1e-9
+    # A reported value the rows cannot reproduce gets no interval rather than a wrong one.
+    assert result.variants["proposed"]["combined_accuracy"].n == 0
+    assert any("combined_accuracy" in note for note in result.notes)
