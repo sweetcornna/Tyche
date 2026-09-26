@@ -8,7 +8,7 @@ models:
   # Shared defaults. Per-role entries below override only the fields they set.
   default:
     provider: ${MODEL_PROVIDER:-OpenAI}
-    model_name: ${MODEL_NAME:-deepseek-v4-flash}
+    model_name: ${MODEL_NAME:-deepseek-flash}
     api_base: ${API_BASE:-https://api.deepseek.com}
     api_key_env: API_KEY
     timeout: 600

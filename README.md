@@ -98,8 +98,8 @@ tyche run --resume --run-id <run-id>
 
 - `--engine imported --results-dir <dir>`：使用团队自己跑出的 `<variant>.metrics.json`（可含逐条目结果 `per_question`），跳过自动实验。
 - `--set review.max_rounds=4`、`--set paper.max_main_pages=6`：覆盖任意配置项（默认值见 `tyche/configs/tyche.default.yaml`）。
-- 模型分角色配置（`models.<role>`，未设置的字段继承 `models.default`）：`planner`、`writer`、`reviewer`、`experiments`（openjiuwen 实验智能体）、`subject`（生成的实验代码通过 `API_KEY/API_BASE/MODEL_NAME` 调用的被测模型）。`TYCHE_REVIEW_MODEL_NAME`、`TYCHE_EXPERIMENT_MODEL_NAME` 可分别为评审与实验智能体指定更强的模型，例如 DeepSeek 下默认用 `deepseek-v4-flash`，评审/实验用 `deepseek-v4-pro`；评审使用不同模型还能降低自我认同偏差。
-- DeepSeek V4 是推理模型，隐藏推理会计入 `max_tokens`，默认上限为 32768；如需关闭推理，可设 `--set 'models.default.extra_body={"thinking":{"type":"disabled"}}'`。
+- 模型分角色配置（`models.<role>`，未设置的字段继承 `models.default`）：`planner`、`writer`、`reviewer`、`experiments`（openjiuwen 实验智能体）、`subject`（生成的实验代码通过 `API_KEY/API_BASE/MODEL_NAME` 调用的被测模型）。`TYCHE_REVIEW_MODEL_NAME`、`TYCHE_EXPERIMENT_MODEL_NAME` 可分别为评审与实验智能体指定更强的模型，DeepSeek 下默认所有角色都用最新的 `deepseek-flash`（DeepSeek-V4.1-Flash）；也可让评审改用 `deepseek-v4-pro`，用不同模型评审能降低自我认同偏差。
+- DeepSeek V4/V4.1 是推理模型，隐藏推理会计入 `max_tokens`，默认上限为 32768；如需关闭推理，可设 `--set 'models.default.extra_body={"thinking":{"type":"disabled"}}'`。
 - `tyche review paper.pdf`：用本地 7 维评审团评审任意论文 PDF。
 - `tyche lessons`：查看跨运行写作经验及其状态。
 
