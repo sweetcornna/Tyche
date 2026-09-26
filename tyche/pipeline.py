@@ -273,6 +273,12 @@ class Pipeline:
             return self.ws.load_text("experiment_design")
         return plan_markdown(self.plan())
 
+    def _reflection_text(self) -> str:
+        """The experiment loop's latest reflection, if the engine produced one."""
+        if self.ws.latest("reflection") is None:
+            return ""
+        return sanitize_untrusted(self.ws.load_text("reflection"))
+
     # -- shared writing context ------------------------------------------
     def _manifest(self) -> dict[str, Any]:
         return json.loads(self.ws.latest_path("source_manifest").read_text(encoding="utf-8"))
@@ -311,6 +317,7 @@ class Pipeline:
             design_excerpt=truncate_tokens(self._design_text(), 2500),
             labels=labels,
             run_id=self.run_id,
+            reflection_excerpt=truncate_tokens(self._reflection_text(), 1800),
         )
         return ctx, manifest
 
@@ -435,6 +442,7 @@ class Pipeline:
                 prior_findings=prior,
                 results_brief=ctx.results_brief,
                 cited_evidence=evidence,
+                experiment_reflection=ctx.reflection_excerpt,
             )
             await self._admit_requested_citations(round_.findings, uncited, composer, ctx)
             return round_

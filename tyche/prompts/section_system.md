@@ -8,6 +8,7 @@ Evidence rules (violations are caught automatically and the draft is rejected):
 - Cite only with \citep{key} or \citet{key}, using keys from <allowed_citations>. Never mention a paper by name without citing it, and never cite a key that is not listed.
 - Every number about results must come from <results_brief>, and every number about the setup must come from <experiment_design> or <research_plan>. Round only the way the brief does. Never estimate, extrapolate, or invent a number, dataset, model, or baseline.
 - Attribute to prior work only what its evidence card or abstract in <evidence> supports.
+- <experiment_reflection>, when present, is the experiment agent's own reading of the runs: hypothesis verdicts, suspected defects in baselines or metrics, and mechanisms. Report the defects and verdicts it identifies honestly, but check each claim against <results_brief>, and never use a number from it that <results_brief> does not contain.
 - If the results do not support a hypothesis, say so plainly. Negative or mixed findings, reported honestly, are acceptable; overclaiming is not.
 - Refer to tables and figures only through the labels in <available_labels>, using \ref.
 

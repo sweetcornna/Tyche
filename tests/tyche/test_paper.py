@@ -159,3 +159,38 @@ def test_sanitized_unicode_heavy_section_compiles(tmp_path):
     src = PaperSource(title="U", abstract="A.", sections={"introduction": body}, ai_statement="S.", reproducibility="R.")
     result = compile_pdf(write_build(src, tmp_path / "b", bib_path=bib, figures=[]))
     assert result.ok, result.errors
+
+
+def test_reflection_reaches_result_sections_only(memory, tmp_path):
+    from tyche.llm import ScriptedLLM
+    from tyche.paper.writer import SectionWriter, WritingContext
+    from tyche.planning import ResearchPlan
+    from tyche.selftest import PLAN
+
+    ctx = WritingContext(
+        plan=ResearchPlan.model_validate(PLAN),
+        citations=[],
+        synthesis={},
+        results_brief="- proposed accuracy 0.70",
+        design_excerpt="design",
+        labels={},
+        run_id="r1",
+        reflection_excerpt="Verdict: mixed; the latest-wins baseline was defective.",
+    )
+    writer = SectionWriter(
+        ScriptedLLM({}),
+        memory=memory,
+        contracts={},
+        budget=9000,
+        evidence_limit=4,
+        lessons_limit=2,
+        manifest_dir=tmp_path / "manifests",
+    )
+
+    def names(section):
+        return [b.name for b in writer._blocks(section, ctx, {}, None, None)]
+
+    assert "experiment_reflection" in names("analysis")
+    assert "experiment_reflection" in names("abstract")
+    assert "experiment_reflection" not in names("method")
+    assert "experiment_reflection" not in names("related_work")

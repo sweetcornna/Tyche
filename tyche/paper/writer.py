@@ -35,7 +35,7 @@ SECTION_GUIDANCE: dict[str, dict[str, Any]] = {
             "No citations and no LaTeX environments.",
             "State the main result with the exact number from the results brief.",
         ],
-        "uses": ["plan", "results", "digests"],
+        "uses": ["plan", "results", "reflection", "digests"],
     },
     "introduction": {
         "goal": "Motivate the problem, identify the precise gap left by prior work, state the idea, and preview "
@@ -45,7 +45,7 @@ SECTION_GUIDANCE: dict[str, dict[str, Any]] = {
             "Cite the most relevant prior work when stating the gap.",
             "Preview the main result honestly, including its uncertainty.",
         ],
-        "uses": ["plan", "survey", "results", "digests", "evidence"],
+        "uses": ["plan", "survey", "results", "reflection", "digests", "evidence"],
     },
     "related_work": {
         "goal": "Position the work against prior research, organized by the survey themes, ending each theme "
@@ -74,7 +74,7 @@ SECTION_GUIDANCE: dict[str, dict[str, Any]] = {
             "Report the main comparison with the confidence interval and p-value from the results brief.",
             "Describe the baselines so a reader knows why each is a fair comparison.",
         ],
-        "uses": ["plan", "design", "results", "digests"],
+        "uses": ["plan", "design", "results", "reflection", "digests"],
     },
     "analysis": {
         "goal": "Interpret the results: when and why the method helps or fails, trade-offs (e.g. accuracy vs. "
@@ -83,12 +83,12 @@ SECTION_GUIDANCE: dict[str, dict[str, Any]] = {
             "Include a \\paragraph{Limitations.} that names concrete limits of the evidence.",
             "Tie each interpretation to a specific number in the results brief.",
         ],
-        "uses": ["plan", "results", "digests", "evidence"],
+        "uses": ["plan", "results", "reflection", "digests", "evidence"],
     },
     "conclusion": {
         "goal": "What was shown, how strongly, and what it implies for building agents; one concrete next step.",
         "requirements": ["No new results and no citations."],
-        "uses": ["plan", "results", "digests"],
+        "uses": ["plan", "results", "reflection", "digests"],
     },
 }
 
@@ -104,6 +104,8 @@ class WritingContext:
     design_excerpt: str
     labels: dict[str, str]
     run_id: str
+    # The experiment loop's own reflection (verdict, suspected defects, mechanisms), if any.
+    reflection_excerpt: str = ""
 
 
 @dataclass
@@ -179,6 +181,8 @@ class SectionWriter:
             blocks.append(Block("results_brief", ctx.results_brief, required=True))
         if "design" in uses and ctx.design_excerpt:
             blocks.append(Block("experiment_design", ctx.design_excerpt, priority=10))
+        if "reflection" in uses and ctx.reflection_excerpt:
+            blocks.append(Block("experiment_reflection", ctx.reflection_excerpt, priority=12))
         if "survey" in uses:
             survey = {
                 "gap": ctx.synthesis.get("gap"),
