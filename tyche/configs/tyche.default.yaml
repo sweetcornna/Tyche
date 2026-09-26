@@ -74,6 +74,9 @@ experiments:
   # Model calls one coding cycle of openjiuwen's code agent may make (its factory
   # default of 15 is too few to write and smoke-test a multi-file experiment).
   code_agent_max_iterations: 80
+  # Outer rounds the code agent gets to finish before it must emit its completion
+  # promise; without a promise openjiuwen ends the task after one reply without tools.
+  code_agent_max_rounds: 4
   # Stop before analysis when more than this fraction of a variant's per_question
   # items carry an error (failed model calls), since they would be scored as wrong.
   max_failed_item_rate: 0.01

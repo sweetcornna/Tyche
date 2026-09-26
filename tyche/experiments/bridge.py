@@ -278,15 +278,25 @@ def mirror_read_first_inputs(project_root: Path, agent_workspace: Path, run_id: 
     return copied
 
 
-def code_implementation_agent(config: dict[str, Any], model: Any, max_iterations: int) -> Any:
-    """openjiuwen's CodeImplementationAgent with a usable inner turn budget.
+# The code agent must emit <promise>IMPLEMENTATION COMPLETE</promise> to end its task loop.
+CODE_DONE_PROMISE = "IMPLEMENTATION COMPLETE"
+
+
+def code_implementation_agent(
+    config: dict[str, Any], model: Any, max_iterations: int, max_rounds: int = 4
+) -> Any:
+    """openjiuwen's CodeImplementationAgent with a usable turn budget and a completion promise.
 
     ``create_code_agent`` defaults to 15 ReAct iterations per invoke, and without a
-    completion promise the outer task loop never starts a second round, so one
-    validation cycle ends after 15 model calls -- too few to write and smoke-test a
-    multi-file experiment. This subclass passes ``max_iterations`` explicitly through
-    the factory's public parameter and mirrors the "Read First" inputs into the sandbox.
+    completion promise the outer task loop ends as soon as the model replies without a
+    tool call. In live runs this ended cycles after 15 calls (no ``run.py`` yet) and, on
+    a design revision, after the agent had only *read* the old code -- which then passed
+    validation unchanged, so the revised design was never implemented. This subclass
+    passes ``max_iterations`` through the factory's public parameter, sets a completion
+    promise with a bounded number of outer rounds on the agent's TaskCompletionRail, and
+    mirrors the "Read First" inputs into the sandbox.
     """
+    from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
     from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common import workspace as arw
     from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.agent import (
         CodeImplementationAgent,
@@ -300,9 +310,16 @@ def code_implementation_agent(config: dict[str, Any], model: Any, max_iterations
             original = subagents.create_code_agent
             subagents.create_code_agent = functools.partial(original, max_iterations=max_iterations)
             try:
-                return super()._build_coding_agent(agent_workspace, run_id=run_id, cycle=cycle)
+                agent = super()._build_coding_agent(agent_workspace, run_id=run_id, cycle=cycle)
             finally:
                 subagents.create_code_agent = original
+            # The rail becomes the agent's task-loop rail when it starts; its evaluators are
+            # built then, so the promise and round cap set here take effect.
+            for rail in agent.find_rails_by_type((TaskCompletionRail,)):
+                rail.completion_promise = CODE_DONE_PROMISE
+                rail.allow_promise_details = True
+                rail.max_rounds = max_rounds
+            return agent
 
     return TycheCodeImplementationAgent(config, model=model)
 
@@ -339,17 +356,26 @@ class OpenJiuwenEngine:
             model=self.model,
             experiment_design=ExperimentDesignAgent(config, model=self.model, project_root_path=root),
             code_implementation=code_implementation_agent(
-                config, self.model, int(self.settings.get("code_agent_max_iterations", 80))
+                config,
+                self.model,
+                int(self.settings.get("code_agent_max_iterations", 80)),
+                int(self.settings.get("code_agent_max_rounds", 4)),
             ),
             reflection=ReflectionAgent(config, model=self.model),
         )
-        # A fresh manager run per attempt: a rerun must never mix in metrics or reflections
-        # from an earlier attempt's variants.
-        attempt = 1 + sum(1 for _ in (root / "experiments").glob(f"tyche-{run_id}-a*")) if (root / "experiments").is_dir() else 1
-        manager_run_id = f"tyche-{run_id}-a{attempt}"
+        # An interrupted attempt (no terminal record) is resumed where it stopped, keeping its
+        # design revisions and results. Otherwise a fresh manager run per attempt: a rerun must
+        # never mix in metrics or reflections from an earlier, finished attempt's variants.
+        arw.set_project_root(root)
+        manager_run_id = _resumable_manager_run(root, run_id)
+        resume = manager_run_id is not None
+        if manager_run_id is None:
+            attempt = 1 + len(_attempt_dirs(root, run_id))
+            manager_run_id = f"tyche-{run_id}-a{attempt}"
         with model_environment(self.subject):
             arw.set_project_root(root)
             terminal = await runtime.arun(
+                resume=resume,
                 topic=plan.working_title,
                 research_paths=["inputs/research_summary.md", "inputs/research_plan.md"],
                 run_id=manager_run_id,
@@ -383,6 +409,32 @@ class OpenJiuwenEngine:
             f"reason={getattr(terminal, 'failure_reason', '') or getattr(terminal, 'abort_reason', '')}"
             + (f"; ignored stale variants: {', '.join(stale)}" if stale else ""),
         )
+
+
+def _attempt_dirs(root: Path, run_id: str) -> list[Path]:
+    """This run's manager attempts (tyche-<run>-a<N>), oldest first."""
+    folder = root / "experiments"
+    if not folder.is_dir():
+        return []
+    found = []
+    for path in folder.glob(f"tyche-{run_id}-a*"):
+        suffix = path.name.rsplit("-a", 1)[-1]
+        if suffix.isdigit():
+            found.append((int(suffix), path))
+    return [path for _, path in sorted(found)]
+
+
+def _resumable_manager_run(root: Path, run_id: str) -> str | None:
+    """The latest attempt's manager run id if it was interrupted before reaching a terminal state."""
+    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.artifacts import try_load_state
+
+    attempts = _attempt_dirs(root, run_id)
+    if not attempts:
+        return None
+    state = try_load_state(attempts[-1].name)
+    if state is None or getattr(state, "terminal", None) is not None:
+        return None
+    return attempts[-1].name
 
 
 def _latest_execution_variants(manager_run_id: str) -> set[str] | None:

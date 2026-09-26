@@ -146,7 +146,7 @@ async def test_code_agent_gets_turn_budget_and_readable_inputs(tmp_path):
     try:
         spec = TycheConfig.load(env={"MODEL_NAME": "m", "API_BASE": "http://127.0.0.1:9"}).model("experiments")
         model = init_model("OpenAI", "m", "offline-key", "http://127.0.0.1:9", timeout=5)
-        agent = code_implementation_agent(build_openjiuwen_config({}, spec), model, 42)
+        agent = code_implementation_agent(build_openjiuwen_config({}, spec), model, 42, 3)
         workspace = arw.agent_workspace_dir("r1").resolve()
         workspace.mkdir(parents=True)
         factory = subagents.create_code_agent
@@ -154,6 +154,13 @@ async def test_code_agent_gets_turn_budget_and_readable_inputs(tmp_path):
         try:
             # openjiuwen's factory default is 15 inner iterations; ours must reach the agent.
             assert built.deep_config.max_iterations == 42
+            from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
+
+            from tyche.experiments.bridge import CODE_DONE_PROMISE
+
+            [rail] = built.find_rails_by_type((TaskCompletionRail,))
+            # The task loop must not end until the agent declares the implementation complete.
+            assert rail.completion_promise == CODE_DONE_PROMISE and rail.max_rounds == 3
             assert subagents.create_code_agent is factory
             assert (workspace / "inputs" / "research_plan.md").read_text() == "plan"
             assert (workspace / "experiments" / "r1" / "manager" / "original_task.md").read_text() == "task"
@@ -199,3 +206,22 @@ def test_run_settings_are_not_metrics():
         "budget_prompt_tokens": 1500, "n_sessions": 80, "call_failure_rate": 0.0,
     }
     assert numeric_metrics(data) == {"accuracy": 0.8}
+
+
+
+def test_interrupted_manager_attempt_is_resumed(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager import artifacts
+
+    from tyche.experiments.bridge import _resumable_manager_run
+
+    for name in ("tyche-r1-a1", "tyche-r1-a2", "tyche-r1-a10"):
+        (tmp_path / "experiments" / name).mkdir(parents=True)
+    states = {"tyche-r1-a10": SimpleNamespace(terminal=None)}
+    monkeypatch.setattr(artifacts, "try_load_state", lambda run_id: states.get(run_id))
+    # The numerically latest attempt (a10, not a2) was interrupted: resume it.
+    assert _resumable_manager_run(tmp_path, "r1") == "tyche-r1-a10"
+    states["tyche-r1-a10"] = SimpleNamespace(terminal=object())
+    assert _resumable_manager_run(tmp_path, "r1") is None
+    assert _resumable_manager_run(tmp_path, "other") is None
