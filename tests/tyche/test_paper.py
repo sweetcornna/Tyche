@@ -194,3 +194,16 @@ def test_reflection_reaches_result_sections_only(memory, tmp_path):
     assert "experiment_reflection" in names("abstract")
     assert "experiment_reflection" not in names("method")
     assert "experiment_reflection" not in names("related_work")
+
+
+def test_reproducibility_statement_claims_only_computed_statistics():
+    from tyche.paper.statements import reproducibility_statement
+
+    both = reproducibility_statement({"analysis_seed": 7})
+    assert "bootstrap" in both and "permutation" in both
+    none = reproducibility_statement(
+        {"analysis_seed": 7, "has_intervals": False, "has_paired_tests": False, "experiment_engine": "openjiuwen"}
+    )
+    assert "bootstrap" not in none and "permutation" not in none and "point estimates" in none
+    ci_only = reproducibility_statement({"analysis_seed": 7, "has_intervals": True, "has_paired_tests": False})
+    assert "bootstrap" in ci_only and "permutation" not in ci_only

@@ -50,6 +50,22 @@ _BOOKKEEPING = {
     "model_call_errors",
     "empty_content_retries",
     "n_errors",
+    # Run settings and run diagnostics, not results.
+    "temperature",
+    "top_p",
+    "max_tokens",
+    "concurrency",
+    "batch_size",
+    "elapsed_s",
+    "elapsed_seconds",
+    "wall_time_s",
+    "logical_call_count",
+    "retry_count",
+    "failed_call_count",
+    "failed_item_count",
+    "failed_item_fraction",
+    "n_items",
+    "n_seeds",
 }
 
 # Maps {metric: bool} by which experiment code marks metrics it could not compute

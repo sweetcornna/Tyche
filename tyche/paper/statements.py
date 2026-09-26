@@ -75,10 +75,18 @@ def reproducibility_statement(meta: dict[str, Any]) -> str:
         "provenance entry."
     ]
     seed = meta.get("analysis_seed")
-    if seed is not None:
+    intervals, paired = meta.get("has_intervals", True), meta.get("has_paired_tests", True)
+    if seed is not None and (intervals or paired):
+        methods = []
+        if intervals:
+            methods.append("confidence intervals use a percentile bootstrap")
+        if paired:
+            methods.append("paired tests use a sign-flip permutation test")
+        parts.append(" and ".join(methods).capitalize() + f", with a fixed random seed ({seed}).")
+    elif meta.get("experiment_engine") != "fixture":
         parts.append(
-            f"Confidence intervals use a percentile bootstrap and paired tests use a sign-flip permutation test, "
-            f"both with a fixed random seed ({seed})."
+            "The experiment output did not include per-item outcomes that reproduce the reported metrics, so "
+            "results are point estimates without confidence intervals or paired tests."
         )
     if meta.get("experiment_engine") == "fixture":
         parts.append("This document was generated from a synthetic selftest fixture and reports no real experiment.")

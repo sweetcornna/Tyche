@@ -301,10 +301,12 @@ class Pipeline:
             }
             for p in manifest.get("papers", [])
         ]
-        conf = f"{float(self.ws.load_json('analysis').get('confidence', 0.95)) * 100:g}"
+        analysis = self.ws.load_json("analysis")
+        conf = f"{float(analysis.get('confidence', 0.95)) * 100:g}"
         labels = {
             "tab:main": "main results table (all variants, all metrics)",
-            "fig:results": f"bar chart of the main results with {conf}% confidence intervals",
+            "fig:results": "bar chart of the main results"
+            + (f" with {conf}% confidence intervals" if _has_intervals(analysis) else " (point estimates, no intervals)"),
         }
         paired = self.ws.latest_path("table_paired").read_text(encoding="utf-8") if self.ws.latest("table_paired") else ""
         if paired.strip():
@@ -331,12 +333,25 @@ class Pipeline:
                     model = json.loads(line).get("model")
                     if model:
                         models.add(model)
+        analysis = self.ws.load_json("analysis") if self.ws.latest("analysis") is not None else {}
         return {
             "models": sorted(models),
             "experiment_engine": self.ws.meta("experiment_engine", "openjiuwen"),
             "analysis_seed": self.ws.meta("analysis_seed"),
+            "has_intervals": _has_intervals(analysis),
+            "has_paired_tests": bool(analysis.get("comparisons")),
             "sources": list(self.cfg.get("literature.sources") or ["arxiv", "semantic_scholar", "openalex"]),
         }
+
+    def _figure_caption(self) -> str:
+        """Describe the figure's error bars only if the analysis computed intervals."""
+        analysis = self.ws.load_json("analysis")
+        caption = "Mean performance of each variant"
+        if _has_intervals(analysis, analysis.get("metrics", [])[:3]):
+            caption += f" with {float(analysis.get('confidence', 0.95)) * 100:g}\\% bootstrap confidence intervals"
+        else:
+            caption += " (point estimates; no per-item intervals could be computed)"
+        return caption + "; the proposed method is shown in red."
 
     def _composer(self, ctx: WritingContext, stage: str) -> PaperComposer:
         """Build a composer whose bibliography and context manifests belong to ``stage`` alone.
@@ -361,10 +376,9 @@ class Pipeline:
             floats += (
                 "\n\\begin{figure}[t]\n\\centering\n\\includegraphics[width=\\linewidth]{figures/"
                 + figure.name
-                + "}\n\\caption{Mean performance of each variant with "
-                + f"{float(self.ws.load_json('analysis').get('confidence', 0.95)) * 100:g}"
-                + "\\% bootstrap confidence intervals; the "
-                "proposed method is shown in red.}\n\\label{fig:results}\n\\end{figure}\n"
+                + "}\n\\caption{"
+                + self._figure_caption()
+                + "}\n\\label{fig:results}\n\\end{figure}\n"
             )
         if "tab:paired" in ctx.labels:
             floats += "\n" + self.ws.latest_path("table_paired").read_text(encoding="utf-8")
@@ -714,3 +728,12 @@ class Pipeline:
             for f in gates["findings"]:
                 lines.append(f"- [{f['severity']}] {f['gate']}/{f['section']}: {f['message']}")
         return "\n".join(lines) + "\n"
+
+
+def _has_intervals(analysis: dict[str, Any], metrics: list[str] | None = None) -> bool:
+    """Whether the saved analysis holds a confidence interval for any (of the given) metrics."""
+    for summaries in (analysis.get("variants") or {}).values():
+        for metric, summary in summaries.items():
+            if (metrics is None or metric in metrics) and summary.get("ci_low") is not None:
+                return True
+    return False

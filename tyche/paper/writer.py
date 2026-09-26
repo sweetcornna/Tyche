@@ -71,8 +71,12 @@ SECTION_GUIDANCE: dict[str, dict[str, Any]] = {
         "goal": "Setup (task, data generation, baselines, metrics, protocol) followed by the main results.",
         "requirements": [
             "Reference every available table and figure label with \\ref.",
-            "Report the main comparison with the confidence interval and p-value from the results brief.",
-            "Describe the baselines so a reader knows why each is a fair comparison.",
+            "Before the results, state each hypothesis of the research plan with its predicted outcome; refer to "
+            "hypotheses only by labels defined here.",
+            "Report the main comparison with the confidence interval and p-value from the results brief when it "
+            "has them; if it has none, say the results are point estimates and do not claim significance.",
+            "Describe the baselines so a reader knows why each is a fair comparison, and report any baseline the "
+            "experiment reflection identifies as defective as such rather than as a competitive result.",
         ],
         "uses": ["plan", "design", "results", "reflection", "digests"],
     },
